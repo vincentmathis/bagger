@@ -5,14 +5,14 @@
 //! and is not intended to be used directly by end users. Developers who wish
 //! to implement a Scoop frontend or make use of Scoop's functionality in their
 //! own applications may use this crate. For end users, they may take a glance
-//! at [Hok], a reference implementation built on top of this crate, which
+//! at [bagger], a reference implementation built on top of this crate, which
 //! provides a command-line interface similar to Scoop.
 //!
 //! # Overview
 //!
 //! The primary type in this crate is a [`Session`], which is an entry point to
 //! this crate. A session instance is basically a handle to the global state of
-//! libscoop. Most of the functions exposed by this crate take a session as
+//! scoop_rs. Most of the functions exposed by this crate take a session as
 //! their first argument.
 //!
 //! ## Examples
@@ -21,14 +21,14 @@
 //! session, and print the root path of Scoop to stdout:
 //!
 //! ```rust
-//! use libscoop::Session;
+//! use scoop_rs::Session;
 //! let session = Session::new();
 //! let config = session.config();
 //! println!("{}", config.root_path().display());
 //! ```
 //!
 //! [Scoop]: https://scoop.sh/
-//! [Hok]: https://github.com/chawyehsu/hok
+//! [bagger]: https://github.com/vincentmathis/bagger
 #[macro_use]
 extern crate serde;
 

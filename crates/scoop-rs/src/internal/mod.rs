@@ -6,6 +6,7 @@ pub mod git;
 pub mod network;
 pub mod os;
 pub mod path;
+pub mod ps;
 
 /// FIXME: there is a wide knowledge of version comparsion,
 /// And of cause I can't implement all of them at one commit, so plese fix me.

@@ -1,5 +1,5 @@
 use clap::Parser;
-use libscoop::{operation, QueryOption, Session};
+use scoop_rs::{operation, QueryOption, Session};
 use std::{io::Write, process::Command};
 
 use crate::Result;

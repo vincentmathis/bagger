@@ -5,7 +5,7 @@ use crossterm::{
     terminal::{Clear, ClearType},
     ExecutableCommand,
 };
-use libscoop::{operation, Event, Session, SyncOption};
+use scoop_rs::{operation, Event, Session, SyncOption};
 
 use crate::{cui, util, Result};
 

@@ -1,6 +1,6 @@
 use clap::Parser;
 use crossterm::{cursor, ExecutableCommand};
-use libscoop::{operation, Event, Session};
+use scoop_rs::{operation, Event, Session};
 
 use crate::{cui, Result};
 

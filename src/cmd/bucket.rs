@@ -1,6 +1,6 @@
 use clap::{ArgAction, Parser, Subcommand};
 use crossterm::style::Stylize;
-use libscoop::{operation, Session};
+use scoop_rs::{operation, Session};
 use std::io::{stdout, Write};
 
 use crate::Result;

@@ -1,6 +1,6 @@
 use clap::{crate_description, crate_name, crate_version, Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
-use libscoop::Session;
+use scoop_rs::Session;
 use tracing_subscriber::{
     filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
@@ -32,7 +32,7 @@ use crate::Result;
     long_about = format!("{}
 
 If you find any bugs or have a feature request, please open an issue on
-GitHub: https://github.com/chawyehsu/hok/issues", crate_description!()),
+GitHub: https://github.com/vincentmathis/bagger/issues", crate_description!()),
     subcommand_required = true,
     arg_required_else_help = true,
     max_term_width = 100,
@@ -80,7 +80,7 @@ pub fn start() -> Result<()> {
     setup_logger(args.verbose.tracing_level_filter())?;
 
     let session = Session::default();
-    let user_agent = format!("Scoop/1.0 (+https://scoop.sh/) Hok/{}", crate_version!());
+    let user_agent = format!("Scoop/1.0 (+https://scoop.sh/) bagger/{}", crate_version!());
     let _ = session.set_user_agent(&user_agent);
 
     match args.command {
@@ -119,9 +119,9 @@ fn setup_logger(level_filter: LevelFilter) -> Result<()> {
         .from_env()?;
 
     // The custom `HOK_LOG_LEVEL` environment variable was introduced to set the
-    // log level for hok since the first version.
+    // log level for bagger since the first version.
     if let Ok(level) = std::env::var("HOK_LOG_LEVEL") {
-        layer_env_filter = layer_env_filter.add_directive(format!("libscoop={level}").parse()?);
+        layer_env_filter = layer_env_filter.add_directive(format!("scoop_rs={level}").parse()?);
     }
 
     layer_env_filter = layer_env_filter

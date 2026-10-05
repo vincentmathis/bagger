@@ -11,7 +11,7 @@
 //! # Examples
 //!
 //! ```rust
-//! use libscoop::{Session, operation};
+//! use scoop_rs::{Session, operation};
 //! let session = Session::new();
 //! let buckets = operation::bucket_list(&session).expect("failed to get buckets");
 //! println!("{} bucket(s)", buckets.len());

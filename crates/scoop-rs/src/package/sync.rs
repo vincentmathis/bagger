@@ -543,32 +543,27 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         let config = session.config();
         let apps_dir = config.root_path().join("apps");
 
-        // Log packages requiring PowerShell scripts that will be skipped
+        // Log packages requiring PowerShell scripts
         let script_pkgs = packages
             .iter()
             .filter(|p| p.has_install_script())
             .map(|p| p.name().to_owned())
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>();
         if !script_pkgs.is_empty() {
             info!(
-                "skipping packages requiring PowerShell scripts: {}",
-                script_pkgs
+                "packages requiring PowerShell scripts: {}",
+                script_pkgs.join(", ")
             );
         }
 
-        let packages_to_commit: Vec<&Package> = packages
-            .iter()
-            .filter(|p| !p.has_install_script())
-            .cloned()
-            .collect();
-
-        for pkg in packages_to_commit.iter() {
+        for pkg in packages.iter() {
+            eprintln!("DEBUG: starting commit for {}", pkg.name());
             if let Some(tx) = session.emitter() {
                 let _ = tx.send(Event::PackageCommitStart(pkg.name().to_owned()));
             }
 
             let working_dir = apps_dir.join(pkg.name()).join(pkg.version());
+            eprintln!("DEBUG: working_dir = {}", working_dir.display());
             internal::fs::ensure_dir(&working_dir)?;
 
             let filenames = pkg.download_filenames();
@@ -581,12 +576,27 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                     continue;
                 }
                 let dst = working_dir.join(filename);
+                eprintln!("DEBUG: copying {}", src.display());
                 let _ = std::fs::remove_file(&dst);
                 std::fs::copy(&src, &dst)?;
             }
+            eprintln!("DEBUG: running pre_install");
+            if let Some(pre_install) = pkg.manifest().pre_install() {
+                internal::ps::invoke_script(session, pkg, "install", &pre_install, &working_dir)?;
+            }
 
-            // Extract archives in the working directory
-            extract_package(session, pkg, &working_dir)?;
+            // Run installer script if present (replaces standard extraction)
+            if let Some(installer) = pkg.manifest().installer() {
+                if let Some(script) = installer.script() {
+                    internal::ps::invoke_script(session, pkg, "install", &script, &working_dir)?;
+                } else {
+                    // No script but has installer - fall back to standard extraction
+                    extract_package(session, pkg, &working_dir)?;
+                }
+            } else {
+                // Standard extraction
+                extract_package(session, pkg, &working_dir)?;
+            }
 
             // Handle extract_dir/extract_to from manifest
             handle_extract_location(session, pkg, &working_dir)?;
@@ -633,6 +643,22 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 
             // Set environment variables and path
             env::install(session, pkg)?;
+
+            // Run post_install script if present
+            if let Some(post_install) = pkg.manifest().post_install() {
+                let post_install_dir = if config.no_junction() {
+                    apps_dir.join(pkg.name()).join(pkg.version())
+                } else {
+                    apps_dir.join(pkg.name()).join("current")
+                };
+                internal::ps::invoke_script(
+                    session,
+                    pkg,
+                    "install",
+                    &post_install,
+                    &post_install_dir,
+                )?;
+            }
 
             if let Some(tx) = session.emitter() {
                 let _ = tx.send(Event::PackageCommitDone(pkg.name().to_owned()));
@@ -906,19 +932,6 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
 
     let transaction = Transaction::default();
 
-    // TODO: PowerShell hosting with execution context is not supported yet.
-    // Perhaps at present we could call Scoop to do the removal for packages
-    // using PS scripts...
-    let (packages_with_script, _packages): (Vec<_>, Vec<_>) =
-        packages.iter().partition(|p| p.has_uninstall_script());
-
-    // TODO: support removal of packages with PowerShell script
-    if !packages_with_script.is_empty() {
-        let msg = format!("Found package(s) using PowerShell script:\n  {}\nRemoval of package with PowerShell script is not yet supported.",
-        packages_with_script.iter().map(|p| p.name()).collect::<Vec<_>>().join("  "));
-        return Err(Error::Custom(msg));
-    }
-
     transaction.set_remove(packages);
 
     let assume_yes = options.contains(&SyncOption::AssumeYes);
@@ -957,8 +970,34 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
 
             let app_dir = root_dir.join("apps").join(package.name());
 
-            // TODO: pre_uninstall
-            // TODO: uninstaller
+            // Run pre_uninstall script if present
+            let uninstall_dir = if config.no_junction() {
+                app_dir.join(package.installed_version().unwrap_or(package.version()))
+            } else {
+                app_dir.join("current")
+            };
+            if let Some(pre_uninstall) = package.manifest().pre_uninstall() {
+                internal::ps::invoke_script(
+                    session,
+                    package,
+                    "uninstall",
+                    &pre_uninstall,
+                    &uninstall_dir,
+                )?;
+            }
+
+            // Run uninstaller script if present
+            if let Some(uninstaller) = package.manifest().uninstaller() {
+                if let Some(script) = uninstaller.script() {
+                    internal::ps::invoke_script(
+                        session,
+                        package,
+                        "uninstall",
+                        &script,
+                        &uninstall_dir,
+                    )?;
+                }
+            }
 
             shim::remove(session, package)?;
             shortcut::remove(session, package)?;
@@ -969,7 +1008,16 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
             let current_lnk = app_dir.join("current");
             internal::fs::remove_symlink(current_lnk)?;
 
-            // TODO: post_uninstall
+            // Run post_uninstall script if present
+            if let Some(post_uninstall) = package.manifest().post_uninstall() {
+                internal::ps::invoke_script(
+                    session,
+                    package,
+                    "uninstall",
+                    &post_uninstall,
+                    &uninstall_dir,
+                )?;
+            }
 
             // Remove the app directory
             internal::fs::remove_dir(app_dir)?;

@@ -27,7 +27,7 @@ pub struct DownloadSize {
 
 /// A set of packages to download.
 pub struct PackageSet<'a> {
-    /// Associated libscoop session.
+    /// Associated scoop_rs session.
     session: &'a Session,
 
     /// Packages with intent to download.
