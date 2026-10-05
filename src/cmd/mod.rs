@@ -22,6 +22,7 @@ mod unhold;
 mod uninstall;
 mod update;
 mod upgrade;
+mod which;
 
 use crate::Result;
 
@@ -74,6 +75,7 @@ pub enum Command {
     #[clap(alias = "u")]
     Update(update::Args),
     Upgrade(upgrade::Args),
+    Which(which::Args),
 }
 
 /// CLI entry point
@@ -103,6 +105,7 @@ pub fn start() -> Result<()> {
         Command::Uninstall(args) => uninstall::execute(args, &session),
         Command::Update(args) => update::execute(args, &session),
         Command::Upgrade(args) => upgrade::execute(args, &session),
+        Command::Which(args) => which::execute(args, &session),
     }
 }
 
