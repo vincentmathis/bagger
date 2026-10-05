@@ -30,7 +30,7 @@ Legend:
 | `bagger status` | [x] | Show held, upgradable, and running apps |
 | `bagger which <command>` | [ ] | Find which app owns an executable |
 | `bagger prefix <app>` | [ ] | Show installation path for an app |
-| `bagger checkup` | [ ] | Check for scoop updates and app updates |
+| `bagger checkup` | [x] | Check for updates, report held/running/upgradable apps |
 | `bagger reset <app>` | [x] | Reset an installed package to a specific version or re-extract |
 
 ### Bucket Commands
