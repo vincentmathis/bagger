@@ -26,9 +26,14 @@ pub struct Args {
     /// Escape hold to allow to uninstall held package(s)
     #[arg(short = 'S', long, action = ArgAction::SetTrue)]
     escape_hold: bool,
+    /// Uninstall globally installed app(s) (requires admin rights)
+    #[arg(short = 'g', long, action = ArgAction::SetTrue)]
+    global: bool,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    crate::util::apply_global_flag(args.global, session)?;
+
     let queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     let mut options = vec![SyncOption::Remove];
 

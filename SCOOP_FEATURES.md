@@ -15,10 +15,10 @@ Legend:
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
-| `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated) |
-| `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal |
+| `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated); `-g/--global` installs for all users (admin) |
+| `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal, `-g/--global` |
 | `bagger update <app>` | [x] | Single app update |
-| `bagger upgrade` | [x] | Upgrade all installed apps |
+| `bagger upgrade` | [x] | Upgrade all installed apps; `-g/--global` for global scope |
 | `bagger search <query>` | [x] | Search across all buckets |
 | `bagger list` | [x] | List installed apps; supports `--upgradable` |
 | `bagger info <app>` | [x] | Show manifest info for any app |
@@ -235,7 +235,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Multiple architecture support | [x] | 32bit, 64bit, arm64 |
 | Cross-bucket package replacement | [x] | When package moves buckets |
 | Candidate selection (multi-bucket) | [x] | Interactive or auto-select |
-| Global app installation | [~] | Global path defined, but no `--global` flag on CLI |
+| Global app installation | [x] | **Implemented** - `-g/--global` on install/uninstall/upgrade scopes the session root to `global_path` (admin-gated); shims/shortcuts/persist/env follow automatically; cache stays user-scoped |
 | Isolated app installation | [x] | **Implemented** - `bagger install <manifest-url|path.json>` installs without a bucket (deps resolve from buckets, `__isolated__` marker in install.json) |
 | Aria2 integration | [x] | **Implemented** - `aria2c` used when `aria2-enabled` + binary on PATH (split/connections/cookie/proxy/extra-opts honored), curl fallback + optional missing-binary warning |
 | SQLite manifest cache | [x] | **Implemented** - opt-in via `use_sqlite_cache`; raw JSON keyed by (bucket, name) with mtime+size invalidation, shared across query threads |
@@ -270,7 +270,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 ## Missing Features (Medium Priority)
 
-1. **Global app installs** (`--global` flag) - Install to `ProgramData` (requires threading a root-dir override through sync/shim/shortcut/env/persist)
+- (none — all tracked features implemented; `--global` covered install/uninstall/upgrade/cleanup)
 
 ## Previously Missing - Now Implemented (this iteration)
 
@@ -281,6 +281,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 11. **Aria2 download manager** - downloads delegated to `aria2c` when `aria2-enabled` is set and the binary is on PATH (honors split/max-connection/min-split/retry-wait/cookie/proxy/extra options); warns when enabled-but-missing if `aria2-warning-enabled`, otherwise curl backend is used
 12. **Isolated package installs** - `bagger install <url|path.json>` fetches/parses the manifest, derives the app name from the basename, resolves deps from buckets, and records no bucket in install.json (`__isolated__` marker)
 13. **SQLite manifest caching** - `use_sqlite_cache` caches bucket manifest JSON in `<cache>/manifests.db` keyed by (bucket, name) with mtime+size invalidation; failures fall back to disk parsing
+14. **Global app installs** - `-g/--global` on install/uninstall/upgrade (plus existing cleanup support) scopes the session root to `global_path` via a runtime-only config override; admin rights required
 
 ## Notes
 

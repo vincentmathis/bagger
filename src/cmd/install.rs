@@ -48,9 +48,14 @@ pub struct Args {
     /// Skip package integrity check
     #[arg(long, action = ArgAction::SetTrue)]
     no_hash_check: bool,
+    /// Install globally for all users (requires admin rights)
+    #[arg(short = 'g', long, action = ArgAction::SetTrue)]
+    global: bool,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    crate::util::apply_global_flag(args.global, session)?;
+
     let mut options = vec![];
 
     if args.assume_yes {

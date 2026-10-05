@@ -1,3 +1,5 @@
+use crate::Result;
+
 /// Convert bytes to KB/MB/GB representation.
 pub fn humansize(length: u64, with_unit: bool) -> String {
     let gb: f64 = 2.0_f64.powf(30_f64);
@@ -76,4 +78,27 @@ pub(crate) fn is_admin() -> bool {
     }
 
     is_member.as_bool()
+}
+
+/// Enable global scope when `--global` was passed.
+///
+/// Global operations target `%ProgramData%\scoop` (all users) and require
+/// admin rights. Errors otherwise, or when the session config is in use.
+///
+/// This must be called before any `session.config()` borrow is taken and
+/// before event threads are spawned.
+pub(crate) fn apply_global_flag(global: bool, session: &scoop_rs::Session) -> Result<()> {
+    if !global {
+        return Ok(());
+    }
+
+    if !is_admin() {
+        return Err(anyhow::anyhow!(
+            "you need admin rights to manage global apps"
+        ));
+    }
+
+    session
+        .set_global(true)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }

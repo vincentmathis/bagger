@@ -36,7 +36,11 @@ impl ConfigBuilder {
         std::fs::File::open(&path)?.read_to_end(&mut buf)?;
 
         let inner = serde_json::from_slice(&buf)?;
-        let config = Config { path, inner };
+        let config = Config {
+            path,
+            inner,
+            root_override: None,
+        };
         Ok(config)
     }
 }
@@ -54,6 +58,11 @@ pub struct Config {
 
     /// Inner config data.
     inner: ConfigInner,
+
+    /// Runtime root directory override (e.g. for `--global` installs).
+    ///
+    /// This is never serialized; it only affects [`Config::root_path`].
+    root_override: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -260,9 +269,23 @@ impl Config {
     /// This is the root directory of a Scoop installation, by default the value
     /// is `$HOME/scoop`. It may be changed by setting the `SCOOP` environment
     /// variable.
+    ///
+    /// When a runtime root override is set (e.g. via `--global` installs),
+    /// the override is returned instead.
     #[inline]
     pub fn root_path(&self) -> &Path {
-        self.root_path.as_path()
+        self.root_override
+            .as_deref()
+            .unwrap_or_else(|| self.root_path.as_path())
+    }
+
+    /// Set or clear the runtime root directory override.
+    ///
+    /// This is crate-internal state used to scope an operation (such as a
+    /// `--global` install) at the global root. It is never persisted to the
+    /// config file.
+    pub(crate) fn set_root_override<P: AsRef<Path>>(&mut self, path: Option<P>) {
+        self.root_override = path.map(|p| p.as_ref().to_owned());
     }
 
     /// Get the global Scoop installation directory.
@@ -502,6 +525,7 @@ impl Default for Config {
         Config {
             path: default::config_path(),
             inner,
+            root_override: None,
         }
     }
 }

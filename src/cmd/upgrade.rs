@@ -30,9 +30,14 @@ pub struct Args {
     /// Skip package integrity check
     #[arg(long, action = ArgAction::SetTrue)]
     no_hash_check: bool,
+    /// Upgrade globally installed app(s) (requires admin rights)
+    #[arg(short = 'g', long, action = ArgAction::SetTrue)]
+    global: bool,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    crate::util::apply_global_flag(args.global, session)?;
+
     let mut queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     if queries.is_empty() {
         queries.push("*");

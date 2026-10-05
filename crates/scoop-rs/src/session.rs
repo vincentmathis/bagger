@@ -105,6 +105,28 @@ impl Session {
         self.config.try_borrow_mut().map_err(|_| Error::ConfigInUse)
     }
 
+    /// Scope subsequent operations to the global Scoop root.
+    ///
+    /// When `global` is true, [`Config::root_path`][1] returns the global
+    /// installation directory (e.g. `C:\ProgramData\scoop`) instead of the
+    /// user root, so installs, uninstalls and upgrades target all users.
+    /// Pass `false` (the default) to restore user scope.
+    ///
+    /// The override is runtime-only and is never persisted to `config.json`.
+    /// The download cache stays user-scoped.
+    ///
+    /// [1]: crate::config::Config::root_path
+    pub fn set_global(&self, global: bool) -> Fallible<()> {
+        let mut config = self.config_mut()?;
+        if global {
+            let global_path = config.global_path().to_owned();
+            config.set_root_override(Some(global_path));
+        } else {
+            config.set_root_override::<&Path>(None);
+        }
+        Ok(())
+    }
+
     /// Get the event bus for the session.
     ///
     /// The event bus is used for transmitting [`events`][1] between the session
@@ -143,5 +165,23 @@ impl Session {
         self.user_agent
             .set(user_agent.to_owned())
             .map_err(|_| Error::UserAgentAlreadySet)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_scope_overrides_root() {
+        let session = Session::new();
+        let user_root = session.config().root_path().to_owned();
+        let global_root = session.config().global_path().to_owned();
+
+        session.set_global(true).unwrap();
+        assert_eq!(session.config().root_path(), global_root.as_path());
+
+        session.set_global(false).unwrap();
+        assert_eq!(session.config().root_path(), user_root.as_path());
     }
 }
