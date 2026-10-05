@@ -83,6 +83,11 @@ pub enum Error {
     #[error("package '{0}' is broken")]
     PackageHoldBrokenInstall(String),
 
+    /// Thrown when a package has running processes and the
+    /// `ignore_running_processes` config is not enabled.
+    #[error("package '{0}' has running process(es): {1}\nStop them or set 'ignore_running_processes' to true to proceed")]
+    PackageRunningProcesses(String, String),
+
     /// A custom error.
     #[error("{0}")]
     Custom(String),

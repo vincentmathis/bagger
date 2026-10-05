@@ -52,6 +52,22 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                         .map(|v| v.join(","))
                         .unwrap_or("<no shims>".to_owned())
                 );
+                // Dependencies (includes runtime deps)
+                let deps = pkg.dependencies();
+                println!(
+                    "Dependencies: {}",
+                    if deps.is_empty() {
+                        "<none>".to_owned()
+                    } else {
+                        deps.join(", ")
+                    }
+                );
+                // Explicit runtime deps
+                if let Some(runtime) = pkg.manifest().runtime() {
+                    if !runtime.is_empty() {
+                        println!("Runtime: {}", runtime.join(", "));
+                    }
+                }
 
                 if idx != (length - 1) {
                     println!();

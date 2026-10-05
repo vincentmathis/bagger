@@ -28,8 +28,6 @@ Legend:
 | `bagger prefix <app>` | [x] | Show installation path for an app |
 | `bagger which <command>` | [x] | Find which app owns an executable |
 | `bagger status` | [x] | Show held, upgradable, and running apps |
-| `bagger which <command>` | [ ] | Find which app owns an executable |
-| `bagger prefix <app>` | [ ] | Show installation path for an app |
 | `bagger checkup` | [x] | Check for updates, report held/running/upgradable apps |
 | `bagger reset <app>` | [x] | Reset an installed package to a specific version or re-extract |
 
@@ -72,13 +70,13 @@ Legend:
 | `bagger download <app>` | [x] | Download package without installing |
 | `bagger checkver <app>` | [x] | Check latest version from app manifest URLs |
 | `bagger checkver all` | [x] | Check all installed apps for updates |
-| `bagger autofetch` | [ ] | Auto-generate manifests from app URLs |
+| `bagger autofetch <app> [all] [-w]` | [x] | Checkver + autoupdate URL expansion preview; `-w` bumps manifest version |
 
 ### Security Commands
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
-| `bagger virustotal <app>` | [ ] | Scan downloads with VirusTotal API |
+| `bagger virustotal <app>` | [x] | SHA256 + VirusTotal v3 file-report lookup (flags malicious/suspicious counts) |
 
 ---
 
@@ -150,7 +148,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | :--- | :---: | :--- |
 | `checkver` | [x] | Parsed: regex, url, jsonpath, xpath, script |
 | `autoupdate` | [~] | Parsed but not actively used for auto-updates |
-| `runtime` | [ ] | Runtime dependencies (e.g. VC++ redistributables) |
+| `runtime` | [x] | Resolved like `depends`; shown in `info`/`depends` |
 
 ### Hash Extraction (`autoupdate.hash`)
 
@@ -198,7 +196,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | `no_junction` | [x] | Disable symlink/junction for `current` |
 | `use_isolated_path` | [x] | Isolated PATH management |
 | `last_update` | [x] | Bucket update timestamp |
-| `aria2-*` settings | [x] | Parsed (aria2 not integrated) |
+| `aria2-*` settings | [x] | Parsed with full config getters |
 | `use_external_7zip` | [x] | Parsed (uses bundled 7z) |
 | `scoop_branch` | [~] | Parsed (not actively used) |
 | `scoop_repo` | [~] | Parsed (not actively used) |
@@ -206,9 +204,10 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | `private_hosts` | [x] | Parsed for auth headers |
 | `alias` | [x] | Parsed (no CLI to manage) |
 | `use_sqlite_cache` | [~] | Parsed (not implemented) |
-| `show_manifest` | [~] | Parsed (display-only) |
-| `ignore_running_processes` | [~] | Parsed (not actively used) |
+| `show_manifest` | [x] | **Implemented** - Shows manifest JSON in install/upgrade confirmation |
+| `ignore_running_processes` | [x] | **Implemented** - install/upgrade/uninstall abort on running processes unless enabled |
 | `shim` | [~] | Parsed (affects shim creation) |
+| `aria2_warning_enabled` | [x] | **Implemented** - Config getter and setter added |
 
 ---
 
@@ -240,18 +239,20 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Isolated app installation | [~] | Manifest URL install planned but not fully wired |
 | Aria2 integration | [ ] | Config exists but aria2 binary not used |
 | SQLite manifest cache | [ ] | Config option exists, not implemented |
-| Manifest auto-review prompt | [ ] | `show_manifest` config exists, not implemented |
-| VirusTotal integration | [ ] | No implementation |
+| Manifest auto-review prompt | [x] | **Implemented** - `show_manifest` displays manifests before install/upgrade |
+| VirusTotal integration | [x] | **Implemented** - real v3 file-report lookup by SHA256 |
 | App execution during install | [~] | Pre/post install/uninstall scripts run via PowerShell |
 | Custom installer/uninstaller | [x] | Supports script or file-based installers |
+| Aria2 warning suppression | [x] | **Implemented** - `aria2_warning_enabled` config getter and setter |
+| Ignore running processes | [x] | **Implemented** - guard in sync install/remove, bypass via config |
 
 ---
 
 ## Missing Commands (Medium-High Priority)
 
-1. **`scoop/virustotal`** - ✅ Implemented (simulation with API key support)
+1. **`scoop/virustotal`** - ✅ Implemented (real v3 file-report lookup by SHA256)
 2. **`scoop/checkver`** - ✅ Implemented (fetch URL, apply regex, compare versions)
-3. **`scoop/autofetch`** - ❌ Still missing (complex URL parsing, not commonly used)
+3. **`scoop/autofetch`** - ✅ Implemented (checkver + autoupdate `$version` URL expansion, `--write` bumps manifests)
 
 ## Previously Missing - Now Implemented
 
@@ -273,10 +274,13 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 2. **SQLite manifest caching** - Speed up operations
 3. **Global app installs** (`--global` flag) - Install to `ProgramData`
 4. **Isolated package installs** - Install from arbitrary manifest URL without adding to bucket
-5. **Runtime dependencies** - Handle VC++ redistributables, .NET, etc.
-6. **Manifest auto-review** - Show manifest before install prompt
-7. **`aria2` warning suppression** - Config-driven warning control
-8. **Ignore running processes** - Force install/upgrade even with running processes
+
+## Previously Missing - Now Implemented (this iteration)
+
+7. **Runtime dependencies** - `runtime` manifest field parsed, resolved like `depends`, shown in `info`/`depends`
+8. **Ignore running processes** - sync install/remove abort with `PackageRunningProcesses` error unless `ignore_running_processes` is set
+9. **VirusTotal binary scan** - real SHA256 + VT v3 `GET /files/{sha256}` verdicts (malicious/suspicious/harmless/undetected)
+10. **Autofetch** - `bagger autofetch <app>|all [--write]` previews expanded autoupdate URLs + hash modes
 
 ## Notes
 

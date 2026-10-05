@@ -7,9 +7,9 @@ pub(crate) mod sync;
 use once_cell::unsync::OnceCell;
 use std::{fmt, path::PathBuf};
 
-pub use manifest::{HashString, InstallInfo, License, Manifest};
+pub use manifest::{Autoupdate, Checkver, HashString, InstallInfo, License, Manifest};
 pub use query::QueryOption;
-pub use sync::SyncOption;
+pub use sync::{SyncOption, Transaction};
 
 use crate::{constant::ISOLATED_PACKAGE_BUCKET, internal};
 

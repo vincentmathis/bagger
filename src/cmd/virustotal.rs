@@ -1,5 +1,6 @@
 use clap::Parser;
 use crossterm::style::Stylize;
+use scoop_rs::operation;
 use std::path::PathBuf;
 
 use crate::Result;
@@ -33,6 +34,7 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
 
     let config = session.config();
     let cache_dir = PathBuf::from(config.root_path()).join("cache");
+    drop(config);
 
     if !cache_dir.exists() {
         eprintln!("Cache directory not found: {}", cache_dir.display());
@@ -67,27 +69,66 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
 
     println!("{}", "VirusTotal scan".bold());
     println!("Package: {}", args.package.green());
-    println!("API key: {}****", &api_key[..api_key.len().min(4)].cyan());
     println!("Files to scan: {}", matching_files.len());
     println!();
 
-    for file in &matching_files {
-        let filename = file.file_name().unwrap().to_string_lossy();
-        println!("Scanning {} ...", filename.green());
+    let mut flagged = 0usize;
 
-        // In a full implementation, this would:
-        // 1. Compute the SHA256 hash of the file
-        // 2. Check if the hash already exists in VirusTotal
-        // 3. If not, upload and scan
-        // 4. Display results
-        println!("  (simulation only - integration requires a full VirusTotal API client)");
-        println!("  File: {}", file.display().to_string().cyan());
+    for file in &matching_files {
+        let filename = file.file_name().unwrap().to_string_lossy().to_string();
+        print!("Scanning {} ... ", filename.green());
+
+        match operation::virustotal_file_report(session, file, &api_key) {
+            Ok(report) => {
+                if !report.found {
+                    println!("{}", "no existing report (not yet scanned)".yellow());
+                    println!("  sha256: {}", report.sha256.dark_grey());
+                    println!("  Upload the file at https://www.virustotal.com/gui/home/upload");
+                } else if report.is_flagged() {
+                    flagged += 1;
+                    println!(
+                        "{}",
+                        format!(
+                            "FLAGGED (malicious: {}, suspicious: {})",
+                            report.malicious, report.suspicious
+                        )
+                        .red()
+                        .bold()
+                    );
+                    println!("  sha256: {}", report.sha256.dark_grey());
+                    println!(
+                        "  harmless: {}, undetected: {}",
+                        report.harmless, report.undetected
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        format!(
+                            "clean (harmless: {}, undetected: {})",
+                            report.harmless, report.undetected
+                        )
+                        .green()
+                    );
+                    println!("  sha256: {}", report.sha256.dark_grey());
+                }
+            }
+            Err(e) => {
+                println!("{}", format!("lookup failed: {e}").yellow());
+            }
+        }
     }
 
-    println!(
-        "\n{}",
-        "Note: For real VirusTotal scanning, implement the full API client.".yellow()
-    );
+    println!();
+    if flagged > 0 {
+        println!(
+            "{}",
+            format!("{flagged} file(s) flagged by VirusTotal engines.")
+                .red()
+                .bold()
+        );
+    } else {
+        println!("{}", "Done. No flags from known reports.".green());
+    }
 
     Ok(())
 }

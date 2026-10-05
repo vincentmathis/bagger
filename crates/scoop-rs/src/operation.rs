@@ -520,3 +520,96 @@ pub fn package_sync(
 
     Ok(())
 }
+
+/// Result of a VirusTotal file lookup.
+#[derive(Clone, Debug)]
+pub struct VirustotalReport {
+    /// SHA256 of the scanned file.
+    pub sha256: String,
+    /// Whether VirusTotal already knows this file.
+    pub found: bool,
+    /// Number of engines flagging the file as malicious.
+    pub malicious: u64,
+    /// Number of engines flagging the file as suspicious.
+    pub suspicious: u64,
+    /// Number of engines reporting the file as harmless.
+    pub harmless: u64,
+    /// Number of engines with no verdict.
+    pub undetected: u64,
+}
+
+impl VirustotalReport {
+    /// Whether any engine flagged the file.
+    pub fn is_flagged(&self) -> bool {
+        self.malicious > 0 || self.suspicious > 0
+    }
+}
+
+/// Look up a local file on VirusTotal by its SHA256 hash.
+///
+/// Computes the SHA256 of `path`, then queries the VirusTotal v3 file API
+/// (`GET /files/{sha256}`). A missing report (`404`) is not an error: the
+/// returned [`VirustotalReport`] simply has `found` set to `false`.
+///
+/// # Errors
+///
+/// I/O errors will be returned if the file cannot be read. Network errors
+/// will be returned if the API request fails.
+pub fn virustotal_file_report(
+    session: &Session,
+    path: &std::path::Path,
+    api_key: &str,
+) -> Fallible<VirustotalReport> {
+    use bagger_hash::ChecksumBuilder;
+    use std::io::Read;
+
+    let mut hasher = ChecksumBuilder::new().sha256().build();
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = [0u8; 1024 * 64];
+    loop {
+        let len = file.read(&mut buf)?;
+        if len == 0 {
+            break;
+        }
+        hasher.consume(&buf[..len]);
+    }
+    let sha256 = hasher.finalize();
+
+    let url = format!("https://www.virustotal.com/api/v3/files/{sha256}");
+    let proxy = session.config().proxy().map(|s| s.to_owned());
+    let (code, body) = internal::network::fetch_url_with_headers(
+        &url,
+        proxy.as_deref(),
+        &[("x-apikey", api_key), ("Accept", "application/json")],
+    )
+    .ok_or_else(|| Error::Custom("failed to reach the VirusTotal API".to_owned()))?;
+
+    if code == 404 {
+        return Ok(VirustotalReport {
+            sha256,
+            found: false,
+            malicious: 0,
+            suspicious: 0,
+            harmless: 0,
+            undetected: 0,
+        });
+    }
+
+    if code != 200 {
+        return Err(Error::Custom(format!(
+            "VirusTotal API returned HTTP {code}"
+        )));
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&body)?;
+    let stats = &json["data"]["attributes"]["last_analysis_stats"];
+
+    Ok(VirustotalReport {
+        sha256,
+        found: true,
+        malicious: stats["malicious"].as_u64().unwrap_or(0),
+        suspicious: stats["suspicious"].as_u64().unwrap_or(0),
+        harmless: stats["harmless"].as_u64().unwrap_or(0),
+        undetected: stats["undetected"].as_u64().unwrap_or(0),
+    })
+}

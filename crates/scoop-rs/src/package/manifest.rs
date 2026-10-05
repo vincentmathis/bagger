@@ -123,6 +123,13 @@ pub struct ManifestSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggest: Option<HashMap<String, Vectorized<String>>>,
 
+    /// Runtime dependencies (e.g. `python`, `vcpp-redist`).
+    ///
+    /// Like `depends`, each entry is either `name` or `bucket/name`.
+    /// Runtime deps are resolved and installed like regular dependencies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<Vectorized<String>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkver: Option<Checkver>,
 
@@ -840,6 +847,17 @@ impl Manifest {
         self.inner.depends.as_ref().map(|v| v.devectorize())
     }
 
+    /// Return the `runtime` dependencies of this manifest.
+    ///
+    /// Same format as [`depends`][1]: entries are either `name` or
+    /// `bucket/name` (e.g. `python` or `main/vc-redist`).
+    ///
+    /// [1]: #method.depends
+    #[inline]
+    pub fn runtime(&self) -> Option<Vec<&str>> {
+        self.inner.runtime.as_ref().map(|v| v.devectorize())
+    }
+
     #[inline]
     pub fn architecture(&self) -> Option<&Architecture> {
         self.inner.architecture.as_ref()
@@ -854,6 +872,12 @@ impl Manifest {
     #[inline]
     pub fn checkver(&self) -> Option<&Checkver> {
         self.inner.checkver.as_ref()
+    }
+
+    /// Return the `autoupdate` spec of this manifest, if any.
+    #[inline]
+    pub fn autoupdate(&self) -> Option<&Autoupdate> {
+        self.inner.autoupdate.as_ref()
     }
 
     /// Returns `cookie` defined in this manifest.
@@ -984,6 +1008,10 @@ impl Manifest {
 
         if let Some(raw_depends) = self.depends() {
             deps.extend(raw_depends.into_iter().map(|s| s.to_owned()));
+        }
+
+        if let Some(raw_runtime) = self.runtime() {
+            deps.extend(raw_runtime.into_iter().map(|s| s.to_owned()));
         }
 
         if self.innosetup() {
@@ -1205,6 +1233,19 @@ impl Uninstaller {
     #[inline]
     pub fn script(&self) -> Option<Vec<&str>> {
         self.script.as_ref().map(|v| v.devectorize())
+    }
+}
+
+impl<T> Vectorized<T> {
+    /// Iterate over the vectorized values.
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+}
+
+impl Vectorized<HashExtraction> {
+    pub fn devectorize(&self) -> Vec<&HashExtraction> {
+        self.0.iter().collect()
     }
 }
 

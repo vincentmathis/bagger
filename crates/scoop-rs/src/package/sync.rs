@@ -1,5 +1,5 @@
-use once_cell::unsync::OnceCell;
 use bagger_hash::ChecksumBuilder;
+use once_cell::unsync::OnceCell;
 use std::io::Read;
 use tracing::{debug, info};
 
@@ -316,6 +316,32 @@ impl Default for Transaction {
     }
 }
 
+/// Abort the transaction if any package has running processes, unless the
+/// `ignore_running_processes` config is enabled.
+fn ensure_no_running_processes(session: &Session, packages: &[&Package]) -> Fallible<()> {
+    if session.config().ignore_running_processes() {
+        return Ok(());
+    }
+
+    let config = session.config();
+    let apps_dir = config.root_path().join("apps");
+
+    for pkg in packages {
+        let app_path = apps_dir.join(pkg.name());
+        match internal::os::running_apps(&app_path) {
+            Ok(procs) if !procs.is_empty() => {
+                return Err(Error::PackageRunningProcesses(
+                    pkg.name().to_owned(),
+                    procs.join(", "),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
 /// Sync operation: install and/or upgrade packages.
 pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fallible<()> {
     let mut packages = vec![];
@@ -540,6 +566,8 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 
     let download_only = options.contains(&SyncOption::DownloadOnly);
     if !download_only {
+        ensure_no_running_processes(session, &packages)?;
+
         let config = session.config();
         let apps_dir = config.root_path().join("apps");
 
@@ -959,6 +987,9 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
     }
 
     if let Some(packages) = transaction.remove_view() {
+        let refs = packages.iter().collect::<Vec<_>>();
+        ensure_no_running_processes(session, &refs)?;
+
         let purge = options.contains(&SyncOption::Purge);
         let config = session.config();
         let root_dir = config.root_path();

@@ -37,9 +37,18 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         if deps.is_empty() {
             println!("{} has no dependencies.", pkg.name().green());
         } else {
-            println!("Dependencies for {}:", pkg.name().green().bold());
+            println!(
+                "Dependencies for {} (includes runtime deps):",
+                pkg.name().green().bold()
+            );
             for dep in &deps {
                 println!("  - {}", dep);
+            }
+
+            if let Some(runtime) = pkg.manifest().runtime() {
+                if !runtime.is_empty() {
+                    println!("Runtime deps: {}", runtime.join(", "));
+                }
             }
         }
     } else {

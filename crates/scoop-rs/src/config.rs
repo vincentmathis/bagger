@@ -295,14 +295,87 @@ impl Config {
         self.use_isolated_path.as_ref()
     }
 
+    /// Get the `show_manifest` (manifest_review) config.
+    ///
+    /// When enabled, the manifest content of each package will be displayed
+    /// in the transaction confirmation prompt before installation/upgrade.
+    #[inline]
+    pub fn show_manifest(&self) -> bool {
+        self.show_manifest.unwrap_or_default()
+    }
+
+    /// Get the `aria2_enabled` config.
+    #[inline]
+    pub fn aria2_enabled(&self) -> bool {
+        self.aria2_enabled.unwrap_or_default()
+    }
+
+    /// Get the `aria2_warning_enabled` config.
+    ///
+    /// When disabled, aria2 availability warnings will be suppressed.
+    #[inline]
+    pub fn aria2_warning_enabled(&self) -> bool {
+        self.aria2_warning_enabled.unwrap_or_default()
+    }
+
+    /// Get the `aria2_split` config.
+    #[inline]
+    pub fn aria2_split(&self) -> u32 {
+        self.aria2_split.unwrap_or(5)
+    }
+
+    /// Get the `aria2_max_connection_per_server` config.
+    #[inline]
+    pub fn aria2_max_connection_per_server(&self) -> u32 {
+        self.aria2_max_connection_per_server.unwrap_or(8)
+    }
+
+    /// Get the `aria2_min_split_size` config.
+    #[inline]
+    pub fn aria2_min_split_size(&self) -> &str {
+        self.aria2_min_split_size.as_deref().unwrap_or("10M")
+    }
+
+    /// Get the `aria2_retry_wait` config.
+    #[inline]
+    pub fn aria2_retry_wait(&self) -> u32 {
+        self.aria2_retry_wait.unwrap_or(5)
+    }
+
+    /// Get the `aria2_options` config as a string.
+    #[inline]
+    pub fn aria2_options(&self) -> Option<&str> {
+        self.aria2_options.as_deref()
+    }
+
+    /// Get the `ignore_running_processes` config.
+    #[inline]
+    pub fn ignore_running_processes(&self) -> bool {
+        self.ignore_running_processes.unwrap_or_default()
+    }
+
     /// Update config key with new value.
     pub(crate) fn set(&mut self, key: &str, value: &str) -> Fallible<()> {
         let is_unset = value.is_empty();
         match key {
-            "use_external_7zip" => match is_unset {
+            "use_external_7zip" | "7zipextract_use_external" => match is_unset {
                 true => self.inner.use_external_7zip = None,
                 false => match value.parse::<bool>() {
                     Ok(value) => self.inner.use_external_7zip = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "manifest_review" | "show_manifest" => match is_unset {
+                true => self.inner.show_manifest = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.show_manifest = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "ignore_running_processes" => match is_unset {
+                true => self.inner.ignore_running_processes = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.ignore_running_processes = Some(value),
                     Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
                 },
             },
@@ -310,6 +383,13 @@ impl Config {
                 true => self.inner.aria2_enabled = None,
                 false => match value.parse::<bool>() {
                     Ok(value) => self.inner.aria2_enabled = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "aria2_warning_enabled" | "aria2-warning-enabled" => match is_unset {
+                true => self.inner.aria2_warning_enabled = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.aria2_warning_enabled = Some(value),
                     Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
                 },
             },

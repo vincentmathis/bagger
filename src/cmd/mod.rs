@@ -6,6 +6,7 @@ use tracing_subscriber::{
 };
 
 mod alias;
+mod autofetch;
 mod bucket;
 mod cache;
 mod cat;
@@ -67,6 +68,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     Alias(alias::Args),
+    Autofetch(autofetch::Args),
     Bucket(bucket::Args),
     Cache(cache::Args),
     Cat(cat::Args),
@@ -113,6 +115,7 @@ pub fn start() -> Result<()> {
 
     match args.command {
         Command::Alias(args) => alias::execute(args, &session),
+        Command::Autofetch(args) => autofetch::execute(args, &session),
         Command::Bucket(args) => bucket::execute(args, &session),
         Command::Cache(args) => cache::execute(args, &session),
         Command::Cat(args) => cat::execute(args, &session),

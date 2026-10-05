@@ -62,6 +62,8 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     let rx = session.event_bus().receiver();
     let tx = session.event_bus().sender();
 
+    let show_manifest = session.config().show_manifest();
+
     let mut stdout = std::io::stdout();
     let _ = stdout.execute(cursor::Hide);
 
@@ -103,6 +105,9 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                     println!("Checking package integrity...{}", "Ok".green());
                 }
                 Event::PromptTransactionNeedConfirm(transaction) => {
+                    if show_manifest {
+                        cui::show_manifests(&transaction);
+                    }
                     if let Some(install) = transaction.install_view() {
                         println!("The following packages will be INSTALLED:");
                         let output = install
