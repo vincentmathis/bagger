@@ -10,6 +10,7 @@ mod bucket;
 mod cache;
 mod cat;
 mod checkup;
+mod checkver;
 mod cleanup;
 mod completions;
 mod config;
@@ -69,6 +70,7 @@ pub enum Command {
     Cache(cache::Args),
     Cat(cat::Args),
     Checkup(checkup::Args),
+    Checkver(checkver::Args),
     Cleanup(cleanup::Args),
     Completions(completions::Args),
     Config(config::Args),
@@ -113,6 +115,7 @@ pub fn start() -> Result<()> {
         Command::Cache(args) => cache::execute(args, &session),
         Command::Cat(args) => cat::execute(args, &session),
         Command::Checkup(args) => checkup::execute(args, &session),
+        Command::Checkver(args) => checkver::execute(args, &session),
         Command::Cleanup(args) => cleanup::execute(args, &session),
         Command::Completions(args) => completions::execute(args),
         Command::Config(args) => config::execute(args, &session),

@@ -304,6 +304,69 @@ pub fn install_dir(session: &Session, package: &Package) -> std::path::PathBuf {
     }
 }
 
+/// Result of a checkver operation.
+#[derive(Clone, Debug)]
+pub struct CheckverResult {
+    pub current_version: Option<String>,
+    pub latest_version: Option<String>,
+}
+
+impl CheckverResult {
+    pub fn is_upgradable(&self) -> bool {
+        self.current_version
+            .as_ref()
+            .zip(self.latest_version.as_ref())
+            .map(|(cur, latest)| cur != latest)
+            .unwrap_or(false)
+    }
+}
+
+/// Check the latest version of a package by fetching its checkver URL.
+///
+/// # Returns
+///
+/// A [`CheckverResult`] containing the current and latest versions.
+///
+/// # Errors
+///
+/// Network errors will be returned if the checkver URL is not fetchable.
+pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult> {
+    let config = session.config();
+    let proxy = config.proxy();
+
+    let manifest = package.manifest();
+    let checkver = manifest.checkver();
+
+    let url = checkver
+        .and_then(|c| c.url.as_deref())
+        .unwrap_or_else(|| manifest.homepage())
+        .to_string();
+
+    let content = match internal::network::fetch_url(&url, proxy) {
+        Some(c) => c,
+        None => {
+            return Ok(CheckverResult {
+                current_version: Some(package.installed_version().unwrap_or(package.version()).to_string()),
+                latest_version: None,
+            });
+        }
+    };
+
+    let latest_version = checkver
+        .and_then(|c| c.regex.as_deref())
+        .and_then(|regex_str| {
+            let re = regex::Regex::new(regex_str).ok()?;
+            re.captures(&content).and_then(|caps| {
+                caps.get(1).map(|m| m.as_str().to_string())
+            })
+        });
+
+    Ok(CheckverResult {
+        current_version: Some(package.installed_version().unwrap_or(package.version()).to_string()),
+        latest_version,
+    })
+}
+
 /// Get the configuation list.
 ///
 /// # Returns
