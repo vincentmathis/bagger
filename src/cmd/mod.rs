@@ -16,6 +16,7 @@ mod home;
 mod info;
 mod install;
 mod list;
+mod prefix;
 mod search;
 mod unhold;
 mod uninstall;
@@ -64,6 +65,7 @@ pub enum Command {
     #[clap(alias = "i")]
     Install(install::Args),
     List(list::Args),
+    Prefix(prefix::Args),
     #[clap(alias = "s")]
     Search(search::Args),
     Unhold(unhold::Args),
@@ -95,6 +97,7 @@ pub fn start() -> Result<()> {
         Command::Info(args) => info::execute(args, &session),
         Command::Install(args) => install::execute(args, &session),
         Command::List(args) => list::execute(args, &session),
+        Command::Prefix(args) => prefix::execute(args, &session),
         Command::Search(args) => search::execute(args, &session),
         Command::Unhold(args) => unhold::execute(args, &session),
         Command::Uninstall(args) => uninstall::execute(args, &session),
@@ -118,9 +121,9 @@ fn setup_logger(level_filter: LevelFilter) -> Result<()> {
         .with_default_directive(level_filter.into())
         .from_env()?;
 
-    // The custom `HOK_LOG_LEVEL` environment variable was introduced to set the
+    // The custom `BAGGER_LOG_LEVEL` environment variable was introduced to set the
     // log level for bagger since the first version.
-    if let Ok(level) = std::env::var("HOK_LOG_LEVEL") {
+    if let Ok(level) = std::env::var("BAGGER_LOG_LEVEL") {
         layer_env_filter = layer_env_filter.add_directive(format!("scoop_rs={level}").parse()?);
     }
 
