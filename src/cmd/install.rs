@@ -15,7 +15,7 @@ use crate::{cui, util, Result};
 #[derive(Debug, Parser)]
 #[clap(arg_required_else_help = true)]
 pub struct Args {
-    /// The package(s) to install
+    /// The package(s) to install (name, manifest URL, or local manifest file)
     #[arg(required = true, action = ArgAction::Append)]
     package: Vec<String>,
     /// Download package(s) without performing installation

@@ -361,6 +361,19 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         let synced = query::query_synced(session, &["*"], &[])?;
 
         for &query in queries {
+            // Manifest URLs and local manifest files install as isolated
+            // packages without requiring a bucket.
+            if let Some(p) = query::load_isolated_package(session, query)? {
+                if p.is_held() && !escape_hold {
+                    continue;
+                }
+
+                if !packages.contains(&p) {
+                    packages.push(p);
+                }
+                continue;
+            }
+
             let mut matched = synced
                 .iter()
                 .filter(|&p| {
@@ -644,10 +657,15 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             let manifest_json = serde_json::to_string_pretty(pkg.manifest().inner())?;
             std::fs::write(&manifest_path, manifest_json)?;
 
-            // Write install.json
+            // Write install.json (isolated packages record no bucket so
+            // they keep the `__isolated__` marker on later queries)
+            let install_bucket = match pkg.bucket() == crate::constant::ISOLATED_PACKAGE_BUCKET {
+                true => None,
+                false => Some(pkg.bucket().to_owned()),
+            };
             let install_info = InstallInfo::new(
                 get_arch_string(pkg),
-                Some(pkg.bucket().to_owned()),
+                install_bucket,
                 pkg.download_urls().first().map(|u| u.to_string()),
             );
             let install_json_path = install_base.join("install.json");

@@ -772,15 +772,26 @@ impl Manifest {
         let mut bytes = Vec::new();
         File::open(path)?.read_to_end(&mut bytes)?;
 
+        Self::parse_bytes(&bytes, path)
+    }
+
+    /// Create a [`Manifest`] from in-memory JSON bytes.
+    ///
+    /// `origin` records where the manifest came from (a bucket file, a local
+    /// path, or a synthetic cache path for a remote URL) and is exposed via
+    /// [`path`][1]. It is not required to exist on disk.
+    ///
+    /// [1]: #method.path
+    pub fn parse_bytes(bytes: &[u8], origin: &Path) -> Fallible<Manifest> {
         // Parsing manifest files is the key bottleneck of the entire
         // project. We use `serde_json` because it's well documented and easy
         // to integrate. But I believe there should be an alternative to
         // `serde_json` which can parse JSON files much *faster*. Perhaps
         // `simd_json` can be the one. See https://github.com/serde-rs/json-benchmark
-        let inner: ManifestSpec = serde_json::from_slice(&bytes).inspect_err(|e| {
-            warn!("failed to parse manifest {} (err: {})", path.display(), e);
+        let inner: ManifestSpec = serde_json::from_slice(bytes).inspect_err(|e| {
+            warn!("failed to parse manifest {} (err: {})", origin.display(), e);
         })?;
-        let path = internal::path::normalize_path(path);
+        let path = internal::path::normalize_path(origin);
         // let mut checksum = bagger_hash::Checksum::new("sha256");
         // checksum.consume(&bytes);
         // let hash = checksum.result();

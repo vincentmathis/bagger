@@ -6,9 +6,9 @@ use crate::{
     bucket::Bucket,
     constant::ISOLATED_PACKAGE_BUCKET,
     error::Fallible,
-    internal::compare_versions,
+    internal::{self, compare_versions},
     package::manifest::{InstallInfo, Manifest},
-    Session,
+    Error, Session,
 };
 
 use super::{InstallState, InstallStateInstalled, Package};
@@ -424,4 +424,134 @@ pub(crate) fn query_synced(
         .collect::<Vec<_>>();
 
     Ok(packages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isolated_loader_ignores_plain_names() {
+        let session = Session::new();
+        let result = load_isolated_package(&session, "7zip").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn isolated_loader_parses_local_manifest() {
+        let dir = std::env::temp_dir().join("bagger-test-isolated");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mytool.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "version": "1.0",
+                "homepage": "https://example.com",
+                "license": "MIT",
+                "url": "https://example.com/mytool.zip",
+                "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }"#,
+        )
+        .unwrap();
+
+        let session = Session::new();
+        let pkg = load_isolated_package(&session, path.to_str().unwrap())
+            .unwrap()
+            .expect("local manifest should load");
+        assert_eq!(pkg.name(), "mytool");
+        assert_eq!(pkg.bucket(), ISOLATED_PACKAGE_BUCKET);
+        assert_eq!(pkg.version(), "1.0");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// Load an isolated package from a manifest URL or local manifest file.
+///
+/// Returns `Ok(None)` when `query` is neither an `http(s)://` URL nor an
+/// existing local `.json` file, in which case the caller should fall back to
+/// regular bucket queries.
+///
+/// The package name is derived from the URL/file basename (minus the `.json`
+/// suffix) and the package is placed in the [`ISOLATED_PACKAGE_BUCKET`]
+/// bucket. Dependencies of isolated packages still resolve from buckets.
+pub(crate) fn load_isolated_package(session: &Session, query: &str) -> Fallible<Option<Package>> {
+    let is_url = query.starts_with("http://") || query.starts_with("https://");
+    // Strip a `file://` prefix so users can paste file URLs directly.
+    let local_path = query.strip_prefix("file://").unwrap_or(query);
+    let is_file = !is_url
+        && local_path.to_lowercase().ends_with(".json")
+        && std::path::Path::new(local_path).is_file();
+
+    if !is_url && !is_file {
+        return Ok(None);
+    }
+
+    let (name, origin_display, bytes) = if is_url {
+        // Derive the app name from the last URL path segment.
+        let without_query = query.split(['?', '#']).next().unwrap_or(query);
+        let segment = without_query.rsplit('/').next().unwrap_or("");
+        let stem = segment.strip_suffix(".json").or_else(|| {
+            segment
+                .to_lowercase()
+                .strip_suffix(".json")
+                .map(|_| &segment[..segment.len() - 5])
+        });
+        let name = match stem {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => {
+                return Err(Error::Custom(format!(
+                    "cannot derive a package name from URL '{query}' (expected it to end with '<name>.json')"
+                )));
+            }
+        };
+        if name.contains(['/', '\\']) {
+            return Err(Error::Custom(format!(
+                "invalid package name derived from URL '{query}'"
+            )));
+        }
+
+        let proxy = session.config().proxy().map(|s| s.to_owned());
+        let content = internal::network::fetch_url(query, proxy.as_deref())
+            .ok_or_else(|| Error::Custom(format!("failed to fetch manifest from '{query}'")))?;
+
+        let display = session.config().cache_path().join(format!("{name}.json"));
+        (name, display, content.into_bytes())
+    } else {
+        let path = std::path::Path::new(local_path);
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| Error::Custom(format!("invalid manifest path '{local_path}'")))?;
+        let bytes = std::fs::read(path)?;
+        (stem.to_owned(), path.to_owned(), bytes)
+    };
+
+    let manifest = Manifest::parse_bytes(&bytes, &origin_display)?;
+    let package = Package::from(&name, ISOLATED_PACKAGE_BUCKET, manifest);
+
+    // Fill the install state from the apps dir, mirroring `query_synced`.
+    let mut path = session.config().root_path().join("apps").join(&name);
+    path.push("current");
+    path.push("install.json");
+
+    if let Ok(install_info) = InstallInfo::parse(&path) {
+        path.pop();
+        path.push("manifest.json");
+        if let Ok(install_manifest) = Manifest::parse(path) {
+            let state = InstallState::Installed(InstallStateInstalled {
+                version: install_manifest.version().to_owned(),
+                bucket: install_info.bucket().map(|s| s.to_owned()),
+                arch: install_info.arch().to_owned(),
+                held: install_info.is_held(),
+                url: install_info.url().map(|s| s.to_owned()),
+            });
+            package.fill_install_state(state);
+        }
+    } else {
+        package.fill_install_state(InstallState::NotInstalled);
+    }
+
+    Ok(Some(package))
 }
