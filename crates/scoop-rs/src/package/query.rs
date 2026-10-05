@@ -7,6 +7,7 @@ use crate::{
     constant::ISOLATED_PACKAGE_BUCKET,
     error::Fallible,
     internal::{self, compare_versions},
+    manifest_cache::{FileFingerprint, ManifestCache},
     package::manifest::{InstallInfo, Manifest},
     Error, Session,
 };
@@ -286,6 +287,26 @@ pub(crate) fn query_synced(
     let is_wildcard_query = queries.contains(&"*") || queries.is_empty();
     let buckets = crate::bucket::bucket_added(session)?;
     let apps_dir = session.config().root_path().join("apps");
+
+    // Open the SQLite manifest cache when enabled. Failures are
+    // non-fatal: queries transparently fall back to parsing from disk.
+    let cache_dir = session.config().cache_path().to_owned();
+    let cache_enabled = session.config().use_sqlite_cache();
+    let cache = if cache_enabled {
+        match ManifestCache::open(&cache_dir) {
+            Ok(cache) => Some(cache),
+            Err(err) => {
+                debug!(
+                    "failed to open manifest cache (err: {}), querying uncached",
+                    err
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let cache = cache.as_ref();
     // build matchers
     let mut matchers: Vec<(Option<String>, Box<dyn Matcher + Send + Sync>)> = vec![];
 
@@ -337,7 +358,9 @@ pub(crate) fn query_synced(
                             return None;
                         }
 
-                        if let Ok(manifest) = Manifest::parse(entry.path()) {
+                        if let Ok(manifest) =
+                            parse_manifest_cached(cache, bucket.name(), name, &entry.path())
+                        {
                             let bucket = bucket.name();
 
                             let mut unmatched = true;
@@ -464,6 +487,37 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+}
+
+/// Parse a bucket manifest, serving it from the SQLite cache on hits.
+///
+/// On a fingerprint (mtime+size) miss the file is read, parsed, and stored
+/// back into the cache. With `cache` set to `None` this is a plain
+/// [`Manifest::parse`].
+fn parse_manifest_cached(
+    cache: Option<&ManifestCache>,
+    bucket: &str,
+    name: &str,
+    path: &std::path::Path,
+) -> Fallible<Manifest> {
+    let Some(cache) = cache else {
+        return Manifest::parse(path);
+    };
+
+    let fp = FileFingerprint::of(path)?;
+    if let Some(json) = cache.get(bucket, name, fp)? {
+        // Cached JSON was valid when stored; a parse failure here means the
+        // cache row is corrupt, so fall through and re-parse from disk.
+        if let Ok(manifest) = Manifest::parse_bytes(&json, path) {
+            return Ok(manifest);
+        }
+    }
+
+    let bytes = std::fs::read(path)?;
+    let manifest = Manifest::parse_bytes(&bytes, path)?;
+    // Cache write failures are non-fatal for the query itself.
+    let _ = cache.put(bucket, name, fp, &bytes);
+    Ok(manifest)
 }
 
 /// Load an isolated package from a manifest URL or local manifest file.

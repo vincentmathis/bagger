@@ -40,6 +40,7 @@ mod env;
 mod error;
 mod event;
 mod internal;
+mod manifest_cache;
 mod package;
 mod persist;
 mod psmodule;

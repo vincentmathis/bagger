@@ -123,4 +123,8 @@ pub enum Error {
     /// Serde error
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
+
+    /// SQLite error
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
 }

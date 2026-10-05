@@ -354,6 +354,15 @@ impl Config {
         self.ignore_running_processes.unwrap_or_default()
     }
 
+    /// Get the `use_sqlite_cache` config.
+    ///
+    /// When enabled, bucket manifests are cached in a SQLite database to
+    /// speed up queries.
+    #[inline]
+    pub fn use_sqlite_cache(&self) -> bool {
+        self.use_sqlite_cache.unwrap_or_default()
+    }
+
     /// Update config key with new value.
     pub(crate) fn set(&mut self, key: &str, value: &str) -> Fallible<()> {
         let is_unset = value.is_empty();
