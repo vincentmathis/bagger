@@ -774,7 +774,7 @@ impl Manifest {
             warn!("failed to parse manifest {} (err: {})", path.display(), e);
         })?;
         let path = internal::path::normalize_path(path);
-        // let mut checksum = scoop_hash::Checksum::new("sha256");
+        // let mut checksum = bagger_hash::Checksum::new("sha256");
         // checksum.consume(&bytes);
         // let hash = checksum.result();
         let hash = String::from("0");

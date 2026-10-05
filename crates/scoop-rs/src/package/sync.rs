@@ -1,5 +1,5 @@
 use once_cell::unsync::OnceCell;
-use scoop_hash::ChecksumBuilder;
+use bagger_hash::ChecksumBuilder;
 use std::io::Read;
 use tracing::{debug, info};
 
