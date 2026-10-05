@@ -13,6 +13,9 @@ mod checkup;
 mod cleanup;
 mod completions;
 mod config;
+mod create;
+mod depends;
+mod download;
 mod export;
 mod hold;
 mod home;
@@ -69,6 +72,9 @@ pub enum Command {
     Cleanup(cleanup::Args),
     Completions(completions::Args),
     Config(config::Args),
+    Create(create::Args),
+    Depends(depends::Args),
+    Download(download::Args),
     Export(export::Args),
     Hold(hold::Args),
     Home(home::Args),
@@ -110,6 +116,9 @@ pub fn start() -> Result<()> {
         Command::Cleanup(args) => cleanup::execute(args, &session),
         Command::Completions(args) => completions::execute(args),
         Command::Config(args) => config::execute(args, &session),
+        Command::Create(args) => create::execute(args, &session),
+        Command::Depends(args) => depends::execute(args, &session),
+        Command::Download(args) => download::execute(args, &session),
         Command::Export(args) => export::execute(args, &session),
         Command::Hold(args) => hold::execute(args, &session),
         Command::Home(args) => home::execute(args, &session),

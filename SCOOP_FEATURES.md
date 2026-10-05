@@ -67,7 +67,9 @@ Legend:
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
-| `bagger download <app>` | [~] | Partial: `--only-download` option available via SyncOption |
+| `bagger create` | [x] | Create a bucket or manifest template |
+| `bagger depends <app>` | [x] | Show dependencies and reverse dependencies |
+| `bagger download <app>` | [x] | Download package without installing |
 | `bagger checkver <app>` | [ ] | Check for latest version from manifest URLs |
 | `bagger autofetch` | [ ] | Auto-generate manifests from app URLs |
 
