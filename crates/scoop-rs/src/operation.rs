@@ -272,6 +272,38 @@ pub fn cache_remove(session: &Session, query: &str) -> Fallible<()> {
     }
 }
 
+/// Get a list of running process names that belong to a package's app directory.
+///
+/// # Errors
+///
+/// I/O errors will be returned if the process enumeration fails.
+pub fn running_processes(session: &Session, package: &Package) -> Fallible<Vec<String>> {
+    let config = session.config();
+    let apps_dir = config.root_path().join("apps");
+    let app_path = apps_dir.join(package.name());
+    internal::os::running_apps(&app_path)
+}
+
+/// Get the installation directory of a package.
+///
+/// # Returns
+///
+/// The path to the package's install directory. If `no_junction` is set,
+/// this is `<root>/apps/<name>/<version>`. Otherwise, it is
+/// `<root>/apps/<name>/current`.
+pub fn install_dir(session: &Session, package: &Package) -> std::path::PathBuf {
+    let config = session.config();
+    let apps_dir = std::path::PathBuf::from(config.root_path()).join("apps");
+
+    if config.no_junction() {
+        apps_dir
+            .join(package.name())
+            .join(package.installed_version().unwrap_or(package.version()))
+    } else {
+        apps_dir.join(package.name()).join("current")
+    }
+}
+
 /// Get the configuation list.
 ///
 /// # Returns

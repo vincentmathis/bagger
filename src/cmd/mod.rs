@@ -18,6 +18,7 @@ mod install;
 mod list;
 mod prefix;
 mod search;
+mod status;
 mod unhold;
 mod uninstall;
 mod update;
@@ -76,6 +77,7 @@ pub enum Command {
     Update(update::Args),
     Upgrade(upgrade::Args),
     Which(which::Args),
+    Status(status::Args),
 }
 
 /// CLI entry point
@@ -106,6 +108,7 @@ pub fn start() -> Result<()> {
         Command::Update(args) => update::execute(args, &session),
         Command::Upgrade(args) => upgrade::execute(args, &session),
         Command::Which(args) => which::execute(args, &session),
+        Command::Status(args) => status::execute(args, &session),
     }
 }
 
