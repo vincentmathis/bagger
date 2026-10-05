@@ -20,6 +20,7 @@ mod list;
 mod prefix;
 mod reset;
 mod search;
+mod shim;
 mod status;
 mod unhold;
 mod uninstall;
@@ -74,6 +75,7 @@ pub enum Command {
     Reset(reset::Args),
     #[clap(alias = "s")]
     Search(search::Args),
+    Shim(shim::Args),
     Unhold(unhold::Args),
     #[clap(alias = "rm", alias = "remove")]
     Uninstall(uninstall::Args),
@@ -109,6 +111,7 @@ pub fn start() -> Result<()> {
         Command::Prefix(args) => prefix::execute(args, &session),
         Command::Reset(args) => reset::execute(args, &session),
         Command::Search(args) => search::execute(args, &session),
+        Command::Shim(args) => shim::execute(args, &session),
         Command::Unhold(args) => unhold::execute(args, &session),
         Command::Uninstall(args) => uninstall::execute(args, &session),
         Command::Update(args) => update::execute(args, &session),
