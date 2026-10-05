@@ -33,6 +33,7 @@ mod unhold;
 mod uninstall;
 mod update;
 mod upgrade;
+mod virustotal;
 mod which;
 
 use crate::Result;
@@ -96,6 +97,7 @@ pub enum Command {
     #[clap(alias = "u")]
     Update(update::Args),
     Upgrade(upgrade::Args),
+    Virustotal(virustotal::Args),
     Which(which::Args),
     Status(status::Args),
 }
@@ -137,6 +139,7 @@ pub fn start() -> Result<()> {
         Command::Uninstall(args) => uninstall::execute(args, &session),
         Command::Update(args) => update::execute(args, &session),
         Command::Upgrade(args) => upgrade::execute(args, &session),
+        Command::Virustotal(args) => virustotal::execute(args, &session),
         Command::Which(args) => which::execute(args, &session),
         Command::Status(args) => status::execute(args, &session),
     }

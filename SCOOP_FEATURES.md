@@ -249,9 +249,9 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 ## Missing Commands (Medium-High Priority)
 
-1. **`scoop/virustotal`** - Scan downloads with VirusTotal API
-2. **`scoop/checkver`** - Check latest version from app manifest URLs
-3. **`scoop/autofetch`** - Auto-generate app manifests from app URLs
+1. **`scoop/virustotal`** - ✅ Implemented (simulation with API key support)
+2. **`scoop/checkver`** - ✅ Implemented (fetch URL, apply regex, compare versions)
+3. **`scoop/autofetch`** - ❌ Still missing (complex URL parsing, not commonly used)
 
 ## Previously Missing - Now Implemented
 
