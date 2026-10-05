@@ -57,10 +57,10 @@ Legend:
 | `bagger config [set] <key> [value]` | [x] | Get/set Scoop config.json |
 | `bagger cleanup <app>` | [x] | Remove old versions, keep current |
 | `bagger home <app>` | [x] | Open app homepage in browser |
-| `bagger shim` | [~] | Shim add/remove logic exists in library, no CLI command |
-| `bagger alias <add\|rm> <name> <command>` | [ ] | Create aliases for commands |
-| `bagger import` | [ ] | Import installed apps from JSON |
-| `bagger export` | [ ] | Export installed apps to JSON |
+| `bagger shim` | [x] | List, add, and remove shims |
+| `bagger alias` | [x] | Manage command aliases (list, add, rm) |
+| `bagger import` | [x] | Import apps from JSON (lists for install) |
+| `bagger export` | [x] | Export installed apps to JSON |
 | `bagger help` | [x] | Auto-generated via clap |
 
 ### Download & Verify Commands
