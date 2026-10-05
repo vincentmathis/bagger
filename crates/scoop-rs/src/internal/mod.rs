@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod aria2;
 pub mod dag;
 pub mod env;
 pub mod fs;

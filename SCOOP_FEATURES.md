@@ -237,7 +237,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Candidate selection (multi-bucket) | [x] | Interactive or auto-select |
 | Global app installation | [~] | Global path defined, but no `--global` flag on CLI |
 | Isolated app installation | [~] | Manifest URL install planned but not fully wired |
-| Aria2 integration | [ ] | Config exists but aria2 binary not used |
+| Aria2 integration | [x] | **Implemented** - `aria2c` used when `aria2-enabled` + binary on PATH (split/connections/cookie/proxy/extra-opts honored), curl fallback + optional missing-binary warning |
 | SQLite manifest cache | [ ] | Config option exists, not implemented |
 | Manifest auto-review prompt | [x] | **Implemented** - `show_manifest` displays manifests before install/upgrade |
 | VirusTotal integration | [x] | **Implemented** - real v3 file-report lookup by SHA256 |
@@ -270,10 +270,9 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 ## Missing Features (Medium Priority)
 
-1. **Aria2 download manager integration** - Faster parallel downloads
-2. **SQLite manifest caching** - Speed up operations
-3. **Global app installs** (`--global` flag) - Install to `ProgramData`
-4. **Isolated package installs** - Install from arbitrary manifest URL without adding to bucket
+1. **SQLite manifest caching** - Speed up operations
+2. **Global app installs** (`--global` flag) - Install to `ProgramData`
+3. **Isolated package installs** - Install from arbitrary manifest URL without adding to bucket
 
 ## Previously Missing - Now Implemented (this iteration)
 
@@ -281,6 +280,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 8. **Ignore running processes** - sync install/remove abort with `PackageRunningProcesses` error unless `ignore_running_processes` is set
 9. **VirusTotal binary scan** - real SHA256 + VT v3 `GET /files/{sha256}` verdicts (malicious/suspicious/harmless/undetected)
 10. **Autofetch** - `bagger autofetch <app>|all [--write]` previews expanded autoupdate URLs + hash modes
+11. **Aria2 download manager** - downloads delegated to `aria2c` when `aria2-enabled` is set and the binary is on PATH (honors split/max-connection/min-split/retry-wait/cookie/proxy/extra options); warns when enabled-but-missing if `aria2-warning-enabled`, otherwise curl backend is used
 
 ## Notes
 

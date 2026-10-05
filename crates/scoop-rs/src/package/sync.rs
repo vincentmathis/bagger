@@ -585,13 +585,11 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         }
 
         for pkg in packages.iter() {
-            eprintln!("DEBUG: starting commit for {}", pkg.name());
             if let Some(tx) = session.emitter() {
                 let _ = tx.send(Event::PackageCommitStart(pkg.name().to_owned()));
             }
 
             let working_dir = apps_dir.join(pkg.name()).join(pkg.version());
-            eprintln!("DEBUG: working_dir = {}", working_dir.display());
             internal::fs::ensure_dir(&working_dir)?;
 
             let filenames = pkg.download_filenames();
@@ -604,11 +602,9 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                     continue;
                 }
                 let dst = working_dir.join(filename);
-                eprintln!("DEBUG: copying {}", src.display());
                 let _ = std::fs::remove_file(&dst);
                 std::fs::copy(&src, &dst)?;
             }
-            eprintln!("DEBUG: running pre_install");
             if let Some(pre_install) = pkg.manifest().pre_install() {
                 internal::ps::invoke_script(session, pkg, "install", &pre_install, &working_dir)?;
             }

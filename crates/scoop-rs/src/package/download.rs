@@ -193,6 +193,108 @@ impl<'a> PackageSet<'a> {
             self.load_cache();
         }
 
+        // Delegate to aria2c when enabled and available.
+        if self.session.config().aria2_enabled() {
+            if internal::aria2::is_available() {
+                return self.download_via_aria2();
+            } else if self.session.config().aria2_warning_enabled() {
+                tracing::warn!(
+                    "aria2 is enabled but no 'aria2c' binary was found on PATH; falling back to curl"
+                );
+            }
+        }
+
+        self.download_via_curl()
+    }
+
+    /// Download pending files with the aria2c external downloader.
+    fn download_via_aria2(&mut self) -> Fallible<()> {
+        let config = self.session.config();
+        let cache_root = config.cache_path().to_owned();
+        let proxy = config.proxy().map(|s| s.to_owned());
+        let split = config.aria2_split();
+        let max_connection_per_server = config.aria2_max_connection_per_server();
+        let min_split_size = config.aria2_min_split_size().to_owned();
+        let retry_wait = config.aria2_retry_wait();
+        let extra_options = config.aria2_options().map(|s| s.to_owned());
+        drop(config);
+
+        let user_agent = self
+            .session
+            .user_agent
+            .get()
+            .map(|s| s.as_str())
+            .unwrap_or(DEFAULT_USER_AGENT)
+            .to_owned();
+
+        let aria2_opts = internal::aria2::DownloadOptions {
+            user_agent,
+            cookie: String::new(),
+            proxy,
+            split,
+            max_connection_per_server,
+            min_split_size,
+            retry_wait,
+            extra_options,
+        };
+
+        // ensure cache dir exists
+        internal::fs::ensure_dir(&cache_root)?;
+
+        let package_caches = self.caches.get_mut().unwrap();
+        let mut filepaths = vec![];
+
+        for cache in package_caches.values() {
+            // skip download if all files are cached and valid
+            if self.reuse_cache && cache.valid == CacheMaybeValid::Full {
+                continue;
+            }
+
+            let cookie = cache.package.cookie().unwrap_or_default();
+            let cookie = cookie
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+
+            for (filename, dlinfo) in cache.inner.iter() {
+                if self.reuse_cache
+                    && dlinfo.local_size > 0
+                    && dlinfo.local_size == dlinfo.remote_size
+                {
+                    continue;
+                }
+
+                let tmp = cache_root.join(format!("{}.download", filename));
+                let path = cache_root.join(filename);
+
+                // remove possible existing files
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(&tmp);
+
+                let opts = internal::aria2::DownloadOptions {
+                    cookie: cookie.clone(),
+                    ..aria2_opts.clone()
+                };
+                internal::aria2::download_file(dlinfo.url, &tmp, &opts)?;
+
+                filepaths.push((tmp, path));
+            }
+        }
+
+        for (tmp, path) in filepaths.iter() {
+            std::fs::rename(tmp, path)?;
+        }
+
+        Ok(())
+    }
+
+    /// Download pending files with the built-in curl backend.
+    fn download_via_curl(&mut self) -> Fallible<()> {
+        if self.caches.get().is_none() {
+            self.load_cache();
+        }
+
         let config = self.session.config();
         let cache_root = config.cache_path();
         let proxy = config.proxy();
