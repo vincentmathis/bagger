@@ -246,18 +246,25 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 ---
 
-## Missing Commands (High Priority)
+## Missing Commands (Medium-High Priority)
 
-1. **`scoop/which`** - Find which app provides a given command
-2. **`scoop/prefix`** - Print the install path of an app
-3. **`scoop/status`** - Show app status, running processes, held apps
-4. **`scoop/checkup`** - Check for updates and run cleanup
-5. **`scoop/reset`** - Reset app to a previous version
-6. **`scoop/import` / `scoop/export`** - Export/import installed app list
-7. **`scoop/alias`** - Manage command aliases
-8. **`scoop/virustotal`** - Scan downloads with VirusTotal
-9. **`scoop/checkver`** - Check latest version from app manifest
-10. **`scoop/autofetch`** - Auto-generate app manifests
+1. **`scoop/virustotal`** - Scan downloads with VirusTotal API
+2. **`scoop/checkver`** - Check latest version from app manifest URLs
+3. **`scoop/autofetch`** - Auto-generate app manifests from app URLs
+
+## Previously Missing - Now Implemented
+
+1. **`scoop/which`** - Find which app provides a given command - ✅ Implemented
+2. **`scoop/prefix`** - Print the install path of an app - ✅ Implemented
+3. **`scoop/status`** - Show app status, running processes, held apps - ✅ Implemented
+4. **`scoop/checkup`** - Check for updates and report issues - ✅ Implemented
+5. **`scoop/reset`** - Reset app to a previous version - ✅ Implemented
+6. **`scoop/import` / `scoop/export`** - Export/import installed app list - ✅ Implemented
+7. **`scoop/alias`** - Manage command aliases - ✅ Implemented
+8. **`scoop/shim`** - List, add, and remove shims - ✅ Implemented
+9. **`scoop/create`** - Create a new bucket or manifest template - ✅ Implemented
+10. **`scoop/depends`** - Show dependencies and reverse dependencies - ✅ Implemented
+11. **`scoop/download`** - Download a package without installing - ✅ Implemented
 
 ## Missing Features (Medium Priority)
 
