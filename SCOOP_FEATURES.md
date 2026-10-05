@@ -26,7 +26,8 @@ Legend:
 | `bagger hold <app>` | [x] | Mark apps as held |
 | `bagger unhold <app>` | [x] | Remove hold from apps |
 | `bagger prefix <app>` | [x] | Show installation path for an app |
-| `bagger status` | [ ] | Show status of apps (held, running processes, etc.) |
+| `bagger which <command>` | [x] | Find which app owns an executable |
+| `bagger status` | [x] | Show held, upgradable, and running apps |
 | `bagger which <command>` | [ ] | Find which app owns an executable |
 | `bagger prefix <app>` | [ ] | Show installation path for an app |
 | `bagger checkup` | [ ] | Check for scoop updates and app updates |
