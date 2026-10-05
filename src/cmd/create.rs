@@ -37,7 +37,7 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
     Ok(())
 }
 
-fn create_bucket(name: &str, dir: &PathBuf) -> Result<()> {
+fn create_bucket(name: &str, dir: &std::path::Path) -> Result<()> {
     let bucket_dir = dir.join(name);
 
     if bucket_dir.exists() {
@@ -67,7 +67,7 @@ fn create_bucket(name: &str, dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn create_manifest_template(name: &str, dir: &PathBuf) -> Result<()> {
+fn create_manifest_template(name: &str, dir: &std::path::Path) -> Result<()> {
     let manifest_path = dir.join(format!("{}.json", name));
 
     if manifest_path.exists() {

@@ -54,7 +54,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
             let dep_names: Vec<String> = deps
                 .iter()
                 .map(|d| {
-                    let clean = d.split('/').last().unwrap_or(d);
+                    let clean = d.split('/').next_back().unwrap_or(d);
                     clean.to_string()
                 })
                 .collect();

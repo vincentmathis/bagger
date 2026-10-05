@@ -1,9 +1,8 @@
 use clap::Parser;
-use serde_json;
+use crossterm::style::Stylize;
 use std::collections::HashMap;
 
 use crate::Result;
-use crossterm::style::Stylize;
 
 /// Import list of apps from stdin (JSON)
 #[derive(Debug, Parser)]
