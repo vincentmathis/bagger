@@ -192,6 +192,13 @@ fn autofetch_one(session: &Session, pkg: &scoop_rs::Package, write: bool) -> Res
         println!("  hash: {mode}");
     }
 
+    // Surface maintainer notes about this update, if any.
+    if let Some(note) = autoupdate.notes.as_ref() {
+        for line in note.devectorize() {
+            println!("  note: {line}");
+        }
+    }
+
     if write {
         match operation::autoupdate_apply(session, pkg, &latest, &result.captures, true) {
             Ok(applied) => {

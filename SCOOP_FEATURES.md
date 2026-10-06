@@ -56,7 +56,7 @@ Legend:
 | `bagger home <app>` | [x] | Open app homepage in browser |
 | `bagger shim` | [x] | List, add, and remove shims |
 | `bagger alias` | [x] | Manage command aliases (list, add, rm) |
-| `bagger import` | [x] | Import apps from JSON (lists for install) |
+| `bagger import` | [x] | Import apps from export file/stdin and install them (restores holds, skips isolated) |
 | `bagger export` | [x] | Export installed apps to JSON |
 | `bagger help` | [x] | Auto-generated via clap |
 
@@ -293,6 +293,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 24. **autoupdate hash rewriting** - `autofetch -w` downloads expanded URLs, computes sha256 and rewrites `url`/`hash` (shape-preserving, non-download modes skipped); verified end-to-end offline plus unit test
 25. **autoupdate extract/json/xpath hash modes** - upstream-faithful: textfile search with `$sha256…` placeholders, JSON/XPath hash documents, length-inferred `format_hash`, full `$version`/`$match<TitleCase>`/`$basename` substitutions, download fallback; verified offline e2e
 26. **Schema-compat hardening** - verified string-form `checkver`/`sourceforge` and `github` shorthand parsing against the upstream schema; added missing `github` hash mode; live-verified `github:` checkver against api real releases page
+27. **Real installing import** - `import [FILE] [-y]` installs exported apps through the install flow (was list-only) and restores holds; verified offline roundtrip incl. hold state
 
 ## Notes
 

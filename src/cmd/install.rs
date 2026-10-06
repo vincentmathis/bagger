@@ -56,6 +56,27 @@ pub struct Args {
     arch: Option<String>,
 }
 
+impl Args {
+    /// Build args for programmatic installs (e.g. `import`).
+    pub(crate) fn from_packages(package: Vec<String>, assume_yes: bool) -> Self {
+        Self {
+            package,
+            download_only: false,
+            ignore_failure: false,
+            offline: false,
+            assume_yes,
+            ignore_cache: false,
+            independent: false,
+            no_replace: false,
+            escape_hold: false,
+            no_upgrade: false,
+            no_hash_check: false,
+            global: false,
+            arch: None,
+        }
+    }
+}
+
 pub fn execute(args: Args, session: &Session) -> Result<()> {
     crate::util::apply_global_flag(args.global, session)?;
     crate::util::apply_arch_flag(args.arch.as_deref())?;
