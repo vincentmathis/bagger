@@ -301,6 +301,17 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 33. **Alias persistence + shim rm alias** - `config set alias` accepts the JSON alias map (alias add/rm were broken end-to-end); `shim rm` alias added; `create` builds the real `bucket/` layout; verified alias/config/shim/create/completions/virustotal-no-key behavior live
 34. **Export/import architecture** - export records installed arch; import groups by arch with per-group resolution; caught + fixed a `query_installed` regression (a clippy refactor had moved `return Some` inside the upgradable-only branch, emptying all installed queries)
 
+## Build & Distribution
+
+| Feature | Status | Notes |
+| :--- | :---: | :--- |
+| `cargo install bagger` | [x] | Install from crates.io: `cargo install bagger` (publishes `bagger`, `scoop-rs`, `bagger-hash`) |
+| `scripts/install.ps1` | [x] | One-liner PowerShell installer: `iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/main/scripts/install.ps1 \| iex` |
+| GitHub Actions CI | [x] | Lint (fmt+clippy), test matrix (x64/i686/arm64), release build, auto-release via `release-please` |
+| Release artifacts | [x] | `bagger-x86_64/i686/aarch64-pc-windows-msvc.zip` attached to GitHub releases |
+| Scoop bucket | [~] | Published as `scripts/install.ps1` one-liner; dedicated `bagger` bucket (`scoop bucket add bagger …`) not yet created |
+| winget package | [~] | Not yet published (would require community maintainer approval of a `vincentmathis.bagger` manifest) |
+
 ## Notes
 
 - The core install/uninstall/upgrade flow is fully implemented with commit logic supporting archives, shims, shortcuts, persist, psmodule, env, and scripts.
@@ -310,3 +321,4 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 - Archive extraction depends on an external `7z` executable.
 - The library (`scoop-rs`) is API-complete for manifests but some options are parsed-but-not-active.
 - `bagger-hash` is a new crate providing MD5/SHA1/SHA256/SHA512 hashing.
+- The original `scoop-hash` crate on crates.io was owned by a third party, so the crate was renamed to `bagger-hash`.
