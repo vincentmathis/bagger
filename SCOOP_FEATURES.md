@@ -304,7 +304,8 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 ## Notes
 
 - The core install/uninstall/upgrade flow is fully implemented with commit logic supporting archives, shims, shortcuts, persist, psmodule, env, and scripts.
-- Verified by offline end-to-end runs against scratch roots: isolated `file://` install, bucket install (arch default), 1.0→2.0 upgrade, `--arch 32bit` + `SCOOP_ARCH` selection, invalid-arch rejection, `list`/`prefix`/`which`/`shim ls`/`status`/`checkup`, bucket add/list/update/remove + search/info/cat/depends, export/import roundtrips (incl. holds), sqlite cache creation + mtime invalidation, aria2-missing warning with curl fallback, download-only flow, running-process guard block + `ignore_running_processes` bypass, and clean uninstalls with no leftovers.
+- Verified by offline end-to-end runs against scratch roots: isolated `file://` install, bucket install (arch default), 1.0→2.0 upgrade, `--arch 32bit` + `SCOOP_ARCH` selection, invalid-arch rejection, `list`/`prefix`/`which`/`shim ls`/`status`/`checkup`, bucket add/list/update/remove + search/info/cat/depends, export/import roundtrips (incl. holds), sqlite cache creation + mtime invalidation, aria2-missing warning with curl fallback, download-only flow, running-process guard block + `ignore_running_processes` bypass, innosetup-implicit-`innounp` install, and clean uninstalls with no leftovers.
+- 60 real Main-bucket manifests parse with zero failures; remaining schema shapes (`innosetup`, `cookie`) verified via synthetic manifests.
 - PowerShell script invocation is functional but requires `powershell.exe` (Windows-only).
 - Archive extraction depends on an external `7z` executable.
 - The library (`scoop-rs`) is API-complete for manifests but some options are parsed-but-not-active.
