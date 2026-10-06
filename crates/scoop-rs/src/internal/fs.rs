@@ -49,7 +49,9 @@ pub fn walk_dir_json<P: AsRef<Path>>(path: P) -> io::Result<Vec<PathBuf>> {
         .filter_map(io::Result::ok)
         .filter(|de| {
             let path = de.path();
-            let name = path.file_name().unwrap().to_str().unwrap();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                return false;
+            };
             // Only files, and avoid npm package config file
             path.is_file() && name.ends_with(".json") && name != "package.json"
         })

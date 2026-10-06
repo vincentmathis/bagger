@@ -107,7 +107,10 @@ pub(crate) fn query_installed(
                     if let Ok(e) = item {
                         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or_default();
                         let filename = e.file_name();
-                        let name = filename.to_str().unwrap();
+                        let Some(name) = filename.to_str() else {
+                            // Skip entries with non-UTF8 names.
+                            return None;
+                        };
                         // The name `scoop` is reserved for Scoop, ignore it
                         let is_scoop = name == "scoop";
                         let manifest_path = e.path().join("current/manifest.json");
@@ -334,7 +337,7 @@ pub(crate) fn query_synced(
                     .par_bridge()
                     .filter_map(|entry| {
                         let filename = entry.file_name();
-                        let name = filename.to_str().unwrap().strip_suffix(".json").unwrap();
+                        let name = filename.to_str().and_then(|n| n.strip_suffix(".json"))?;
 
                         // Here we can do some pre-filtering by package name, if there
                         // isn't any wildcard query and no extra query requested on
@@ -611,6 +614,37 @@ mod tests {
 
         std::env::remove_var("SCOOP");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Stray non-manifest files in a bucket directory must be ignored,
+    /// never panic query_synced.
+    #[test]
+    fn synced_query_ignores_stray_files() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-query-stray");
+        let bucket_dir = dir.join("buckets").join("qbuk").join("bucket");
+        std::fs::create_dir_all(&bucket_dir).unwrap();
+        std::fs::write(
+            bucket_dir.join("qapp.json"),
+            r#"{
+                "version": "1.0", "homepage": "https://example.com",
+                "license": "MIT", "url": "https://example.com/a.bin",
+                "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }"#,
+        )
+        .unwrap();
+        // Stray files a real bucket directory may contain.
+        std::fs::write(bucket_dir.join("README.md"), b"docs").unwrap();
+        std::fs::write(bucket_dir.join("package.json"), b"{}").unwrap();
+
+        std::env::set_var("SCOOP", &dir);
+        let session = Session::new();
+        let pkgs = query_synced(&session, &["*"], &[]).unwrap();
+        std::env::remove_var("SCOOP");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].name(), "qapp");
     }
 }
 /// Parse a bucket manifest, serving it from the SQLite cache on hits.
