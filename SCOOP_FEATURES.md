@@ -296,6 +296,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 28. **Real installing import** - `import [FILE] [-y]` installs exported apps through the install flow (was list-only) and restores holds; verified offline roundtrip incl. hold state
 29. **Cold-path fixes from execution** - `download --help` no longer panics (`-v` collided with global verbose; now long-only `--version`); `reset` repoints `current` via junction-aware removal (was os error 183); verified by reset/cleanup e2e across two versions
 30. **Archive/script/persist/broken-shim verification** - 7z extraction (incl. subdirs), `post_install` markers and persist symlinks all behave Scoop-true; `checkup` now detects broken content shims via `shim::target_of` (old check only saw dangling symlinks)
+31. **Installer-hook verification + README rebrand** - `pre_install`/`installer.script`/`pre_uninstall`/`uninstaller.script` all execute in order (verified offline); release profile builds (8.1MB, fat LTO); README rewritten for bagger with the real 31-command list
 29. **Alias persistence + shim rm alias** - `config set alias` accepts the JSON alias map (alias add/rm were broken end-to-end); `shim rm` alias added; `create` builds the real `bucket/` layout; verified alias/config/shim/create/completions/virustotal-no-key behavior live
 
 ## Notes
