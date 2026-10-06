@@ -48,7 +48,7 @@ pub enum Error {
     HashMismatch(HashMismatchContext),
 
     /// Invalid cache file error
-    #[error("error")]
+    #[error("cache file not found or unreadable: {}", .path.display())]
     InvalidCacheFile { path: PathBuf },
 
     /// Throw when receiving an invalid answer from the frontend.

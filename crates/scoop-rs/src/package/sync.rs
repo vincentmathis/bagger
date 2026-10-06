@@ -555,7 +555,8 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                     let _ = tx.send(Event::PackageIntegrityCheckProgress(progress));
                 }
 
-                let mut file = std::fs::File::open(path)?;
+                let mut file = std::fs::File::open(&path)
+                    .map_err(|_| Error::InvalidCacheFile { path: path.clone() })?;
                 loop {
                     let len = file.read(&mut buf)?;
                     if len == 0 {
