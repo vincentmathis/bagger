@@ -1562,6 +1562,31 @@ mod tests {
     }
 
         #[test]
+    fn github_mode_falls_back_to_download() {
+        use crate::package::manifest::{HashExtraction, HashExtractionMode};
+
+        let spec = HashExtraction {
+            find: None,
+            regex: None,
+            jsonpath: None,
+            xpath: None,
+            mode: Some(HashExtractionMode::Github),
+            url: None,
+        };
+        let subs = AutoupdateSubstitutions {
+            version: "2.0",
+            asset_url: "https://example.com/a-2.0.zip",
+            captures: &[],
+        };
+        // Site-specific hash modes fall back to downloading the asset
+        // (no network happens on this path).
+        match super::resolve_asset_hash(subs.asset_url, Some(&spec), &subs, None).unwrap() {
+            super::AssetHash::Download => {}
+            super::AssetHash::Found(hash) => panic!("unexpected resolved hash {hash}"),
+        }
+    }
+
+    #[test]
     fn autoupdate_template_expansion() {        let captures = vec![
             ("0".to_owned(), "v2.0".to_owned()),
             ("1".to_owned(), "2.0".to_owned()),

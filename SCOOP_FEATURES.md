@@ -145,7 +145,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 | Field | Status | Notes |
 | :--- | :---: | :--- |
-| `checkver` | [x] | `regex` (+`reverse`, `replace` w/ captures)/`jsonpath`/`xpath`/`script` evaluated; `jsonpath`/`xpath` extract the string `regex` matches; `useragent` honored (else session UA) |
+| `checkver` | [x] | String form, `github` shorthand (`releases/latest` + tag regex), `regex` (+`reverse`, `replace` w/ captures)/`jsonpath`/`xpath`/`script` evaluated; `jsonpath`/`xpath` extract the string `regex` matches; `useragent` honored (else session UA) |
 | `autoupdate` | [x] | URL templates expanded by autofetch; `--write` resolves `download`/`extract`/`json`/`xpath` hashes (others fall back to downloading the asset, like upstream) |
 | `runtime` | [x] | Resolved like `depends`; shown in `info`/`depends` |
 
@@ -292,6 +292,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 23. **checkver useragent + quiet shim removal** - `checkver.useragent` sent (session UA fallback); removal progress only announced for files that exist
 24. **autoupdate hash rewriting** - `autofetch -w` downloads expanded URLs, computes sha256 and rewrites `url`/`hash` (shape-preserving, non-download modes skipped); verified end-to-end offline plus unit test
 25. **autoupdate extract/json/xpath hash modes** - upstream-faithful: textfile search with `$sha256…` placeholders, JSON/XPath hash documents, length-inferred `format_hash`, full `$version`/`$match<TitleCase>`/`$basename` substitutions, download fallback; verified offline e2e
+26. **Schema-compat hardening** - verified string-form `checkver`/`sourceforge` and `github` shorthand parsing against the upstream schema; added missing `github` hash mode; live-verified `github:` checkver against api real releases page
 
 ## Notes
 

@@ -395,6 +395,8 @@ pub enum HashExtractionMode {
     Download,
     #[serde(rename = "extract")]
     Extract,
+    #[serde(rename = "github")]
+    Github,
     #[serde(rename = "json")]
     Json,
     #[serde(rename = "xpath")]
@@ -1357,5 +1359,68 @@ impl InstallInfo {
     #[inline]
     pub fn url(&self) -> Option<&str> {
         self.url.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(json: &str) -> Manifest {
+        Manifest::parse_bytes(json.as_bytes(), std::path::Path::new("schema-test.json"))
+            .expect("fixture should parse")
+    }
+
+    fn base(extra: &str) -> String {
+        format!(
+            r#"{{"version": "1.0", "homepage": "https://example.com",
+                "license": "MIT", {extra}}}"#
+        )
+    }
+
+    #[test]
+    fn checkver_string_form() {
+        let m = manifest(&base(r#""checkver": "v([\\d.]+)""#));
+        let checkver = m.checkver().expect("checkver");
+        assert_eq!(checkver.regex.as_deref(), Some("v([\\d.]+)"));
+    }
+
+    #[test]
+    fn checkver_github_shorthand() {
+        let m = manifest(&base(
+            r#""checkver": {"github": "https://github.com/owner/repo"}"#,
+        ));
+        let checkver = m.checkver().expect("checkver");
+        assert_eq!(
+            checkver.url.as_deref(),
+            Some("https://github.com/owner/repo/releases/latest")
+        );
+        assert!(checkver.regex.is_some());
+        // Effective checkver exposes the synthesized pair.
+        assert!(m.effective_checkver().is_some());
+    }
+
+    #[test]
+    fn sourceforge_string_form() {
+        let m = manifest(&base(r#""checkver": {"sourceforge": "myproj"}"#));
+        let sourceforge = m
+            .checkver()
+            .and_then(|c| c.sourceforge.as_ref())
+            .expect("sourceforge");
+        assert_eq!(sourceforge.path, "myproj");
+    }
+
+    #[test]
+    fn hash_extraction_github_mode() {
+        let m = manifest(&base(
+            r#""autoupdate": {"url": "https://example.com/$version/a.zip",
+                "hash": {"mode": "github"}}"#,
+        ));
+        let mode = m
+            .autoupdate()
+            .and_then(|a| a.hash.as_ref())
+            .map(|h| h.devectorize())
+            .and_then(|v| v.into_iter().next().and_then(|h| h.mode.clone()));
+        assert!(matches!(mode, Some(HashExtractionMode::Github)));
     }
 }
