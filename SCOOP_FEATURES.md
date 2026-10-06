@@ -17,8 +17,8 @@ Legend:
 | :--- | :---: | :--- |
 | `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
 | `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal, `-g/--global` |
-| `bagger update <app>` | [x] | Single app update |
-| `bagger upgrade` | [x] | Upgrade all installed apps; `-g/--global` for global scope; `--arch` override |
+| `bagger update` | [x] | Pull all subscribed buckets (no args; app upgrades live in `upgrade`; per-bucket update intentionally absent, matching upstream Scoop) |
+| `bagger upgrade` | [x] | Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override |
 | `bagger search <query>` | [x] | Search across all buckets |
 | `bagger list` | [x] | List installed apps; supports `--upgradable` |
 | `bagger info <app>` | [x] | Show manifest info for any app |
@@ -35,10 +35,9 @@ Legend:
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
-| `bagger bucket add <name> [url]` | [x] | Add bucket from built-in list or custom URL |
+| `bagger bucket add <name> [url]` | [x] | Add bucket from built-in list or custom URL (git clone) |
 | `bagger bucket remove <name>` | [x] | Remove bucket |
-| `bagger bucket update` | [x] | Update all buckets (parallel, git-based) |
-| `bagger bucket list` | [x] | List added buckets |
+| `bagger bucket list` | [x] | List added buckets (manifest counts, sources) |
 
 ### Cache Commands
 
