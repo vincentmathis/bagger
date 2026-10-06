@@ -387,10 +387,8 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
         .and_then(|c| c.useragent.as_deref())
         .or_else(|| session.user_agent.get().map(|s| s.as_str()));
     let content = match user_agent {
-        Some(ua) => {
-            internal::network::fetch_url_with_headers(&url, proxy, &[("User-Agent", ua)])
-                .map(|(_, body)| body)
-        }
+        Some(ua) => internal::network::fetch_url_with_headers(&url, proxy, &[("User-Agent", ua)])
+            .map(|(_, body)| body),
         None => internal::network::fetch_url(&url, proxy),
     };
     let content = match content {
@@ -579,12 +577,22 @@ impl AutoupdateSubstitutions<'_> {
 
         let version = self.version;
         vars.push(("version".to_owned(), version.to_owned()));
-        for (sep, name) in [('.', "dotVersion"), ('_', "underscoreVersion"), ('-', "dashVersion")] {
+        for (sep, name) in [
+            ('.', "dotVersion"),
+            ('_', "underscoreVersion"),
+            ('-', "dashVersion"),
+        ] {
             vars.push((
                 name.to_owned(),
                 version
                     .chars()
-                    .map(|c| if c == '.' || c == '_' || c == '-' { sep } else { c })
+                    .map(|c| {
+                        if c == '.' || c == '_' || c == '-' {
+                            sep
+                        } else {
+                            c
+                        }
+                    })
                     .collect(),
             ));
         }
@@ -601,9 +609,14 @@ impl AutoupdateSubstitutions<'_> {
             None => (version, ""),
         };
         let numbered: Vec<&str> = first_part.split('.').collect();
-        for (idx, name) in ["majorVersion", "minorVersion", "patchVersion", "buildVersion"]
-            .into_iter()
-            .enumerate()
+        for (idx, name) in [
+            "majorVersion",
+            "minorVersion",
+            "patchVersion",
+            "buildVersion",
+        ]
+        .into_iter()
+        .enumerate()
         {
             vars.push((
                 name.to_owned(),
@@ -618,11 +631,15 @@ impl AutoupdateSubstitutions<'_> {
         {
             vars.push((
                 "matchHead".to_owned(),
-                caps.name("head").map(|m| m.as_str().to_owned()).unwrap_or_default(),
+                caps.name("head")
+                    .map(|m| m.as_str().to_owned())
+                    .unwrap_or_default(),
             ));
             vars.push((
                 "matchTail".to_owned(),
-                caps.name("tail").map(|m| m.as_str().to_owned()).unwrap_or_default(),
+                caps.name("tail")
+                    .map(|m| m.as_str().to_owned())
+                    .unwrap_or_default(),
             ));
         }
 
@@ -747,14 +764,10 @@ fn find_hash_in_textfile(
         _ => r"^\s*([a-fA-F0-9]+)\s*$".to_owned(),
     };
 
-    if let Ok(re) = regex::RegexBuilder::new(&pattern)
-        .multi_line(true)
-        .build()
-    {
+    if let Ok(re) = regex::RegexBuilder::new(&pattern).multi_line(true).build() {
         if let Some(caps) = re.captures(content) {
             if let Some(m) = caps.get(1) {
-                let hash: String =
-                    m.as_str().chars().filter(|c| !c.is_whitespace()).collect();
+                let hash: String = m.as_str().chars().filter(|c| !c.is_whitespace()).collect();
                 if let Some(formatted) = format_hash_value(&hash) {
                     return Some(formatted);
                 }
@@ -992,12 +1005,8 @@ fn resolve_asset_hash(
     let mode = match &spec.mode {
         Some(HashExtractionMode::Download) => Mode::Download,
         Some(HashExtractionMode::Extract) => Mode::Extract(spec.url.as_deref()),
-        Some(HashExtractionMode::Json) => {
-            Mode::Json(spec.jsonpath.as_deref().unwrap_or(""))
-        }
-        Some(HashExtractionMode::Xpath) => {
-            Mode::Xpath(spec.xpath.as_deref().unwrap_or(""))
-        }
+        Some(HashExtractionMode::Json) => Mode::Json(spec.jsonpath.as_deref().unwrap_or("")),
+        Some(HashExtractionMode::Xpath) => Mode::Xpath(spec.xpath.as_deref().unwrap_or("")),
         Some(HashExtractionMode::Rdf) => Mode::Rdf(spec.url.as_deref()),
         // Fosshub/sourceforge/github resolve from the asset URL itself.
         Some(
@@ -1034,9 +1043,7 @@ fn resolve_asset_hash(
             None => Ok(AssetHash::Download),
         },
         Mode::Rdf(hashfile_url) => {
-            let hashfile_url = hashfile_url
-                .map(|url| subs.expand(url))
-                .unwrap_or_default();
+            let hashfile_url = hashfile_url.map(|url| subs.expand(url)).unwrap_or_default();
             if hashfile_url.is_empty() {
                 return Ok(AssetHash::Download);
             }
@@ -1057,9 +1064,7 @@ fn resolve_asset_hash(
             let Some(body) = internal::network::fetch_url(&hashfile_url, proxy) else {
                 return Ok(AssetHash::Download);
             };
-            match eval_jsonpath(&body, &subs.expand(jsonpath))
-                .and_then(|h| format_hash_value(&h))
-            {
+            match eval_jsonpath(&body, &subs.expand(jsonpath)).and_then(|h| format_hash_value(&h)) {
                 Some(hash) => Ok(AssetHash::Found(hash)),
                 None => Ok(AssetHash::Download),
             }
@@ -1078,10 +1083,7 @@ fn resolve_asset_hash(
             }
         }
         Mode::Extract(hashfile_url) => {
-            let regex = spec
-                .find
-                .as_deref()
-                .or(spec.regex.as_deref());
+            let regex = spec.find.as_deref().or(spec.regex.as_deref());
             match hashfile_url {
                 Some(url) => {
                     let hashfile_url = subs.expand(url);
@@ -1182,7 +1184,11 @@ pub fn autoupdate_apply(
             label: "noarch",
             url_path: vec!["url"],
             hash_path: vec!["hash"],
-            templates: urls.devectorize().into_iter().map(|s| s.to_owned()).collect(),
+            templates: urls
+                .devectorize()
+                .into_iter()
+                .map(|s| s.to_owned())
+                .collect(),
             hash_specs: autoupdate.hash.as_ref(),
         });
     }
@@ -1212,7 +1218,9 @@ pub fn autoupdate_apply(
     }
 
     if scopes.is_empty() {
-        result.skipped.push("autoupdate has no URL templates".to_owned());
+        result
+            .skipped
+            .push("autoupdate has no URL templates".to_owned());
     }
 
     // Load the raw manifest JSON once for shape checks and rewriting.
@@ -1232,9 +1240,7 @@ pub fn autoupdate_apply(
             templates,
             hash_specs,
         } = scope;
-        let specs: Vec<_> = hash_specs
-            .map(|s| s.devectorize())
-            .unwrap_or_default();
+        let specs: Vec<_> = hash_specs.map(|s| s.devectorize()).unwrap_or_default();
 
         let expanded: Vec<String> = templates
             .iter()
@@ -1310,7 +1316,8 @@ pub fn autoupdate_apply(
 }
 
 /// Build a JSON string or array of strings, mirroring manifest shape.
-fn string_or_array(values: &[String]) -> serde_json::Value {    if values.len() == 1 {
+fn string_or_array(values: &[String]) -> serde_json::Value {
+    if values.len() == 1 {
         serde_json::Value::String(values[0].clone())
     } else {
         serde_json::Value::Array(
@@ -1460,8 +1467,7 @@ fn eval_xpath(content: &str, path: &str) -> Option<String> {
                 position,
                 attr_filter,
             } => {
-                current =
-                    apply_xpath_element(&current, *descendant, *tag, *position, *attr_filter);
+                current = apply_xpath_element(&current, *descendant, *tag, *position, *attr_filter);
             }
             XPathStep::Text => {
                 if !is_last {
@@ -1638,11 +1644,7 @@ fn parse_xpath_step(step: &str, descendant: bool) -> Option<XPathStep<'_>> {
             let unquoted = value
                 .strip_prefix('\'')
                 .and_then(|v| v.strip_suffix('\''))
-                .or_else(|| {
-                    value
-                        .strip_prefix('"')
-                        .and_then(|v| v.strip_suffix('"'))
-                })?;
+                .or_else(|| value.strip_prefix('"').and_then(|v| v.strip_suffix('"')))?;
             attr_filter = Some((attr.trim(), unquoted));
         }
     }
@@ -1806,7 +1808,7 @@ mod tests {
         );
     }
 
-        #[test]
+    #[test]
     fn github_mode_falls_back_to_download() {
         use crate::package::manifest::{HashExtraction, HashExtractionMode};
 
@@ -1832,7 +1834,8 @@ mod tests {
     }
 
     #[test]
-    fn autoupdate_template_expansion() {        let captures = vec![
+    fn autoupdate_template_expansion() {
+        let captures = vec![
             ("0".to_owned(), "v2.0".to_owned()),
             ("1".to_owned(), "2.0".to_owned()),
             ("tag".to_owned(), "v2.0".to_owned()),
@@ -1859,9 +1862,10 @@ mod tests {
     /// `checkver.useragent` must be honored when fetching.
     ///
     /// Uses a local `file://` document so no network is needed; custom
-        /// headers are simply ignored by the file protocol.
+    /// headers are simply ignored by the file protocol.
     #[test]
-    fn checkver_honors_useragent() {        let dir = std::env::temp_dir().join("bagger-test-checkver-ua");
+    fn checkver_honors_useragent() {
+        let dir = std::env::temp_dir().join("bagger-test-checkver-ua");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("ver.json"), r#"{"tag": "9.9.9"}"#).unwrap();
         let url = format!(
@@ -1929,10 +1933,7 @@ mod tests {
         assert_eq!(rewritten["version"], "2.0");
         assert_eq!(done.rewritten_hashes, vec![expected.clone()]);
         assert_eq!(rewritten["hash"], expected);
-        assert!(rewritten["url"]
-            .as_str()
-            .unwrap()
-            .ends_with("app-2.0.bin"));
+        assert!(rewritten["url"].as_str().unwrap().ends_with("app-2.0.bin"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1947,10 +1948,7 @@ mod tests {
 
     #[test]
     fn substitution_families() {
-        let subs = test_subs(
-            "1.2.3-beta",
-            "https://example.com/dl/app-1.2.3-beta.zip",
-        );
+        let subs = test_subs("1.2.3-beta", "https://example.com/dl/app-1.2.3-beta.zip");
         assert_eq!(subs.expand("$version"), "1.2.3-beta");
         assert_eq!(subs.expand("$dotVersion"), "1.2.3.beta");
         assert_eq!(subs.expand("$underscoreVersion"), "1_2_3_beta");
@@ -1981,7 +1979,9 @@ mod tests {
     #[test]
     fn format_hash_lengths() {
         assert_eq!(
-            format_hash_value("sha256:ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789"),
+            format_hash_value(
+                "sha256:ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789"
+            ),
             Some("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned())
         );
         assert_eq!(

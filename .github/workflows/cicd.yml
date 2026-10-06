@@ -74,17 +74,17 @@ jobs:
     name: Release Please
     needs: ci_test_build
     runs-on: ubuntu-latest
-    if: github.repository == 'chawyehsu/hok' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.repository == 'vincentmathis/bagger' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: google-github-actions/release-please-action@v3
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           release-type: rust
-          release-as: 0.1.0-beta.7
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+          release-as: 0.1.0-beta.8
+  outputs:
+    release_created: ${{ steps.release.outputs.release_created }}
+    tag_name: ${{ steps.release.outputs.tag_name }}
 
   # Build production artifacts
   cd_release_build:
@@ -97,15 +97,15 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            name: hok-x86_64-pc-windows-msvc.zip
+            name: bagger-x86_64-pc-windows-msvc.zip
 
           - target: i686-pc-windows-msvc
             os: windows-latest
-            name: hok-i686-pc-windows-msvc.zip
+            name: bagger-i686-pc-windows-msvc.zip
 
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-            name: hok-aarch64-pc-windows-msvc.zip
+            name: bagger-aarch64-pc-windows-msvc.zip
 
     runs-on: ${{ matrix.os }}
     continue-on-error: true
@@ -140,20 +140,20 @@ jobs:
           case ${{ matrix.target }} in
             aarch64-unknown-linux-gnu) STRIP="aarch64-linux-gnu-strip" ;;
           esac;
-          "${STRIP}" target/${{ matrix.target }}/release/hok
+          "${STRIP}" target/${{ matrix.target }}/release/bagger
 
       - name: Prepare artifacts [Windows]
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.name }} hok.exe
+          7z a ../../../${{ matrix.name }} bagger.exe
           cd -
 
       - name: Prepare artifacts [-nix]
         if: matrix.os != 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czvf ../../../${{ matrix.name }} hok
+          tar czvf ../../../${{ matrix.name }} bagger
           cd -
 
       - name: Upload artifacts
@@ -172,15 +172,15 @@ jobs:
         uses: actions/download-artifact@v4
 
       - name: Prepare Checksums
-        run: for file in hok-*/hok-*; do openssl dgst -sha256 -r "$file" | awk '{print $1}' > "${file}.sha256"; done
+        run: for file in bagger-*/bagger-*; do openssl dgst -sha256 -r "$file" | awk '{print $1}' > "${file}.sha256"; done
 
       - name: Publish Release
-        run: gh release edit ${{ needs.cd_release_please.outputs.tag_name }} --draft=false --repo=chawyehsu/hok
+        run: gh release edit ${{ needs.cd_release_please.outputs.tag_name }} --draft=false --repo=vincentmathis/bagger
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Attach Artifacts
         uses: softprops/action-gh-release@v2
         with:
-          files: hok-*/hok-*
+          files: bagger-*/bagger-*
           tag_name: ${{ needs.cd_release_please.outputs.tag_name }}

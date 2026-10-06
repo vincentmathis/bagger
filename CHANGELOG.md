@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.1.0-beta.8](https://github.com/vincentmathis/bagger/compare/v0.1.0-beta.7...v0.1.0-beta.8) (2026-10-06)
+
+Full Scoop command parity (31 commands): every Scoop command now has a `bagger` equivalent.
+
+### ⚠ BREAKING CHANGES
+
+- **crates:** `hok` renamed to `bagger`; `libscoop` renamed to `scoop-rs`; `scoop-hash` renamed to `bagger-hash`. The original `scoop-hash` crate on crates.io was owned by a third party, so the crate was renamed.
+- All crate names, crate IDs, and crate-internal module paths changed. Update imports accordingly.
+
+### Features
+
+- **all:** rebrand to `bagger` and `scoop-rs`; new `bagger-hash` crate providing MD5/SHA1/SHA256/SHA512 (`bagger-hash` v0.1.0-beta.8)
+- **install:** isolated installs from manifest URLs or local `.json` files (without a bucket); `-g/--global` for all-users install (admin-gated); `--arch` overrides target architecture
+- **import:** real install flow (`import [FILE] [-y]` installs exported apps and restores holds); skips isolated packages from a prior export
+- **checkver:** `regex` (+`reverse`/`replace`/`.NET`-style captures), `jsonpath`, `xpath` (`roxmltree`-backed subset), `script`, arch-specific specs, `github` shorthand, and `useragent` honored
+- **autofetch:** `bagger autofetch <app>|all [--write]` previews expanded autoupdate URLs and hash rewrites (download / extract / json / xpath / rdf / fosshub / sourceforge / github / metalink modes)
+- **virustotal:** real v3 `GET /files/{sha256}` file-report lookup with malicious/suspicious/harmless/undetected verdicts
+- **download:** `aria2c` used when `aria2-enabled` is set and the binary is on PATH (honors split/max-connection/min-split/retry-wait/cookie/proxy/extra options), libcurl fallback, optional missing-binary warning (`aria2_warning_enabled`)
+- **manifest-cache:** opt-in SQLite cache (`use_sqlite_cache`); raw JSON keyed by (bucket, name) with mtime+size invalidation, shared across query threads
+- **config:** `show_manifest` displays manifests before install/upgrade confirmation; `aria2-*` settings with full config getters; `use_sqlite_cache`, `ignore_running_processes`, `use_external_7zip`, `use_isolated_path`, `alias` (JSON map), `gh_token`, `private_hosts`, `proxy`, `scoop_branch` (parsed)
+- **arch:** process-wide architecture override via `--arch` flag or `SCOOP_ARCH` env; `install.json` records the resolved architecture
+- **checkup:** broken-shim detection for content shims via `shim::target_of` (quoted-target parsing)
+- **reset:** junction-aware `current` repointing (avoids os error 183 on re-extraction)
+- **shim:** asymmetric add/remove now matches exactly (`{name}.exe`/`.cmd`/`.ps1`/bare); `which` resolves through `current` junctions
+- **docs:** README rewritten for `bagger` with the real 31-command list and install instructions; `scripts/install.ps1` (Scoop-style one-liner) added
+
+### Bug Fixes
+
+- **download:** remove dead `--version` long flag (`-v` was colliding with the global `--verbose` verb)
+- **network:** `get_content_length` removed; unknown remote sizes no longer validate missing cache (the `0 == 0` bug) nor skip downloads
+- **query:** restored `query_installed` non-empty result (a clippy refactor had moved `return Some` into the upgradable-only branch, emptying all installed queries)
+- **fs:** zero panics on hostile filesystems (non-UTF8 names, stray files, missing cache)
+- **import:** `export`/`import` roundtrip now records and restores architecture per app
+- **offline:** cache-miss now reports the missing cache file via `InvalidCacheFile` instead of raw os error 2
+
+### Performance Improvements
+
+- Parsed bucket manifests are cached and shared across query threads (avoids repeated JSON parse on `search`/`info`/`list`)
+- Fat-LTO release build (`panic = "abort"`): 8.1 MB binary
+
+---
+
 ## [0.1.0-beta.7](https://github.com/chawyehsu/hok/compare/v0.1.0-beta.6...v0.1.0-beta.7) (2024-12-10)
 
 

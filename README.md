@@ -2,22 +2,33 @@
 
 > Bagger is a CLI implementation of [Scoop](https://scoop.sh/) in Rust
 
+[![crate](https://img.shields.io/crates/v/bagger)](https://crates.io/crates/bagger)
 [![license][license-badge]](LICENSE)
 
 ## Install
 
-🚧 **CAVEAT**: Under heavy development, interfaces may change without notice.
+```ps1
+# Windows (user scope), Scoop-style:
+iwr -useb https://bagger.sh/install.ps1 | iex
 
-Prerequisites: Git, Rust, PowerShell 5+ (Windows-only).
+# System-wide (requires admin):
+iwr -useb https://bagger.sh/install.ps1 | iex -args -System
 
-```sh
-# clone the repo
-git clone https://github.com/vincentmathis/bagger
-cd bagger
-# build
-cargo build --release
-# the binary lives at target/release/bagger.exe
+# Via the Scoop bucket that mirrors upstream's:
+scoop bucket add bagger https://github.com/vincentmathis/bagger-bucket
+scoop install bagger
+
+# Via winget (when published):
+winget install --id vincentmathis.bagger -e
 ```
+
+🚧 **Stability caveat**: `bagger` is on a pre-1.0 track (`0.1.0-beta.8`); while the core
+Scoop command surface is fully implemented, individual flag behaviour may differ slightly from upstream
+Scoop. Pinned releases and checksums are available on the [GitHub releases page](https://github.com/vincentmathis/bagger/releases).
+
+**Prerequisites** (Windows-only): PowerShell 5+, an internet connection on first install.
+
+---
 
 ## Commands
 
@@ -81,6 +92,28 @@ Notable extras beyond stock Scoop parity:
 
 See [SCOOP_FEATURES.md](SCOOP_FEATURES.md) for the full Scoop-vs-bagger feature comparison.
 
+## Configuration
+
+Bagger reads the same `config.json` keys that Scoop uses, so a pre-existing Scoop
+configuration is picked up automatically. Run `bagger config` to list current values or
+`bagger config set <key> <value>` to change one.
+
+```sh
+# Example: enable aria2 for faster downloads
+bagger config set aria2-enabled true
+```
+
+Notable keys (full list in [SCOOP_FEATURES.md](SCOOP_FEATURES.md)):
+
+| Key | Effect |
+| :--- | :--- |
+| `use_sqlite_cache` | Cache parsed bucket manifests in SQLite (restart faster, less disk I/O) |
+| `show_manifest` | Echo each manifest JSON to the terminal before an install/upgrade confirmation prompt |
+| `ignore_running_processes` | Abort install/upgrade/uninstall when an app's process is still running (otherwise prompt) |
+| `aria2-*` | Enable & tune Aria2 (falls back to libcurl when missing) |
+| `private_hosts` / `gh_token` | Authenticate against private GitHub repos and enterprise hosts |
+| `alias` | JSON map of `bagger <name>` → real command (managed via `bagger alias`) |
+
 ## Development
 
 ```sh
@@ -90,6 +123,8 @@ cargo run -- help
 cargo test --workspace
 # lint
 cargo clippy --all-targets
+# release build (8 MB, fat-LTO, panic=abort)
+cargo build --release
 ```
 
 ## License
