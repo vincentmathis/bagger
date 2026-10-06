@@ -107,15 +107,13 @@ impl Session {
 
     /// Scope subsequent operations to the global Scoop root.
     ///
-    /// When `global` is true, [`Config::root_path`][1] returns the global
+    /// When `global` is true, `Config::root_path()` returns the global
     /// installation directory (e.g. `C:\ProgramData\scoop`) instead of the
     /// user root, so installs, uninstalls and upgrades target all users.
     /// Pass `false` (the default) to restore user scope.
     ///
     /// The override is runtime-only and is never persisted to `config.json`.
     /// The download cache stays user-scoped.
-    ///
-    /// [1]: crate::config::Config::root_path
     pub fn set_global(&self, global: bool) -> Fallible<()> {
         let mut config = self.config_mut()?;
         if global {

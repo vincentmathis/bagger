@@ -257,9 +257,9 @@ pub(crate) fn query_installed(
                                             return None;
                                         }
                                     }
-
-                                    return Some(package);
                                 }
+
+                                return Some(package);
                             }
                         }
                     }
@@ -481,6 +481,43 @@ mod tests {
         assert_eq!(pkg.version(), "1.0");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Reproduction: an installed app recording `"architecture": "32bit"`
+    /// must be found by installed queries.
+    #[test]
+    fn installed_query_finds_32bit_record() {
+        let dir = std::env::temp_dir().join("bagger-test-installed-arch");
+        let current = dir.join("apps").join("archt").join("current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(
+            current.join("manifest.json"),
+            r#"{
+                "version": "1.0",
+                "homepage": "https://example.com",
+                "license": "MIT",
+                "url": "https://example.com/a.bin",
+                "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            current.join("install.json"),
+            r#"{"architecture": "32bit", "bucket": "fake"}"#,
+        )
+        .unwrap();
+
+        std::env::set_var("SCOOP", &dir);
+        let session = Session::new();
+        let pkgs = query_installed(&session, &["*"], &[]).unwrap();
+        std::env::remove_var("SCOOP");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            pkgs.iter().any(|p| p.name() == "archt"),
+            "installed archt should be found, got: {:?}",
+            pkgs.iter().map(|p| p.name().to_owned()).collect::<Vec<_>>()
+        );
     }
 }
 

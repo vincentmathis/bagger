@@ -256,6 +256,21 @@ impl Package {
         }
     }
 
+    /// Get the installed architecture of this package.
+    ///
+    /// # Returns
+    ///
+    /// The architecture the package was installed for (e.g. `64bit`), if any.
+    pub fn installed_arch(&self) -> Option<&str> {
+        match self.install_state.get() {
+            None => None,
+            Some(state) => match state {
+                InstallState::NotInstalled => None,
+                InstallState::Installed(info) => Some(info.arch.as_str()),
+            },
+        }
+    }
+
     /// Check if the package is held.
     ///
     /// # Note

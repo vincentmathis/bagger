@@ -13,6 +13,9 @@ pub struct Args {
     /// Assume yes to all prompts and run non-interactively
     #[arg(short = 'y', long, action = ArgAction::SetTrue)]
     assume_yes: bool,
+    /// Target architecture for all imported apps (overrides per-app export)
+    #[arg(long)]
+    arch: Option<String>,
 }
 
 pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
@@ -48,11 +51,21 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
             continue;
         }
 
-        if bucket.is_empty() {
-            queries.push(name.to_owned());
-        } else {
-            queries.push(format!("{bucket}/{name}"));
-        }
+        // Per-app architecture from the export, unless globally overridden.
+        let arch = match args.arch.as_deref() {
+            Some(arch) => Some(arch.to_owned()),
+            None => app
+                .get("architecture")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_owned()),
+        };
+
+        let query = match bucket.is_empty() {
+            true => name.to_owned(),
+            false => format!("{bucket}/{name}"),
+        };
+        queries.push((arch, query));
 
         if app.get("held").and_then(|v| v.as_bool()).unwrap_or(false) {
             held.push(name.to_owned());
@@ -73,10 +86,30 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
     }
 
     println!("Importing {} app(s).", queries.len());
-    install::execute(
-        install::Args::from_packages(queries, args.assume_yes),
-        session,
-    )?;
+
+    // Group by architecture: the resolution override is process-wide, so
+    // each arch group installs in its own transaction.
+    queries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut idx = 0;
+    while idx < queries.len() {
+        let arch = queries[idx].0.clone();
+        let mut end = idx;
+        while end < queries.len() && queries[end].0 == arch {
+            end += 1;
+        }
+        let group: Vec<String> = queries[idx..end]
+            .iter()
+            .map(|(_, query)| query.clone())
+            .collect();
+
+        install::execute(
+            install::Args::from_packages(group, args.assume_yes, arch),
+            session,
+        )?;
+        idx = end;
+    }
+    // The resolution override is process-wide: never leak it past import.
+    scoop_rs::arch::clear_override();
 
     // Restore held states recorded in the export.
     for name in &held {

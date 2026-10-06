@@ -58,7 +58,11 @@ pub struct Args {
 
 impl Args {
     /// Build args for programmatic installs (e.g. `import`).
-    pub(crate) fn from_packages(package: Vec<String>, assume_yes: bool) -> Self {
+    pub(crate) fn from_packages(
+        package: Vec<String>,
+        assume_yes: bool,
+        arch: Option<String>,
+    ) -> Self {
         Self {
             package,
             download_only: false,
@@ -72,7 +76,7 @@ impl Args {
             no_upgrade: false,
             no_hash_check: false,
             global: false,
-            arch: None,
+            arch,
         }
     }
 }

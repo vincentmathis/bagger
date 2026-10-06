@@ -17,6 +17,7 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
                 "name": pkg.name(),
                 "bucket": pkg.bucket(),
                 "version": pkg.installed_version().unwrap_or(pkg.version()),
+                "architecture": pkg.installed_arch().unwrap_or(""),
                 "held": pkg.is_held(),
             })
         })
