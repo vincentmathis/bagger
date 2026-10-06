@@ -88,7 +88,7 @@ struct PackageCache<'a> {
 impl PackageCache<'_> {
     fn update_valid_state(&mut self) {
         let mut cnt = 0;
-        for (_, cache) in self.inner.iter() {
+        for cache in self.inner.values() {
             // A file only counts as valid when its remote size is known and
             // matches the local size. Unknown remote sizes (servers omitting
             // Content-Length, non-HTTP URLs) must never validate a missing

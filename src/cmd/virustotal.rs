@@ -50,14 +50,13 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
 
             // Cache files follow pattern: app#version#hash.ext
-            if name
-                .to_lowercase()
-                .starts_with(&format!("{}-", args.package.to_lowercase()))
-                || name.contains(&args.package)
+            if path.is_file()
+                && (name
+                    .to_lowercase()
+                    .starts_with(&format!("{}-", args.package.to_lowercase()))
+                    || name.contains(&args.package))
             {
-                if path.is_file() {
-                    matching_files.push(path);
-                }
+                matching_files.push(path);
             }
         }
     }

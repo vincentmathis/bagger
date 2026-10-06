@@ -46,7 +46,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         }
         Command::List => {
             let config_json = operation::config_list(session)?;
-            println!("{}:", &session.config().path.display().to_string().green());
+            println!("{}:", session.config().path.display().to_string().green());
             println!("{}", config_json);
             Ok(())
         }

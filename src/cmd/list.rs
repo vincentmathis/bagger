@@ -48,8 +48,10 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                 }
 
                 let upgradable = pkg.upgradable_version();
-                if args.upgradable && upgradable.is_some() {
-                    output.push_str(format!(" -> {}", upgradable.unwrap().blue()).as_str());
+                if args.upgradable {
+                    if let Some(version) = upgradable {
+                        output.push_str(format!(" -> {}", version.blue()).as_str());
+                    }
                 }
 
                 if held {
