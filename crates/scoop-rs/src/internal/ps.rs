@@ -135,3 +135,101 @@ pub fn invoke_script(
 
     Ok(())
 }
+
+/// Execute a PowerShell script and capture its standard output.
+///
+/// Same Scoop execution context as [`invoke_script`], but returns the
+/// trimmed stdout instead of discarding it. Used by `checkver.script`
+/// manifests, where the script is expected to print the latest version
+/// (optionally post-processed with `checkver.regex`).
+pub fn invoke_script_capture(
+    session: &Session,
+    package: &Package,
+    cmd: &str,
+    script: &[&str],
+    working_dir: &Path,
+) -> Fallible<String> {
+    let ps_script = script.join("\n");
+    let env_vars = build_context_variables(session, package, cmd, working_dir);
+
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-Command")
+        .arg(&ps_script)
+        .current_dir(working_dir);
+
+    for (key, value) in &env_vars {
+        command.env(key, value);
+    }
+
+    let output = command.output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(crate::Error::Custom(format!(
+            "PowerShell script execution failed for '{}':\nstdout: {}\nstderr: {}",
+            package.name(),
+            stdout,
+            stderr
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::manifest::Manifest;
+
+    /// Build a minimal package for script tests.
+    fn test_package() -> Package {
+        let manifest = Manifest::parse_bytes(
+            br#"{
+                "version": "1.0",
+                "homepage": "https://example.com",
+                "license": "MIT"
+            }"#,
+            Path::new("test-pkg.json"),
+        )
+        .expect("fixture manifest should parse");
+        Package::from("test-pkg", "main", manifest)
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn capture_returns_trimmed_stdout() {
+        let session = Session::new();
+        let pkg = test_package();
+        let out = invoke_script_capture(
+            &session,
+            &pkg,
+            "checkver",
+            &["\"7.8.9\""],
+            &std::env::temp_dir(),
+        )
+        .expect("powershell should run");
+        assert_eq!(out, "7.8.9");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn capture_reports_failure() {
+        let session = Session::new();
+        let pkg = test_package();
+        let err = invoke_script_capture(
+            &session,
+            &pkg,
+            "checkver",
+            &["exit 3"],
+            &std::env::temp_dir(),
+        )
+        .expect_err("failing script should error");
+        assert!(err.to_string().contains("failed"));
+    }
+}

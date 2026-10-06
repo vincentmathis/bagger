@@ -45,8 +45,7 @@ Legend:
 | Command | Status | Notes |
 | :--- | :---: | :--- |
 | `bagger cache list [query]` | [x] | List cached downloads |
-| `bagger cache remove <query>` | [x] | Remove cached files by name/version |
-| `bagger cache clean` | [~] | Covered via `cache remove *` |
+| `bagger cache remove <query>` | [x] | Remove cached files by name/version; `--all` clears everything |
 
 ### Config & Utility Commands
 
@@ -146,7 +145,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 | Field | Status | Notes |
 | :--- | :---: | :--- |
-| `checkver` | [x] | `regex` + `jsonpath` evaluated (fetched url/homepage); `xpath`/`script` parsed only |
+| `checkver` | [x] | `regex`/`jsonpath`/`script` evaluated (fetched url/homepage); `xpath` parsed only |
 | `autoupdate` | [~] | URL templates expanded + hash modes reported by autofetch; fully-automatic hash rewriting not done |
 | `runtime` | [x] | Resolved like `depends`; shown in `info`/`depends` |
 
@@ -284,6 +283,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 14. **Global app installs** - `-g/--global` on install/uninstall/upgrade (plus existing cleanup support) scopes the session root to `global_path` via a runtime-only config override; admin rights required
 15. **Install notes & suggestions** - `notes`/`suggest` shown after install via `PackageInstalledNotes`; added missing `notes()` getter
 16. **checkver jsonpath + arch fallback** - `effective_checkver()` prefers top-level, falls back to `architecture.<arch>.checkver`; `jsonpath` (`$.a.b[0]` subset) evaluated when no `regex` matches
+17. **checkver script support** - `checkver.script` runs via `invoke_script_capture` in the manifest dir context; stdout is the version (optionally filtered by `regex`)
 
 ## Notes
 

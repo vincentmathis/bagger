@@ -337,6 +337,45 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
     let manifest = package.manifest();
     let checkver = manifest.effective_checkver();
 
+    // `checkver.script` runs a PowerShell snippet expected to print the
+    // latest version (optionally post-processed with `checkver.regex`).
+    // It replaces page fetching entirely.
+    if let Some(script) = checkver.and_then(|c| c.script.as_ref()) {
+        let lines = script.devectorize();
+        let fallback_cwd = session.config().cache_path().to_owned();
+        let working_dir = manifest
+            .path()
+            .parent()
+            .unwrap_or(&fallback_cwd);
+        let stdout = internal::ps::invoke_script_capture(
+            session,
+            package,
+            "checkver",
+            &lines,
+            working_dir,
+        )?;
+
+        let latest_version = checkver
+            .and_then(|c| c.regex.as_deref())
+            .and_then(|regex_str| {
+                let re = regex::Regex::new(regex_str).ok()?;
+                re.captures(&stdout)
+                    .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+            })
+            .or_else(|| {
+                stdout
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| line.to_owned())
+            });
+
+        return Ok(CheckverResult {
+            current_version: Some(package.installed_version().unwrap_or(package.version()).to_string()),
+            latest_version,
+        });
+    }
+
     let url = checkver
         .and_then(|c| c.url.as_deref())
         .unwrap_or_else(|| manifest.homepage())
