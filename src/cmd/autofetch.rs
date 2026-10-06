@@ -60,7 +60,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
 fn autofetch_one(session: &Session, pkg: &scoop_rs::Package, write: bool) -> Result<bool> {
     let manifest = pkg.manifest();
 
-    if manifest.checkver().is_none() {
+    if manifest.effective_checkver().is_none() {
         println!(
             "{}: {}",
             pkg.name(),

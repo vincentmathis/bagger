@@ -885,6 +885,17 @@ impl Manifest {
         self.inner.checkver.as_ref()
     }
 
+    /// Return the effective `checkver` spec for the current architecture.
+    ///
+    /// This is the top-level `checkver` if present, otherwise the
+    /// architecture-specific one (`architecture.<arch>.checkver`).
+    pub fn effective_checkver(&self) -> Option<&Checkver> {
+        self.inner
+            .checkver
+            .as_ref()
+            .or_else(|| arch_specific_field!(self, checkver))
+    }
+
     /// Return the `autoupdate` spec of this manifest, if any.
     #[inline]
     pub fn autoupdate(&self) -> Option<&Autoupdate> {
@@ -928,6 +939,11 @@ impl Manifest {
     #[inline]
     pub fn suggest(&self) -> Option<&HashMap<String, Vectorized<String>>> {
         self.inner.suggest.as_ref()
+    }
+
+    /// Return the `notes` of this manifest.
+    pub fn notes(&self) -> Option<Vec<&str>> {
+        self.inner.notes.as_ref().map(|v| v.devectorize())
     }
 
     pub fn pre_install(&self) -> Option<Vec<&str>> {

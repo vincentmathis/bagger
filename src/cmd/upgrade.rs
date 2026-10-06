@@ -195,6 +195,24 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                     let _ = tx.send(Event::PromptTransactionNeedConfirmResult(answer));
                     let _ = stdout.execute(cursor::Hide);
                 }
+                Event::PackageInstalledNotes {
+                    ident,
+                    notes,
+                    suggest,
+                } => {
+                    if !notes.is_empty() {
+                        println!("\nNotes for {}:", ident);
+                        for note in &notes {
+                            println!("  {}", note);
+                        }
+                    }
+                    if !suggest.is_empty() {
+                        println!("Suggestions for {}:", ident);
+                        for entry in &suggest {
+                            println!("  {}", entry);
+                        }
+                    }
+                }
                 Event::PackageSyncDone => break,
                 _ => {}
             }

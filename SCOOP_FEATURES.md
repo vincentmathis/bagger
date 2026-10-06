@@ -94,9 +94,9 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | `license` | [x] | Supports SPDX identifier + URL |
 | `depends` | [x] | Recursive dependency resolution implemented |
 | `innosetup` | [x] | |
-| `cookie` | [x] | Parsed (not actively used in download) |
-| `notes` | [x] | Displayed after install |
-| `suggest` | [x] | Parsed (suggested apps list) |
+| `cookie` | [x] | Sent as `Cookie` header by both curl and aria2 download backends |
+| `notes` | [x] | Shown after install via `PackageInstalledNotes` event |
+| `suggest` | [x] | Shown after install alongside notes |
 
 ### Architecture Fields
 
@@ -119,7 +119,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | `architecture.*.installer` | [x] | Custom installer with script/args |
 | `architecture.*.uninstaller` | [x] | Custom uninstaller with script/args |
 | `architecture.*.extract_dir` | [x] | |
-| `architecture.*.checkver` | [x] | Parsed but not actively used |
+| `architecture.*.checkver` | [x] | Used as fallback via `effective_checkver` |
 
 ### Top-Level (noarch) Fields
 
@@ -146,19 +146,19 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 | Field | Status | Notes |
 | :--- | :---: | :--- |
-| `checkver` | [x] | Parsed: regex, url, jsonpath, xpath, script |
-| `autoupdate` | [~] | Parsed but not actively used for auto-updates |
+| `checkver` | [x] | `regex` + `jsonpath` evaluated (fetched url/homepage); `xpath`/`script` parsed only |
+| `autoupdate` | [~] | URL templates expanded + hash modes reported by autofetch; fully-automatic hash rewriting not done |
 | `runtime` | [x] | Resolved like `depends`; shown in `info`/`depends` |
 
 ### Hash Extraction (`autoupdate.hash`)
 
 | Field | Status | Notes |
 | :--- | :---: | :--- |
-| `regex` | [~] | Parsed but not used for hash extraction |
-| `jsonpath` | [~] | Parsed but not used |
-| `xpath` | [~] | Parsed but not used |
-| `url` | [~] | Parsed but not used |
-| `find` | [~] | Alias for `regex` |
+| `regex` | [~] | Parsed; auto-applied only in checkver, not for autoupdate hash extraction |
+| `jsonpath` | [x] | Evaluated by checkver (`$.a.b[0]` subset); autoupdate hash extraction still manual |
+| `xpath` | [~] | Parsed but not evaluated |
+| `url` | [x] | Used as hash-source hint by autofetch; extraction not automated |
+| `find` | [~] | Alias for `regex`, parsed |
 | `type` | [~] | Deprecated field, parsed |
 
 ---
@@ -197,12 +197,12 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | `use_isolated_path` | [x] | Isolated PATH management |
 | `last_update` | [x] | Bucket update timestamp |
 | `aria2-*` settings | [x] | Parsed with full config getters |
-| `use_external_7zip` | [x] | Parsed (uses bundled 7z) |
+| `use_external_7zip` | [x] | Parsed; extraction always shells out to 7z (PATH or Scoop 7zip app) |
 | `scoop_branch` | [~] | Parsed (not actively used) |
 | `scoop_repo` | [~] | Parsed (not actively used) |
 | `gh_token` | [x] | Parsed for GitHub private repos |
 | `private_hosts` | [x] | Parsed for auth headers |
-| `alias` | [x] | Parsed (no CLI to manage) |
+| `alias` | [x] | Managed via `bagger alias` (list/add/rm) + `config` |
 | `use_sqlite_cache` | [x] | **Implemented** - bucket manifests cached in `<cache>/manifests.db`, invalidated by mtime+size |
 | `show_manifest` | [x] | **Implemented** - Shows manifest JSON in install/upgrade confirmation |
 | `ignore_running_processes` | [x] | **Implemented** - install/upgrade/uninstall abort on running processes unless enabled |
@@ -241,7 +241,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | SQLite manifest cache | [x] | **Implemented** - opt-in via `use_sqlite_cache`; raw JSON keyed by (bucket, name) with mtime+size invalidation, shared across query threads |
 | Manifest auto-review prompt | [x] | **Implemented** - `show_manifest` displays manifests before install/upgrade |
 | VirusTotal integration | [x] | **Implemented** - real v3 file-report lookup by SHA256 |
-| App execution during install | [~] | Pre/post install/uninstall scripts run via PowerShell |
+| App execution during install | [x] | Pre/post install/uninstall + installer/uninstaller scripts run via PowerShell |
 | Custom installer/uninstaller | [x] | Supports script or file-based installers |
 | Aria2 warning suppression | [x] | **Implemented** - `aria2_warning_enabled` config getter and setter |
 | Ignore running processes | [x] | **Implemented** - guard in sync install/remove, bypass via config |
@@ -282,6 +282,8 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 12. **Isolated package installs** - `bagger install <url|path.json>` fetches/parses the manifest, derives the app name from the basename, resolves deps from buckets, and records no bucket in install.json (`__isolated__` marker)
 13. **SQLite manifest caching** - `use_sqlite_cache` caches bucket manifest JSON in `<cache>/manifests.db` keyed by (bucket, name) with mtime+size invalidation; failures fall back to disk parsing
 14. **Global app installs** - `-g/--global` on install/uninstall/upgrade (plus existing cleanup support) scopes the session root to `global_path` via a runtime-only config override; admin rights required
+15. **Install notes & suggestions** - `notes`/`suggest` shown after install via `PackageInstalledNotes`; added missing `notes()` getter
+16. **checkver jsonpath + arch fallback** - `effective_checkver()` prefers top-level, falls back to `architecture.<arch>.checkver`; `jsonpath` (`$.a.b[0]` subset) evaluated when no `regex` matches
 
 ## Notes
 

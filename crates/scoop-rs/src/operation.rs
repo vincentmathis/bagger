@@ -335,7 +335,7 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
     let proxy = config.proxy();
 
     let manifest = package.manifest();
-    let checkver = manifest.checkver();
+    let checkver = manifest.effective_checkver();
 
     let url = checkver
         .and_then(|c| c.url.as_deref())
@@ -352,6 +352,7 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
         }
     };
 
+    // Version extraction prefers `regex`, then falls back to `jsonpath`.
     let latest_version = checkver
         .and_then(|c| c.regex.as_deref())
         .and_then(|regex_str| {
@@ -359,12 +360,99 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
             re.captures(&content).and_then(|caps| {
                 caps.get(1).map(|m| m.as_str().to_string())
             })
+        })
+        .or_else(|| {
+            checkver
+                .and_then(|c| c.jsonpath.as_deref())
+                .and_then(|jsonpath| eval_jsonpath(&content, jsonpath))
         });
 
     Ok(CheckverResult {
         current_version: Some(package.installed_version().unwrap_or(package.version()).to_string()),
         latest_version,
     })
+}
+
+/// Evaluate a minimal JSONPath expression against a JSON document.
+///
+/// Supports the Scoop-flavored subset used by `checkver.jsonpath`: a `$`
+/// root followed by dot-separated object keys with optional `[n]` array
+/// indices (e.g. `$.tag_name`, `$.releases[0].version`). Only scalar results
+/// (strings, numbers, booleans) yield a value.
+fn eval_jsonpath(content: &str, path: &str) -> Option<String> {
+    let rest = path.trim().strip_prefix('$')?;
+    let rest = rest.strip_prefix('.').unwrap_or(rest);
+
+    let json: serde_json::Value = serde_json::from_str(content).ok()?;
+    if rest.is_empty() {
+        return jsonpath_scalar(&json);
+    }
+
+    let mut current = &json;
+    for part in rest.split('.') {
+        let (key, bracketed) = match part.find('[') {
+            Some(idx) => (&part[..idx], &part[idx..]),
+            None => (part, ""),
+        };
+
+        if !key.is_empty() {
+            current = current.get(key)?;
+        }
+
+        let mut rest = bracketed;
+        while let Some(inner) = rest.strip_prefix('[') {
+            let end = inner.find(']')?;
+            let index: usize = inner[..end].parse().ok()?;
+            current = current.get(index)?;
+            rest = &inner[end + 1..];
+        }
+        if !rest.is_empty() {
+            return None;
+        }
+    }
+
+    jsonpath_scalar(current)
+}
+
+/// Render a JSON scalar as a version string.
+fn jsonpath_scalar(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::eval_jsonpath;
+
+    #[test]
+    fn jsonpath_object_keys() {
+        let doc = r#"{"tag_name": "v1.2.3"}"#;
+        assert_eq!(eval_jsonpath(doc, "$.tag_name").as_deref(), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn jsonpath_nested_with_index() {
+        let doc = r#"{"releases": [{"version": "2.0"}, {"version": "1.0"}]}"#;
+        assert_eq!(
+            eval_jsonpath(doc, "$.releases[0].version").as_deref(),
+            Some("2.0")
+        );
+    }
+
+    #[test]
+    fn jsonpath_scalars_and_misses() {
+        let doc = r#"{"build": 42, "stable": true, "items": [1, 2]}"#;
+        assert_eq!(eval_jsonpath(doc, "$.build").as_deref(), Some("42"));
+        assert_eq!(eval_jsonpath(doc, "$.stable").as_deref(), Some("true"));
+        assert_eq!(eval_jsonpath(doc, "$.missing"), None);
+        assert_eq!(eval_jsonpath(doc, "$.items"), None);
+        assert_eq!(eval_jsonpath(doc, "tag_name"), None);
+        assert_eq!(eval_jsonpath(doc, "$.items[9]"), None);
+    }
 }
 
 /// Get the configuation list.

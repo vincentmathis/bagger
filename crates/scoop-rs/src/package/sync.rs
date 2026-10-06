@@ -703,6 +703,36 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             }
 
             if let Some(tx) = session.emitter() {
+                let notes = pkg
+                    .manifest()
+                    .notes()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| s.to_owned())
+                    .collect::<Vec<_>>();
+                let suggest = pkg
+                    .manifest()
+                    .suggest()
+                    .map(|map| {
+                        let mut entries = map
+                            .iter()
+                            .map(|(scope, apps)| {
+                                format!("{scope}: {}", apps.devectorize().join(", "))
+                            })
+                            .collect::<Vec<_>>();
+                        entries.sort();
+                        entries
+                    })
+                    .unwrap_or_default();
+
+                if !notes.is_empty() || !suggest.is_empty() {
+                    let _ = tx.send(Event::PackageInstalledNotes {
+                        ident: pkg.ident(),
+                        notes,
+                        suggest,
+                    });
+                }
+
                 let _ = tx.send(Event::PackageCommitDone(pkg.name().to_owned()));
             }
         }

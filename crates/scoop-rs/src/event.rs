@@ -78,6 +78,16 @@ pub enum Event {
     /// Package has been committed.
     PackageCommitDone(String),
 
+    /// A committed package carries install notes and/or suggestions.
+    PackageInstalledNotes {
+        /// Package identifier (`bucket/name`).
+        ident: String,
+        /// `notes` lines from the manifest.
+        notes: Vec<String>,
+        /// Flattened `suggest` entries (`"scope: app1, app2"`).
+        suggest: Vec<String>,
+    },
+
     /// Calculating download size has started.
     PackageDownloadSizingStart,
 
