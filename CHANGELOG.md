@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.0-beta.9](https://github.com/vincentmathis/bagger/compare/v0.1.0-beta.8...v0.1.0-beta.9) (2026-10-06)
+
+### Bug Fixes
+
+- **ci:** fix release workflow repository gate (`chawyehsu/hok` → `vincentmathis/bagger`) and bump `release-as` to `0.1.0-beta.9`
+- **install:** correct README install instructions (point at `raw.githubusercontent.com` instead of fictional `bagger.sh`)
+- **ci:** publish artifacts as `bagger-windows-*` instead of `hok-windows-*`
+
+---
+
 ## [0.1.0-beta.8](https://github.com/vincentmathis/bagger/compare/v0.1.0-beta.7...v0.1.0-beta.8) (2026-10-06)
 
 Full Scoop command parity (31 commands): every Scoop command now has a `bagger` equivalent.

@@ -75,6 +75,9 @@ jobs:
     needs: ci_test_build
     runs-on: ubuntu-latest
     if: github.repository == 'vincentmathis/bagger' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: google-github-actions/release-please-action@v3
         id: release
@@ -82,9 +85,6 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           release-type: rust
           release-as: 0.1.0-beta.9
-  outputs:
-    release_created: ${{ steps.release.outputs.release_created }}
-    tag_name: ${{ steps.release.outputs.tag_name }}
 
   # Build production artifacts
   cd_release_build:
