@@ -7,19 +7,23 @@
 
 ## Install
 
+### From source
+
+```sh
+git clone https://github.com/vincentmathis/bagger
+cd bagger
+cargo build --release
+# the binary lives at target/release/bagger.exe
+```
+
+### One-liner install script (Windows, requires admin for system-wide)
+
 ```ps1
-# Windows (user scope), Scoop-style:
-iwr -useb https://bagger.sh/install.ps1 | iex
+# User scope (installs to $Env:LOCALAPPDATA\bagger):
+iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/feat/install-commit/scripts/install.ps1 | iex
 
-# System-wide (requires admin):
-iwr -useb https://bagger.sh/install.ps1 | iex -args -System
-
-# Via the Scoop bucket that mirrors upstream's:
-scoop bucket add bagger https://github.com/vincentmathis/bagger-bucket
-scoop install bagger
-
-# Via winget (when published):
-winget install --id vincentmathis.bagger -e
+# System-wide (installs to $Env:ProgramFiles\bagger, requires admin):
+iex (iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/feat/install-commit/scripts/install.ps1).Content -args -System
 ```
 
 🚧 **Stability caveat**: `bagger` is on a pre-1.0 track (`0.1.0-beta.8`); while the core
