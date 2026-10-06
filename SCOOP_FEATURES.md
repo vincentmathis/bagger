@@ -233,7 +233,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Multiple architecture support | [x] | 32bit, 64bit, arm64; `--arch` flag / `SCOOP_ARCH` env override resolution + install record |
 | Cross-bucket package replacement | [x] | When package moves buckets |
 | Candidate selection (multi-bucket) | [x] | Interactive prompt, or `BUCKET_PRIORITY` auto-select under `-y`/no-TTY |
-| Global app installation | [x] | **Implemented** - `-g/--global` on install/uninstall/upgrade scopes the session root to `global_path` (admin-gated); shims/shortcuts/persist/env follow automatically; cache stays user-scoped |
+| Global app installation | [x] | **Implemented** - `-g/--global` on install/uninstall/upgrade scopes the session root to `global_path` (admin-gated; gate verified live, routing unit-tested); shims/shortcuts/persist/env follow automatically; cache stays user-scoped |
 | Isolated app installation | [x] | **Implemented** - `bagger install <manifest-url|path.json>` installs without a bucket (deps resolve from buckets, `__isolated__` marker in install.json) |
 | Aria2 integration | [x] | **Implemented** - `aria2c` used when `aria2-enabled` + binary on PATH (split/connections/cookie/proxy/extra-opts honored), curl fallback + optional missing-binary warning |
 | SQLite manifest cache | [x] | **Implemented** - opt-in via `use_sqlite_cache`; raw JSON keyed by (bucket, name) with mtime+size invalidation, shared across query threads |

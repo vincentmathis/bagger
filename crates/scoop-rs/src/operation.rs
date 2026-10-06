@@ -1665,6 +1665,46 @@ mod tests {
     use crate::package::Package;
     use crate::Session;
 
+    /// Global scope must reroute root-derived paths to the global root.
+    #[test]
+    fn install_dir_respects_global_scope() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-global-scope");
+        let user_root = dir.join("user");
+        let global_root = dir.join("global");
+        std::env::set_var("SCOOP", &user_root);
+        std::env::set_var("SCOOP_GLOBAL", &global_root);
+        let session = Session::new();
+
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+            std::path::Path::new("scope.json"),
+        )
+        .unwrap();
+        let pkg = Package::from("scopeapp", "main", manifest);
+
+        assert_eq!(
+            super::install_dir(&session, &pkg),
+            user_root.join("apps").join("scopeapp").join("current")
+        );
+
+        session.set_global(true).unwrap();
+        assert_eq!(
+            super::install_dir(&session, &pkg),
+            global_root.join("apps").join("scopeapp").join("current")
+        );
+
+        session.set_global(false).unwrap();
+        assert_eq!(
+            super::install_dir(&session, &pkg),
+            user_root.join("apps").join("scopeapp").join("current")
+        );
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn jsonpath_object_keys() {
         let doc = r#"{"tag_name": "v1.2.3"}"#;
