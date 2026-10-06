@@ -85,11 +85,18 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
         if let Ok(entries) = std::fs::read_dir(&shims_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "exe")
-                    && path.is_symlink()
-                    && std::fs::read_link(&path).is_err()
-                {
-                    broken_shims.push(path.file_name().unwrap().to_string_lossy().to_string());
+                if !path.is_file() {
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                match scoop_rs::shim_target_of(&path) {
+                    Some(target) if !target.exists() => {
+                        broken_shims.push(format!("{} (missing target {})", name, target.display()))
+                    }
+                    _ => {}
                 }
             }
         }

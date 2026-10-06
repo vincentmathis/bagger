@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{error::Fallible, internal, package::Package, Event, Session};
 
@@ -243,6 +243,27 @@ fn create_shim_content(target: &Path, shim: &Shim, content: ShimContent) -> Fall
     Ok(format!("#!/bin/sh\n\"{}\" {}\n", target_str, args_str))
 }
 
+/// Extract the target path referenced by a shim file, if any.
+///
+/// Shim files quote their target (`"C:\…\app.exe"`, `& "…"`, …); the first
+/// quoted string on the first non-directive line wins. Returns `None` for
+/// binary or otherwise unparseable shims.
+pub fn target_of(shim_file: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(shim_file).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("@echo off") || line.starts_with("#!") {
+            continue;
+        }
+        if let Some(start) = line.find('"') {
+            if let Some(end) = line[start + 1..].find('"') {
+                return Some(PathBuf::from(&line[start + 1..start + 1 + end]));
+            }
+        }
+    }
+    None
+}
+
 /// Remove shims for a package.
 pub fn remove(session: &Session, package: &Package) -> Fallible<()> {
     assert!(package.is_installed());
@@ -370,5 +391,42 @@ mod tests {
                 .collect();
             assert_eq!(files, expected, "shim files for {def:?}");
         }
+    }
+
+    #[test]
+    fn target_of_parses_shim_flavors() {
+        let dir = std::env::temp_dir().join("bagger-test-shim-target");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let batch = dir.join("a.cmd");
+        std::fs::write(&batch, "@echo off\n\"C:\\apps\\x\\app.exe\" --flag\n").unwrap();
+        assert_eq!(
+            target_of(&batch).as_deref(),
+            Some(std::path::Path::new("C:\\apps\\x\\app.exe"))
+        );
+
+        let invoke = dir.join("b.cmd");
+        std::fs::write(
+            &invoke,
+            "@echo off\npowershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\apps\\x\\t.ps1\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            target_of(&invoke).as_deref(),
+            Some(std::path::Path::new("C:\\apps\\x\\t.ps1"))
+        );
+
+        let ps1 = dir.join("c.ps1");
+        std::fs::write(&ps1, "& \"C:\\apps\\x\\t.ps1\" @args\n").unwrap();
+        assert_eq!(
+            target_of(&ps1).as_deref(),
+            Some(std::path::Path::new("C:\\apps\\x\\t.ps1"))
+        );
+
+        let binary = dir.join("d.exe");
+        std::fs::write(&binary, b"\x7fELF-binary-junk").unwrap();
+        assert_eq!(target_of(&binary), None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
