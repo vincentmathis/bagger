@@ -288,13 +288,16 @@ pub fn remove(session: &Session, package: &Package) -> Fallible<()> {
 
                     shim_path.set_extension(ext);
 
-                    if let Some(tx) = session.emitter() {
-                        let shim_name =
-                            shim_path.file_name().unwrap().to_string_lossy().to_string();
-                        let _ = tx.send(Event::PackageShimRemoveProgress(shim_name));
-                    }
+                    // Only announce files that actually exist.
+                    if shim_path.exists() {
+                        if let Some(tx) = session.emitter() {
+                            let shim_name =
+                                shim_path.file_name().unwrap().to_string_lossy().to_string();
+                            let _ = tx.send(Event::PackageShimRemoveProgress(shim_name));
+                        }
 
-                    let _ = std::fs::remove_file(&shim_path);
+                        let _ = std::fs::remove_file(&shim_path);
+                    }
 
                     // restore alter shim
                     let fname = shim_path.file_name().unwrap().to_str().unwrap();

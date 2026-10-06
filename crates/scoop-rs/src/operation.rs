@@ -382,7 +382,18 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
         .unwrap_or_else(|| manifest.homepage())
         .to_string();
 
-    let content = match internal::network::fetch_url(&url, proxy) {
+    // `checkver.useragent` wins, then the session user agent.
+    let user_agent = checkver
+        .and_then(|c| c.useragent.as_deref())
+        .or_else(|| session.user_agent.get().map(|s| s.as_str()));
+    let content = match user_agent {
+        Some(ua) => {
+            internal::network::fetch_url_with_headers(&url, proxy, &[("User-Agent", ua)])
+                .map(|(_, body)| body)
+        }
+        None => internal::network::fetch_url(&url, proxy),
+    };
+    let content = match content {
         Some(c) => c,
         None => {
             return Ok(CheckverResult {
@@ -865,7 +876,12 @@ fn parse_xpath_step(step: &str, descendant: bool) -> Option<XPathStep<'_>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{eval_jsonpath, eval_xpath, expand_autoupdate_template, expand_replace, match_version};
+    use super::{
+        eval_jsonpath, eval_xpath, expand_autoupdate_template, expand_replace, match_version,
+    };
+    use crate::package::manifest::Manifest;
+    use crate::package::Package;
+    use crate::Session;
 
     #[test]
     fn jsonpath_object_keys() {
@@ -968,9 +984,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn autoupdate_template_expansion() {
-        let captures = vec![
+        #[test]
+    fn autoupdate_template_expansion() {        let captures = vec![
             ("0".to_owned(), "v2.0".to_owned()),
             ("1".to_owned(), "2.0".to_owned()),
             ("tag".to_owned(), "v2.0".to_owned()),
@@ -992,6 +1007,36 @@ mod tests {
             expand_autoupdate_template("$match10/$match1", "9.9", &captures),
             "b/a"
         );
+    }
+
+    /// `checkver.useragent` must be honored when fetching.
+    ///
+    /// Uses a local `file://` document so no network is needed; custom
+    /// headers are simply ignored by the file protocol.
+    #[test]
+    fn checkver_honors_useragent() {
+        let dir = std::env::temp_dir().join("bagger-test-checkver-ua");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ver.json"), r#"{"tag": "9.9.9"}"#).unwrap();
+        let url = format!(
+            "file:///{}/ver.json",
+            dir.to_string_lossy().replace('\\', "/")
+        );
+
+        let json = format!(
+            r#"{{"version": "1.0", "homepage": "https://example.com",
+                "license": "MIT",
+                "checkver": {{"url": "{url}", "jsonpath": "$.tag",
+                               "useragent": "BaggerTest/1.0"}}}}"#
+        );
+        let manifest = Manifest::parse_bytes(json.as_bytes(), &dir.join("ua.json")).unwrap();
+        let pkg = Package::from("ua-pkg", "main", manifest);
+        let session = Session::new();
+
+        let result = super::checkver(&session, &pkg).unwrap();
+        assert_eq!(result.latest_version.as_deref(), Some("9.9.9"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
