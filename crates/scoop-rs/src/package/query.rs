@@ -487,6 +487,7 @@ mod tests {
     /// must be found by installed queries.
     #[test]
     fn installed_query_finds_32bit_record() {
+        let _guard = crate::test_support::env_guard();
         let dir = std::env::temp_dir().join("bagger-test-installed-arch");
         let current = dir.join("apps").join("archt").join("current");
         std::fs::create_dir_all(&current).unwrap();
@@ -519,8 +520,99 @@ mod tests {
             pkgs.iter().map(|p| p.name().to_owned()).collect::<Vec<_>>()
         );
     }
-}
 
+    /// Build a scratch root with one installed app and, optionally, a
+    /// bucket manifest at `bucket_version`. Returns the root path; the
+    /// caller holds [`crate::test_support::env_guard`] and points `SCOOP`
+    /// at it.
+    fn installed_fixture(tag: &str, bucket_version: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("bagger-test-query-{tag}"));
+        let current = dir.join("apps").join("qapp").join("current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(
+            current.join("manifest.json"),
+            r#"{
+                "version": "1.0",
+                "homepage": "https://example.com",
+                "license": "MIT",
+                "url": "https://example.com/a.bin",
+                "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            current.join("install.json"),
+            r#"{"architecture": "64bit", "bucket": "qbuk"}"#,
+        )
+        .unwrap();
+
+        if let Some(version) = bucket_version {
+            let bucket_dir = dir.join("buckets").join("qbuk").join("bucket");
+            std::fs::create_dir_all(&bucket_dir).unwrap();
+            std::fs::write(
+                bucket_dir.join("qapp.json"),
+                format!(
+                    r#"{{"version": "{version}", "homepage": "https://example.com",
+                        "license": "MIT", "url": "https://example.com/a.bin",
+                        "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        dir
+    }
+
+    #[test]
+    fn installed_query_matching() {
+        let _guard = crate::test_support::env_guard();
+        let dir = installed_fixture("matching", None);
+        std::env::set_var("SCOOP", &dir);
+        let session = Session::new();
+
+        let all = query_installed(&session, &["*"], &[]).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name(), "qapp");
+
+        let explicit = query_installed(&session, &["qapp"], &[QueryOption::Explicit]).unwrap();
+        assert_eq!(explicit.len(), 1);
+
+        let missing = query_installed(&session, &["nope"], &[QueryOption::Explicit]).unwrap();
+        assert!(missing.is_empty());
+
+        std::env::remove_var("SCOOP");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+    #[test]
+    fn installed_query_upgradable_filter() {
+        let _guard = crate::test_support::env_guard();
+        let dir = installed_fixture("upgradable", Some("2.0"));
+        std::env::set_var("SCOOP", &dir);
+        let session = Session::new();
+
+        let upgradable = query_installed(&session, &["*"], &[QueryOption::Upgradable]).unwrap();
+        assert_eq!(upgradable.len(), 1);
+        assert_eq!(upgradable[0].upgradable_version(), Some("2.0"));
+
+        std::env::remove_var("SCOOP");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn installed_query_upgradable_current_excluded() {
+        // Same version in the bucket: filtered out.
+        let _guard = crate::test_support::env_guard();
+        let dir = installed_fixture("current", Some("1.0"));
+        std::env::set_var("SCOOP", &dir);
+        let session = Session::new();
+
+        let current = query_installed(&session, &["*"], &[QueryOption::Upgradable]).unwrap();
+        assert!(current.is_empty());
+
+        std::env::remove_var("SCOOP");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
 /// Parse a bucket manifest, serving it from the SQLite cache on hits.
 ///
 /// On a fingerprint (mtime+size) miss the file is read, parsed, and stored

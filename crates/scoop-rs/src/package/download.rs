@@ -913,6 +913,7 @@ mod tests {
         // Regression test: servers (or schemes like file://) that report no
         // Content-Length must not mark missing files as valid cache, which
         // used to skip the download and fail the integrity check.
+        let _guard = crate::test_support::env_guard();
         let dir = std::env::temp_dir().join("bagger-probe-dl");
         std::fs::create_dir_all(dir.join("cache")).unwrap();
         std::fs::write(dir.join("payload.bin"), b"0123456789").unwrap();

@@ -47,6 +47,8 @@ mod psmodule;
 mod session;
 mod shim;
 mod shortcut;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub mod arch;
 pub mod operation;
