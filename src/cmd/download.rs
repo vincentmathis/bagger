@@ -12,7 +12,7 @@ pub struct Args {
     package: Vec<String>,
 
     /// Download specific version(s)
-    #[arg(short = 'v', long, action = ArgAction::Append)]
+    #[arg(long, action = ArgAction::Append)]
     version: Vec<String>,
 
     /// Assume yes to all prompts

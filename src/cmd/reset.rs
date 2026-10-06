@@ -87,9 +87,18 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         // Junction mode: point 'current' symlink to the version directory
         let current_link = app_dir.join("current");
 
-        // Remove existing 'current' symlink
-        if current_link.exists() || current_link.is_symlink() {
-            let _ = std::fs::remove_file(&current_link);
+        // Remove the existing 'current' link. This must be junction-aware:
+        // `remove_file` fails on directory links on Windows, which then
+        // breaks re-creation with "already exists" (os error 183).
+        if current_link.symlink_metadata().is_ok() {
+            let is_dir = current_link
+                .metadata()
+                .map(|m| m.file_type().is_dir())
+                .unwrap_or(false);
+            let _ = match is_dir {
+                true => std::fs::remove_dir(&current_link),
+                false => std::fs::remove_file(&current_link),
+            };
         }
 
         // Create new symlink
