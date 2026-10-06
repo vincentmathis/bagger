@@ -145,7 +145,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 | Field | Status | Notes |
 | :--- | :---: | :--- |
-| `checkver` | [x] | `regex`/`jsonpath`/`script` evaluated (fetched url/homepage); `xpath` parsed only |
+| `checkver` | [x] | `regex`/`jsonpath`/`xpath`/`script` evaluated (fetched url/homepage) |
 | `autoupdate` | [~] | URL templates expanded + hash modes reported by autofetch; fully-automatic hash rewriting not done |
 | `runtime` | [x] | Resolved like `depends`; shown in `info`/`depends` |
 
@@ -155,7 +155,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | :--- | :---: | :--- |
 | `regex` | [~] | Parsed; auto-applied only in checkver, not for autoupdate hash extraction |
 | `jsonpath` | [x] | Evaluated by checkver (`$.a.b[0]` subset); autoupdate hash extraction still manual |
-| `xpath` | [~] | Parsed but not evaluated |
+| `xpath` | [x] | Evaluated by checkver (`tag`, `*`, `[n]`, `[@a='v']`, trailing `text()`/`@attr`) |
 | `url` | [x] | Used as hash-source hint by autofetch; extraction not automated |
 | `find` | [~] | Alias for `regex`, parsed |
 | `type` | [~] | Deprecated field, parsed |
@@ -284,6 +284,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 15. **Install notes & suggestions** - `notes`/`suggest` shown after install via `PackageInstalledNotes`; added missing `notes()` getter
 16. **checkver jsonpath + arch fallback** - `effective_checkver()` prefers top-level, falls back to `architecture.<arch>.checkver`; `jsonpath` (`$.a.b[0]` subset) evaluated when no `regex` matches
 17. **checkver script support** - `checkver.script` runs via `invoke_script_capture` in the manifest dir context; stdout is the version (optionally filtered by `regex`)
+18. **checkver xpath support** - `roxmltree`-backed subset evaluator (`/`, `//`, `[n]`, `[@attr='value']`, `text()`, `@attr`) with quote-aware step splitting
 
 ## Notes
 

@@ -404,6 +404,11 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
             checkver
                 .and_then(|c| c.jsonpath.as_deref())
                 .and_then(|jsonpath| eval_jsonpath(&content, jsonpath))
+        })
+        .or_else(|| {
+            checkver
+                .and_then(|c| c.xpath.as_deref())
+                .and_then(|xpath| eval_xpath(&content, xpath))
         });
 
     Ok(CheckverResult {
@@ -463,9 +468,276 @@ fn jsonpath_scalar(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// A parsed step of the XPath subset supported by [`eval_xpath`].
+enum XPathStep<'a> {
+    /// Element test with optional position/attribute filters.
+    Element {
+        /// `true` for `//` (descendant) steps, `false` for `/` (child) steps.
+        descendant: bool,
+        /// Tag name to match, or `None` for the `*` wildcard.
+        tag: Option<&'a str>,
+        /// 1-based position filter (`tag[n]`), if any.
+        position: Option<usize>,
+        /// Attribute predicate (`tag[@attr='value']`), if any.
+        attr_filter: Option<(&'a str, &'a str)>,
+    },
+    /// Trailing `text()` step (element text content).
+    Text,
+    /// Trailing `@attr` step (attribute value).
+    Attribute(&'a str),
+}
+
+/// Evaluate a small XPath subset against an XML document.
+///
+/// Supported steps, joined by `/` (child) or `//` (descendant search):
+/// `tag`, `*`, `tag[n]` (1-based), `tag[@attr='value']`, plus a trailing
+/// `text()` (element text) or `@attr` (attribute value) step. Returns the
+/// first matching string value, if any.
+fn eval_xpath(content: &str, path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() || path.starts_with("string(") {
+        return None;
+    }
+
+    // Split into steps, tracking the `/` vs `//` axis of each.
+    let mut steps: Vec<XPathStep<'_>> = vec![];
+    let mut rest = path;
+    let mut first = true;
+    while !rest.is_empty() {
+        let (descendant, step) = if let Some(s) = rest.strip_prefix("//") {
+            (true, s)
+        } else if let Some(s) = rest.strip_prefix('/') {
+            (false, s)
+        } else if first {
+            (false, rest)
+        } else {
+            return None;
+        };
+        first = false;
+
+        // A step ends at the next `/` outside brackets and quotes
+        // (attribute values such as MIME types may contain `/`).
+        let (head, tail) = split_xpath_step(step);
+        if head.is_empty() {
+            return None;
+        }
+        steps.push(parse_xpath_step(head, descendant)?);
+        rest = tail;
+    }
+    if steps.is_empty() {
+        return None;
+    }
+
+    let doc = roxmltree::Document::parse(content).ok()?;
+
+    let mut current: Vec<roxmltree::Node<'_, '_>> = vec![doc.root()];
+    for (idx, step) in steps.iter().enumerate() {
+        let is_last = idx + 1 == steps.len();
+        match step {
+            XPathStep::Element {
+                descendant,
+                tag,
+                position,
+                attr_filter,
+            } => {
+                current =
+                    apply_xpath_element(&current, *descendant, *tag, *position, *attr_filter);
+            }
+            XPathStep::Text => {
+                if !is_last {
+                    return None;
+                }
+                return first_non_empty(current.iter().filter_map(xpath_text_content));
+            }
+            XPathStep::Attribute(attr) => {
+                if !is_last {
+                    return None;
+                }
+                return first_non_empty(
+                    current
+                        .iter()
+                        .filter_map(|n| n.attribute(*attr))
+                        .map(str::trim),
+                );
+            }
+        }
+        if current.is_empty() {
+            return None;
+        }
+    }
+
+    // A bare element path yields the first element's text content.
+    first_non_empty(current.iter().filter_map(xpath_text_content))
+}
+
+/// Apply one element step to a node set.
+fn apply_xpath_element<'a, 'input>(
+    nodes: &[roxmltree::Node<'a, 'input>],
+    descendant: bool,
+    tag: Option<&str>,
+    position: Option<usize>,
+    attr_filter: Option<(&str, &str)>,
+) -> Vec<roxmltree::Node<'a, 'input>> {
+    let matches = |n: &roxmltree::Node<'_, '_>| {
+        tag.map(|t| n.tag_name().name() == t).unwrap_or(true)
+            && attr_filter
+                .map(|(attr, value)| n.attribute(attr) == Some(value))
+                .unwrap_or(true)
+    };
+
+    let mut out = vec![];
+    if descendant {
+        // `//tag`: all matching descendants in document order.
+        for node in nodes {
+            out.extend(
+                node.descendants()
+                    .filter(|n| n.is_element())
+                    .filter(matches),
+            );
+        }
+        if let Some(n) = position {
+            out = out.into_iter().skip(n - 1).take(1).collect();
+        }
+    } else {
+        // `tag`: matching element children, `[n]` per parent.
+        for node in nodes {
+            let mut children = node
+                .children()
+                .filter(|n| n.is_element())
+                .filter(matches)
+                .peekable();
+            if children.peek().is_none() {
+                continue;
+            }
+            match position {
+                Some(n) => out.extend(children.skip(n - 1).take(1)),
+                None => out.extend(children),
+            }
+        }
+    }
+    out
+}
+
+/// Concatenated text content of an element's descendants.
+///
+/// Note: `descendants()` includes the node itself, and `text()` on an
+/// element returns its first text child, so only `Text` nodes are collected
+/// to avoid double counting.
+fn xpath_text_content(node: &roxmltree::Node<'_, '_>) -> Option<String> {
+    let mut text = String::new();
+    for descendant in node.descendants() {
+        if descendant.is_text() {
+            if let Some(t) = descendant.text() {
+                text.push_str(t);
+            }
+        }
+    }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// First non-empty trimmed string from an iterator.
+fn first_non_empty(iter: impl Iterator<Item = impl AsRef<str>>) -> Option<String> {
+    iter.map(|s| s.as_ref().trim().to_owned())
+        .find(|s| !s.is_empty())
+}
+
+/// Split the leading XPath step from the remainder.
+///
+/// The step ends at the next `/` that appears outside `[...]` brackets and
+/// outside single/double quotes, since attribute values may contain `/`
+/// (e.g. `[@type='application/zip']`).
+fn split_xpath_step(step: &str) -> (&str, &str) {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for (idx, ch) in step.char_indices() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '[' => depth += 1,
+                ']' => depth = depth.saturating_sub(1),
+                '/' if depth == 0 => return step.split_at(idx),
+                _ => {}
+            },
+        }
+    }
+    (step, "")
+}
+
+/// Parse one XPath step (without any leading `/`).
+fn parse_xpath_step(step: &str, descendant: bool) -> Option<XPathStep<'_>> {
+    if step == "text()" {
+        return Some(XPathStep::Text);
+    }
+    if let Some(attr) = step.strip_prefix('@') {
+        if !attr.is_empty() && !attr.contains(['[', ']', '/', '\'', '"']) {
+            return Some(XPathStep::Attribute(attr));
+        }
+        return None;
+    }
+
+    // Bracketed suffix: `[n]` or `[@attr='value']`.
+    let (head, bracket) = match step.find('[') {
+        Some(idx) => {
+            let (h, b) = step.split_at(idx);
+            if !b.ends_with(']') {
+                return None;
+            }
+            (h, Some(&b[1..b.len() - 1]))
+        }
+        None => (step, None),
+    };
+
+    let mut tag: Option<&str> = None;
+    let mut position: Option<usize> = None;
+    let mut attr_filter: Option<(&str, &str)> = None;
+
+    match head {
+        "" | "*" => {}
+        tag_name => tag = Some(tag_name),
+    }
+
+    if let Some(pred) = bracket {
+        if let Ok(num) = pred.parse::<usize>() {
+            if num == 0 {
+                return None;
+            }
+            position = Some(num);
+        } else {
+            let inner = pred.strip_prefix('@')?;
+            let (attr, value) = inner.split_once('=')?;
+            let value = value.trim();
+            let unquoted = value
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+                .or_else(|| {
+                    value
+                        .strip_prefix('"')
+                        .and_then(|v| v.strip_suffix('"'))
+                })?;
+            attr_filter = Some((attr.trim(), unquoted));
+        }
+    }
+
+    Some(XPathStep::Element {
+        descendant,
+        tag,
+        position,
+        attr_filter,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::eval_jsonpath;
+    use super::{eval_jsonpath, eval_xpath};
 
     #[test]
     fn jsonpath_object_keys() {
@@ -491,6 +763,48 @@ mod tests {
         assert_eq!(eval_jsonpath(doc, "$.items"), None);
         assert_eq!(eval_jsonpath(doc, "tag_name"), None);
         assert_eq!(eval_jsonpath(doc, "$.items[9]"), None);
+    }
+
+    const FEED: &str = r#"<?xml version="1.0"?>
+        <rss version="2.0">
+          <channel>
+            <title>Example</title>
+            <item><title>Release 2.0</title><enclosure url="https://example.com/a-2.0.zip" type="application/zip"/></item>
+            <item><title>Release 1.0</title><enclosure url="https://example.com/a-1.0.zip" type="application/zip"/></item>
+          </channel>
+        </rss>"#;
+
+    #[test]
+    fn xpath_absolute_and_descendant() {
+        assert_eq!(
+            eval_xpath(FEED, "/rss/channel/title").as_deref(),
+            Some("Example")
+        );
+        assert_eq!(
+            eval_xpath(FEED, "//item/title").as_deref(),
+            Some("Release 2.0")
+        );
+    }
+
+    #[test]
+    fn xpath_position_attribute_and_text() {
+        assert_eq!(
+            eval_xpath(FEED, "//item[2]/title/text()").as_deref(),
+            Some("Release 1.0")
+        );
+        assert_eq!(
+            eval_xpath(FEED, "//enclosure[@type='application/zip']/@url").as_deref(),
+            Some("https://example.com/a-2.0.zip")
+        );
+    }
+
+    #[test]
+    fn xpath_misses() {
+        assert_eq!(eval_xpath(FEED, "//missing"), None);
+        assert_eq!(eval_xpath(FEED, "//item[9]/title"), None);
+        assert_eq!(eval_xpath(FEED, "//item[0]/title"), None);
+        assert_eq!(eval_xpath(FEED, "not a path !!!"), None);
+        assert_eq!(eval_xpath("not xml at all", "//item"), None);
     }
 }
 
