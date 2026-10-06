@@ -12,7 +12,7 @@ pub struct Args {
     #[arg(required = true)]
     package: String,
 
-    /// Write the new version back to the bucket manifest file(s)
+    /// Rewrite manifests with the new version, URLs and download-mode hashes
     #[arg(short = 'w', long, action = ArgAction::SetTrue)]
     write: bool,
 }
@@ -181,12 +181,27 @@ fn autofetch_one(session: &Session, pkg: &scoop_rs::Package, write: bool) -> Res
     }
 
     if write {
-        let path = manifest.path().to_owned();
-        let raw = std::fs::read_to_string(&path)?;
-        let mut json: serde_json::Value = serde_json::from_str(&raw)?;
-        json["version"] = serde_json::Value::String(latest.clone());
-        std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
-        println!("  {} {}", "updated".green(), path.display());
+        match operation::autoupdate_apply(session, pkg, &latest, &result.captures, true) {
+            Ok(applied) => {
+                for url in &applied.rewritten_urls {
+                    println!("  {} {}", "hashed".green(), url);
+                }
+                for hash in &applied.rewritten_hashes {
+                    println!("  {} {}", "hash:".dark_grey(), hash);
+                }
+                for skipped in &applied.skipped {
+                    println!("  {} {}", "skipped:".yellow(), skipped);
+                }
+                println!(
+                    "  {} {}",
+                    "updated".green(),
+                    pkg.manifest().path().display()
+                );
+            }
+            Err(e) => {
+                eprintln!("  {} {}", "autoupdate failed:".red(), e);
+            }
+        }
     }
 
     Ok(true)

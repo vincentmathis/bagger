@@ -69,7 +69,7 @@ Legend:
 | `bagger download <app>` | [x] | Download package without installing; `--arch` override |
 | `bagger checkver <app>` | [x] | Check latest version from app manifest URLs |
 | `bagger checkver all` | [x] | Check all installed apps for updates |
-| `bagger autofetch <app> [all] [-w]` | [x] | Checkver + autoupdate URL expansion preview; `-w` bumps manifest version |
+| `bagger autofetch <app> [all] [-w]` | [x] | Checkver + autoupdate URL expansion preview; `-w` rewrites version, URLs and download-mode hashes |
 
 ### Security Commands
 
@@ -146,7 +146,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Field | Status | Notes |
 | :--- | :---: | :--- |
 | `checkver` | [x] | `regex` (+`reverse`, `replace` w/ captures)/`jsonpath`/`xpath`/`script` evaluated; `jsonpath`/`xpath` extract the string `regex` matches; `useragent` honored (else session UA) |
-| `autoupdate` | [~] | URL templates expanded + hash modes reported by autofetch; fully-automatic hash rewriting not done |
+| `autoupdate` | [x] | URL templates expanded by autofetch; `--write` downloads + rewrites `url`/`hash` for `download`-mode (other modes reported, never touched) |
 | `runtime` | [x] | Resolved like `depends`; shown in `info`/`depends` |
 
 ### Hash Extraction (`autoupdate.hash`)
@@ -290,6 +290,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 21. **Download unknown-size fix** - unknown remote sizes no longer validate missing cache (`0==0` bug) nor skip downloads; found by first real end-to-end install
 22. **Shim add/remove symmetry** - `add()` now creates exactly what `remove()` cleans (`{name}.exe`/`.cmd`/`.ps1`/bare); per-file content (ps1 vs cmd wrappers); `which` resolves through `current` junctions; stray `shims/exe` + unleaked `.bat` extras gone
 23. **checkver useragent + quiet shim removal** - `checkver.useragent` sent (session UA fallback); removal progress only announced for files that exist
+24. **autoupdate hash rewriting** - `autofetch -w` downloads expanded URLs, computes sha256 and rewrites `url`/`hash` (shape-preserving, non-download modes skipped); verified end-to-end offline plus unit test
 
 ## Notes
 

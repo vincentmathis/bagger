@@ -556,6 +556,225 @@ pub fn expand_autoupdate_template(
     out
 }
 
+/// Outcome of [`autoupdate_apply`].
+#[derive(Clone, Debug, Default)]
+pub struct AutoupdateResult {
+    /// The new version that was applied (when `write`).
+    pub version: String,
+    /// Expanded URLs that were downloaded and hashed.
+    pub rewritten_urls: Vec<String>,
+    /// `sha256:…` hashes computed for the rewritten URLs.
+    pub rewritten_hashes: Vec<String>,
+    /// Scopes left untouched, with reasons.
+    pub skipped: Vec<String>,
+    /// Whether the manifest file was rewritten.
+    pub wrote: bool,
+}
+
+/// Expand autoupdate URLs for `latest`, hash the downloads, and optionally
+/// rewrite the bucket manifest.
+///
+/// Only `download`-mode hashes (or a missing `hash` section, which defaults
+/// to download mode) are handled; other modes are reported in
+/// [`AutoupdateResult::skipped`]. URL/hash shapes must match the manifest
+/// (single string vs same-length array) or the scope is skipped rather than
+/// risk corrupting the manifest.
+///
+/// # Errors
+///
+/// Network errors will be returned if an expanded URL cannot be fetched.
+pub fn autoupdate_apply(
+    session: &Session,
+    package: &Package,
+    latest: &str,
+    captures: &[(String, String)],
+    write: bool,
+) -> Fallible<AutoupdateResult> {
+    use crate::package::manifest::{HashExtraction, Vectorized};
+
+    let manifest = package.manifest();
+    let mut result = AutoupdateResult {
+        version: latest.to_owned(),
+        ..Default::default()
+    };
+
+    let Some(autoupdate) = manifest.autoupdate() else {
+        result.skipped.push("no autoupdate section".to_owned());
+        return Ok(result);
+    };
+
+    let proxy = session.config().proxy().map(|s| s.to_owned());
+
+    // One manifest URL/hash section processed below.
+    struct AutoupdateScope<'a> {
+        label: &'static str,
+        url_path: Vec<&'static str>,
+        hash_path: Vec<&'static str>,
+        templates: Vec<String>,
+        hash_specs: Option<&'a Vectorized<HashExtraction>>,
+    }
+    let mut scopes: Vec<AutoupdateScope<'_>> = vec![];
+
+    if let Some(urls) = autoupdate.url.as_ref() {
+        scopes.push(AutoupdateScope {
+            label: "noarch",
+            url_path: vec!["url"],
+            hash_path: vec!["hash"],
+            templates: urls.devectorize().into_iter().map(|s| s.to_owned()).collect(),
+            hash_specs: autoupdate.hash.as_ref(),
+        });
+    }
+
+    if let Some(arch) = autoupdate.architecture.as_ref() {
+        for (label, url_key, spec) in [
+            ("32bit", "32bit", arch.ia32.as_ref()),
+            ("64bit", "64bit", arch.amd64.as_ref()),
+            ("arm64", "arm64", arch.aarch64.as_ref()),
+        ] {
+            if let Some(spec) = spec {
+                if let Some(urls) = spec.url.as_ref() {
+                    scopes.push(AutoupdateScope {
+                        label,
+                        url_path: vec!["architecture", url_key, "url"],
+                        hash_path: vec!["architecture", url_key, "hash"],
+                        templates: urls
+                            .devectorize()
+                            .into_iter()
+                            .map(|s| s.to_owned())
+                            .collect(),
+                        hash_specs: spec.hash.as_ref().or(autoupdate.hash.as_ref()),
+                    });
+                }
+            }
+        }
+    }
+
+    if scopes.is_empty() {
+        result.skipped.push("autoupdate has no URL templates".to_owned());
+    }
+
+    // Load the raw manifest JSON once for shape checks and rewriting.
+    let manifest_path = manifest.path().to_owned();
+    let mut manifest_json: serde_json::Value = if write {
+        let raw = std::fs::read_to_string(&manifest_path)?;
+        serde_json::from_str(&raw)?
+    } else {
+        serde_json::Value::Null
+    };
+
+    for scope in &scopes {
+        let AutoupdateScope {
+            label,
+            url_path,
+            hash_path,
+            templates,
+            hash_specs,
+        } = scope;
+        let mode_is_download = hash_specs
+            .and_then(|specs| specs.devectorize().first().cloned())
+            .map(|h| {
+                matches!(
+                    &h.mode,
+                    None | Some(crate::package::manifest::HashExtractionMode::Download)
+                )
+            })
+            .unwrap_or(true);
+
+        if !mode_is_download {
+            result.skipped.push(format!(
+                "{label}: non-download hash mode is not automated"
+            ));
+            continue;
+        }
+
+        let expanded: Vec<String> = templates
+            .iter()
+            .map(|t| expand_autoupdate_template(t, latest, captures))
+            .collect();
+
+        // Shape check against the current manifest (only meaningful — and
+        // only performed — when writing).
+        if write {
+            let current_urls = url_path
+                .iter()
+                .try_fold(&manifest_json, |v, k| v.get(*k))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let shape_ok = match &current_urls {
+                serde_json::Value::String(_) => expanded.len() == 1,
+                serde_json::Value::Array(arr) => arr.len() == expanded.len(),
+                // Missing URL section: don't invent structure.
+                _ => false,
+            };
+            if !shape_ok {
+                result.skipped.push(format!(
+                    "{label}: template count ({}) does not match manifest URLs; left untouched",
+                    expanded.len()
+                ));
+                continue;
+            }
+        }
+
+        let mut hashes = vec![];
+        for url in &expanded {
+            let bytes = internal::network::fetch_bytes(url, proxy.as_deref()).ok_or_else(|| {
+                Error::Custom(format!("failed to download autoupdate URL '{url}'"))
+            })?;
+            let mut hasher = bagger_hash::ChecksumBuilder::new().sha256().build();
+            hasher.consume(&bytes);
+            hashes.push(format!("sha256:{}", hasher.finalize()));
+        }
+
+        result.rewritten_urls.extend(expanded.iter().cloned());
+        result.rewritten_hashes.extend(hashes.iter().cloned());
+
+        if write {
+            set_json_path(&mut manifest_json, url_path, string_or_array(&expanded));
+            set_json_path(&mut manifest_json, hash_path, string_or_array(&hashes));
+        }
+    }
+
+    if write {
+        manifest_json["version"] = serde_json::Value::String(latest.to_owned());
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest_json)?,
+        )?;
+        result.wrote = true;
+    }
+
+    Ok(result)
+}
+
+/// Build a JSON string or array of strings, mirroring manifest shape.
+fn string_or_array(values: &[String]) -> serde_json::Value {
+    if values.len() == 1 {
+        serde_json::Value::String(values[0].clone())
+    } else {
+        serde_json::Value::Array(
+            values
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        )
+    }
+}
+
+/// Set a nested value in manifest JSON, creating intermediate objects.
+fn set_json_path(root: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
+    let mut current = root;
+    for (idx, key) in path.iter().enumerate() {
+        if idx + 1 == path.len() {
+            current[*key] = value;
+            return;
+        }
+        if !current.get(*key).map(|v| v.is_object()).unwrap_or(false) {
+            current[*key] = serde_json::Value::Object(serde_json::Map::new());
+        }
+        current = &mut current[*key];
+    }
+}
+
 /// Evaluate a minimal JSONPath expression against a JSON document.
 ///
 /// Supports the Scoop-flavored subset used by `checkver.jsonpath`: a `$`
@@ -1012,10 +1231,9 @@ mod tests {
     /// `checkver.useragent` must be honored when fetching.
     ///
     /// Uses a local `file://` document so no network is needed; custom
-    /// headers are simply ignored by the file protocol.
+        /// headers are simply ignored by the file protocol.
     #[test]
-    fn checkver_honors_useragent() {
-        let dir = std::env::temp_dir().join("bagger-test-checkver-ua");
+    fn checkver_honors_useragent() {        let dir = std::env::temp_dir().join("bagger-test-checkver-ua");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("ver.json"), r#"{"tag": "9.9.9"}"#).unwrap();
         let url = format!(
@@ -1035,6 +1253,60 @@ mod tests {
 
         let result = super::checkver(&session, &pkg).unwrap();
         assert_eq!(result.latest_version.as_deref(), Some("9.9.9"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `autoupdate_apply` rewrites version, URLs and download-mode hashes.
+    ///
+    /// Fully offline via `file://` payloads.
+    #[test]
+    fn autoupdate_rewrites_download_hashes() {
+        use bagger_hash::ChecksumBuilder;
+
+        let dir = std::env::temp_dir().join("bagger-test-autoupdate");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app-2.0.bin"), b"new-bytes").unwrap();
+
+        let payload_url = format!(
+            "file:///{}/app-$version.bin",
+            dir.to_string_lossy().replace('\\', "/")
+        );
+        let json = format!(
+            r#"{{"version": "1.0", "homepage": "https://example.com",
+                "license": "MIT", "url": "file:///nonexistent/app-1.0.bin",
+                "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "autoupdate": {{"url": "{payload_url}"}}}}"#
+        );
+        let manifest_path = dir.join("app.json");
+        std::fs::write(&manifest_path, &json).unwrap();
+        let manifest = Manifest::parse(&manifest_path).unwrap();
+        let pkg = Package::from("app", "main", manifest);
+        let session = Session::new();
+
+        // Dry run rewrites nothing.
+        let dry = super::autoupdate_apply(&session, &pkg, "2.0", &[], false).unwrap();
+        assert!(!dry.wrote);
+        assert_eq!(dry.rewritten_urls.len(), 1);
+        assert!(dry.rewritten_urls[0].ends_with("app-2.0.bin"));
+
+        // Write run persists version, URL and hash.
+        let done = super::autoupdate_apply(&session, &pkg, "2.0", &[], true).unwrap();
+        assert!(done.wrote);
+
+        let mut hasher = ChecksumBuilder::new().sha256().build();
+        hasher.consume(b"new-bytes");
+        let expected = format!("sha256:{}", hasher.finalize());
+
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(rewritten["version"], "2.0");
+        assert_eq!(done.rewritten_hashes, vec![expected.clone()]);
+        assert_eq!(rewritten["hash"], expected);
+        assert!(rewritten["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("app-2.0.bin"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
