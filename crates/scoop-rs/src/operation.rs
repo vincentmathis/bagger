@@ -309,6 +309,10 @@ pub fn install_dir(session: &Session, package: &Package) -> std::path::PathBuf {
 pub struct CheckverResult {
     pub current_version: Option<String>,
     pub latest_version: Option<String>,
+    /// Regex captures from the version match (`0` = whole match, then
+    /// numbered and named groups), for `replace` templates and autoupdate
+    /// `$match*` variables.
+    pub captures: Vec<(String, String)>,
 }
 
 impl CheckverResult {
@@ -336,43 +340,40 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
 
     let manifest = package.manifest();
     let checkver = manifest.effective_checkver();
+    let current = package
+        .installed_version()
+        .unwrap_or(package.version())
+        .to_string();
+
+    let reverse = checkver.and_then(|c| c.reverse).unwrap_or(false);
+    let replace = checkver.and_then(|c| c.replace.as_deref());
+    let regex = checkver.and_then(|c| c.regex.as_deref());
 
     // `checkver.script` runs a PowerShell snippet expected to print the
-    // latest version (optionally post-processed with `checkver.regex`).
-    // It replaces page fetching entirely.
+    // latest version. It replaces page fetching entirely.
     if let Some(script) = checkver.and_then(|c| c.script.as_ref()) {
         let lines = script.devectorize();
         let fallback_cwd = session.config().cache_path().to_owned();
-        let working_dir = manifest
-            .path()
-            .parent()
-            .unwrap_or(&fallback_cwd);
-        let stdout = internal::ps::invoke_script_capture(
-            session,
-            package,
-            "checkver",
-            &lines,
-            working_dir,
-        )?;
+        let working_dir = manifest.path().parent().unwrap_or(&fallback_cwd);
+        let stdout =
+            internal::ps::invoke_script_capture(session, package, "checkver", &lines, working_dir)?;
 
-        let latest_version = checkver
-            .and_then(|c| c.regex.as_deref())
-            .and_then(|regex_str| {
-                let re = regex::Regex::new(regex_str).ok()?;
-                re.captures(&stdout)
-                    .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
-            })
-            .or_else(|| {
+        let (latest_version, captures) = match match_version(&stdout, regex, reverse, replace) {
+            Some(m) => (Some(m.text.clone()), m.captures.clone()),
+            None => (
                 stdout
                     .lines()
                     .map(str::trim)
                     .find(|line| !line.is_empty())
-                    .map(|line| line.to_owned())
-            });
+                    .map(|line| line.to_owned()),
+                vec![],
+            ),
+        };
 
         return Ok(CheckverResult {
-            current_version: Some(package.installed_version().unwrap_or(package.version()).to_string()),
+            current_version: Some(current),
             latest_version,
+            captures,
         });
     }
 
@@ -385,36 +386,163 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
         Some(c) => c,
         None => {
             return Ok(CheckverResult {
-                current_version: Some(package.installed_version().unwrap_or(package.version()).to_string()),
+                current_version: Some(current),
                 latest_version: None,
+                captures: vec![],
             });
         }
     };
 
-    // Version extraction prefers `regex`, then falls back to `jsonpath`.
-    let latest_version = checkver
-        .and_then(|c| c.regex.as_deref())
-        .and_then(|regex_str| {
-            let re = regex::Regex::new(regex_str).ok()?;
-            re.captures(&content).and_then(|caps| {
-                caps.get(1).map(|m| m.as_str().to_string())
-            })
-        })
-        .or_else(|| {
-            checkver
-                .and_then(|c| c.jsonpath.as_deref())
-                .and_then(|jsonpath| eval_jsonpath(&content, jsonpath))
-        })
+    // Per Scoop semantics, `jsonpath`/`xpath` first extract a string that
+    // `regex` is then matched against. Without `regex`, the extracted
+    // string itself is the version.
+    let extracted = checkver
+        .and_then(|c| c.jsonpath.as_deref())
+        .and_then(|jsonpath| eval_jsonpath(&content, jsonpath))
         .or_else(|| {
             checkver
                 .and_then(|c| c.xpath.as_deref())
                 .and_then(|xpath| eval_xpath(&content, xpath))
         });
 
+    let haystack = extracted.as_deref().unwrap_or(&content);
+    let (latest_version, captures) = match match_version(haystack, regex, reverse, replace) {
+        Some(m) => (Some(m.text.clone()), m.captures.clone()),
+        // No regex given: the extracted string (if any) is the version.
+        None => (extracted, vec![]),
+    };
+
     Ok(CheckverResult {
-        current_version: Some(package.installed_version().unwrap_or(package.version()).to_string()),
+        current_version: Some(current),
         latest_version,
+        captures,
     })
+}
+
+/// A regex version match with its captures retained.
+#[derive(Clone, Debug)]
+pub struct VersionMatch {
+    /// The matched version text (group 1 preferred, else whole match,
+    /// optionally rewritten by the `replace` template).
+    pub text: String,
+    /// Captures as `(name, value)`: `0` is the whole match, then numbered
+    /// groups (`1`, `2`, …) and named groups (`version`, …).
+    pub captures: Vec<(String, String)>,
+}
+
+/// Match `regex` against `haystack`, honoring `reverse` (last match wins)
+/// and applying the `replace` template when given.
+fn match_version(
+    haystack: &str,
+    regex: Option<&str>,
+    reverse: bool,
+    replace: Option<&str>,
+) -> Option<VersionMatch> {
+    let re = regex::Regex::new(regex?).ok()?;
+    let caps = match reverse {
+        true => re.captures_iter(haystack).last()?,
+        false => re.captures(haystack)?,
+    };
+
+    let mut captures = vec![];
+    if let Some(whole) = caps.get(0) {
+        captures.push(("0".to_owned(), whole.as_str().to_owned()));
+    }
+    for (idx, group) in caps.iter().enumerate().skip(1) {
+        if let Some(m) = group {
+            captures.push((idx.to_string(), m.as_str().to_owned()));
+        }
+    }
+    for name in re.capture_names().flatten() {
+        if let Some(m) = caps.name(name) {
+            captures.push((name.to_owned(), m.as_str().to_owned()));
+        }
+    }
+
+    let text = caps
+        .get(1)
+        .or_else(|| caps.get(0))
+        .map(|m| m.as_str().to_owned())?;
+
+    let text = match replace {
+        Some(template) => expand_replace(template, &captures),
+        None => text,
+    };
+
+    Some(VersionMatch { text, captures })
+}
+
+/// Expand a .NET-style replacement template (`$1`, `$name`, `${name}`;
+/// `$$` escapes to `$`) using regex captures.
+fn expand_replace(template: &str, captures: &[(String, String)]) -> String {
+    let lookup = |key: &str| -> &str {
+        captures
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("")
+    };
+
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '$' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek() {
+            // `$$` escapes to a literal `$`.
+            Some('$') => {
+                out.push('$');
+                chars.next();
+            }
+            // `${name}` form.
+            Some('{') => {
+                chars.next();
+                let name: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                out.push_str(lookup(&name));
+            }
+            // `$1` / `$name` forms.
+            Some(c) if c.is_ascii_alphanumeric() || *c == '_' => {
+                let mut name = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        name.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                out.push_str(lookup(&name));
+            }
+            // Lone `$` stays literal.
+            _ => out.push('$'),
+        }
+    }
+    out
+}
+
+/// Expand autoupdate URL templates.
+///
+/// Supports `$version` plus `$match*` captured variables (`$match1`,
+/// `$matchHead`, …) from the checkver regex match. Longer names are
+/// substituted first so `$match1` never clobbers `$match10`.
+pub fn expand_autoupdate_template(
+    template: &str,
+    version: &str,
+    captures: &[(String, String)],
+) -> String {
+    let mut vars: Vec<(String, &str)> = vec![("version".to_owned(), version)];
+    for (name, value) in captures {
+        vars.push((format!("match{name}"), value.as_str()));
+    }
+    vars.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
+
+    let mut out = template.to_owned();
+    for (name, value) in vars {
+        out = out.replace(&format!("${name}"), value);
+    }
+    out
 }
 
 /// Evaluate a minimal JSONPath expression against a JSON document.
@@ -737,7 +865,7 @@ fn parse_xpath_step(step: &str, descendant: bool) -> Option<XPathStep<'_>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{eval_jsonpath, eval_xpath};
+    use super::{eval_jsonpath, eval_xpath, expand_autoupdate_template, expand_replace, match_version};
 
     #[test]
     fn jsonpath_object_keys() {
@@ -805,6 +933,65 @@ mod tests {
         assert_eq!(eval_xpath(FEED, "//item[0]/title"), None);
         assert_eq!(eval_xpath(FEED, "not a path !!!"), None);
         assert_eq!(eval_xpath("not xml at all", "//item"), None);
+    }
+
+    #[test]
+    fn version_match_first_and_reverse() {
+        let page = "dl v1.0 dl v2.0";
+        let first = match_version(page, Some("v([\\d.]+)"), false, None).unwrap();
+        assert_eq!(first.text, "1.0");
+        let last = match_version(page, Some("v([\\d.]+)"), true, None).unwrap();
+        assert_eq!(last.text, "2.0");
+        assert!(match_version(page, None, false, None).is_none());
+    }
+
+    #[test]
+    fn version_replace_templates() {
+        let page = "sysinternals suite 2024-06-01";
+        let m = match_version(
+            page,
+            Some("suite (?<year>\\d{4})-(?<rest>\\d{2}-\\d{2})"),
+            false,
+            Some("$year.$rest"),
+        )
+        .unwrap();
+        assert_eq!(m.text, "2024.06-01");
+
+        // Numbered groups, ${} form and $$ escaping.
+        assert_eq!(
+            expand_replace("${1}-x", &[("1".to_owned(), "2.0".to_owned())]),
+            "2.0-x"
+        );
+        assert_eq!(
+            expand_replace("$$1 $9", &[("1".to_owned(), "2.0".to_owned())]),
+            "$1 "
+        );
+    }
+
+    #[test]
+    fn autoupdate_template_expansion() {
+        let captures = vec![
+            ("0".to_owned(), "v2.0".to_owned()),
+            ("1".to_owned(), "2.0".to_owned()),
+            ("tag".to_owned(), "v2.0".to_owned()),
+        ];
+        assert_eq!(
+            expand_autoupdate_template(
+                "https://example.com/$version/app-$match1-$matchtag.zip",
+                "2.0",
+                &captures
+            ),
+            "https://example.com/2.0/app-2.0-v2.0.zip"
+        );
+        // `$match1` must not clobber `$match10`.
+        let captures = vec![
+            ("1".to_owned(), "a".to_owned()),
+            ("10".to_owned(), "b".to_owned()),
+        ];
+        assert_eq!(
+            expand_autoupdate_template("$match10/$match1", "9.9", &captures),
+            "b/a"
+        );
     }
 }
 

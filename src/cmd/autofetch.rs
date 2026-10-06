@@ -134,9 +134,10 @@ fn autofetch_one(session: &Session, pkg: &scoop_rs::Package, write: bool) -> Res
         println!("  (autoupdate has no URL templates)");
     } else {
         for (label, template) in &templates {
-            let expanded = template.replace("$version", &latest);
+            let expanded =
+                operation::expand_autoupdate_template(template, &latest, &result.captures);
             if expanded == *template {
-                println!("  [{label}] {template}  (no $version placeholder)");
+                println!("  [{label}] {template}  (no $version/$match placeholder)");
             } else {
                 println!("  [{label}] {expanded}");
             }

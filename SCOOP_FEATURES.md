@@ -145,7 +145,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 | Field | Status | Notes |
 | :--- | :---: | :--- |
-| `checkver` | [x] | `regex`/`jsonpath`/`xpath`/`script` evaluated (fetched url/homepage) |
+| `checkver` | [x] | `regex` (+`reverse`, `replace` w/ captures)/`jsonpath`/`xpath`/`script` evaluated; `jsonpath`/`xpath` extract the string `regex` matches |
 | `autoupdate` | [~] | URL templates expanded + hash modes reported by autofetch; fully-automatic hash rewriting not done |
 | `runtime` | [x] | Resolved like `depends`; shown in `info`/`depends` |
 
@@ -205,7 +205,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | `use_sqlite_cache` | [x] | **Implemented** - bucket manifests cached in `<cache>/manifests.db`, invalidated by mtime+size |
 | `show_manifest` | [x] | **Implemented** - Shows manifest JSON in install/upgrade confirmation |
 | `ignore_running_processes` | [x] | **Implemented** - install/upgrade/uninstall abort on running processes unless enabled |
-| `shim` | [~] | Parsed (affects shim creation) |
+| `shim` | [~] | Parsed; no effect (script-based shims don't consume shim.exe variants) |
 | `aria2_warning_enabled` | [x] | **Implemented** - Config getter and setter added |
 
 ---
@@ -286,6 +286,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 17. **checkver script support** - `checkver.script` runs via `invoke_script_capture` in the manifest dir context; stdout is the version (optionally filtered by `regex`)
 18. **checkver xpath support** - `roxmltree`-backed subset evaluator (`/`, `//`, `[n]`, `[@attr='value']`, `text()`, `@attr`) with quote-aware step splitting
 19. **Architecture override** - `scoop_rs::arch` module (`set_override`, process-wide); `arch_specific_field!` dispatches on it; `--arch` on install/upgrade/download plus `SCOOP_ARCH` env; `install.json` records the resolved arch
+20. **checkver reverse/replace/captures** - `reverse` matches last occurrence; `replace` expands `$1`/`${name}` from captures (.NET-style, `$$` escape); `jsonpath`/`xpath` extract the string `regex` matches; captures feed autofetch `$match*` URL variables
 
 ## Notes
 
