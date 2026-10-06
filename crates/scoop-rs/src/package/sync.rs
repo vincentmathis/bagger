@@ -406,7 +406,8 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                         continue;
                     }
 
-                    resolve::select_candidate(session, &mut matched)?;
+                    let assume_yes = options.contains(&SyncOption::AssumeYes);
+                    resolve::select_candidate(session, &mut matched, assume_yes)?;
                     let p = matched.pop().unwrap();
                     if !packages.contains(&p) {
                         packages.push(p);
@@ -424,7 +425,8 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 
     let no_dependencies = options.contains(&SyncOption::NoDependencies);
     if !no_dependencies {
-        resolve::resolve_dependencies(session, &mut packages)?;
+        let assume_yes = options.contains(&SyncOption::AssumeYes);
+        resolve::resolve_dependencies(session, &mut packages, assume_yes)?;
     }
 
     let (installed, installable): (Vec<_>, Vec<_>) =

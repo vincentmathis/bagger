@@ -12,7 +12,11 @@ use crate::{
 ///
 /// This function ensures that packages are unique and sorted in dependency first
 /// order.
-pub(crate) fn resolve_dependencies(session: &Session, packages: &mut Vec<Package>) -> Fallible<()> {
+pub(crate) fn resolve_dependencies(
+    session: &Session,
+    packages: &mut Vec<Package>,
+    auto_select: bool,
+) -> Fallible<()> {
     let mut graph = DepGraph::<String>::new();
     let mut to_resolve = packages.clone();
 
@@ -74,7 +78,7 @@ pub(crate) fn resolve_dependencies(session: &Session, packages: &mut Vec<Package
                             if !installed_candidate.is_empty() {
                                 matched = installed_candidate;
                             } else {
-                                select_candidate(session, &mut matched)?;
+                                select_candidate(session, &mut matched, auto_select)?;
                             }
 
                             let p = matched.pop().unwrap();
@@ -110,12 +114,26 @@ pub(crate) fn resolve_dependencies(session: &Session, packages: &mut Vec<Package
 }
 
 /// Select one from multiple package candidates, interactively if possible.
-pub(crate) fn select_candidate(session: &Session, candidates: &mut Vec<Package>) -> Fallible<()> {
-    let name = candidates[0].name().to_owned();
+pub(crate) fn select_candidate(
+    session: &Session,
+    candidates: &mut Vec<Package>,
+    auto_select: bool,
+) -> Fallible<()> {
+    // Sort candidates by bucket priority first (known buckets in
+    // `BUCKET_PRIORITY` order, unknown buckets alphabetically after),
+    // then by package ident for stability.
+    candidates.sort_by(|a, b| {
+        bucket_priority_rank(a.bucket())
+            .cmp(&bucket_priority_rank(b.bucket()))
+            .then_with(|| a.ident().cmp(&b.ident()))
+    });
 
-    // Sort candidates by package ident, in other words, by alphabetical order
-    // of bucket name.
-    candidates.sort_by_key(|p| p.ident());
+    // With auto-select (e.g. `AssumeYes`), or when no frontend can answer,
+    // take the highest-priority candidate instead of prompting.
+    if auto_select {
+        candidates.truncate(1);
+        return Ok(());
+    }
 
     // Only we can ask user/frontend to select one from multiple candidates
     // when the outbound tx is available for us to do an interactive q&a.
@@ -145,8 +163,18 @@ pub(crate) fn select_candidate(session: &Session, candidates: &mut Vec<Package>)
         }
     }
 
-    // TODO: handle this case smartly using pre-defined bucket priority
-    Err(Error::PackageMultipleCandidates(name))
+    // No frontend to ask: fall back to bucket priority instead of failing.
+    candidates.truncate(1);
+    Ok(())
+}
+
+/// Rank of a bucket in `BUCKET_PRIORITY`; unknown buckets sort after all
+/// known ones, alphabetically (handled by the caller via ident order).
+fn bucket_priority_rank(bucket: &str) -> usize {
+    crate::constant::BUCKET_PRIORITY
+        .iter()
+        .position(|b| *b == bucket)
+        .unwrap_or(usize::MAX)
 }
 
 /// Resolve unneeded dependencies of the given packages.
@@ -248,4 +276,51 @@ pub(crate) fn resolve_cascade(
     packages.dedup();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::manifest::Manifest;
+    use crate::Session;
+
+    fn test_package(name: &str, bucket: &str) -> Package {
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+            std::path::Path::new("candidate.json"),
+        )
+        .expect("fixture should parse");
+        Package::from(name, bucket, manifest)
+    }
+
+    #[test]
+    fn auto_select_prefers_bucket_priority() {
+        let session = Session::new();
+        let mut candidates = vec![
+            test_package("app", "zzz"),
+            test_package("app", "extras"),
+            test_package("app", "main"),
+        ];
+        select_candidate(&session, &mut candidates, true).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].ident(), "main/app");
+    }
+
+    #[test]
+    fn auto_select_orders_unknown_buckets_alphabetically() {
+        let session = Session::new();
+        let mut candidates = vec![test_package("app", "zzz"), test_package("app", "aaa")];
+        select_candidate(&session, &mut candidates, true).unwrap();
+        assert_eq!(candidates[0].ident(), "aaa/app");
+    }
+
+    #[test]
+    fn no_frontend_falls_back_to_priority() {
+        // A fresh session has no event bus, so no interactive prompt is
+        // possible: priority selection applies without auto_select too.
+        let session = Session::new();
+        let mut candidates = vec![test_package("app", "extras"), test_package("app", "main")];
+        select_candidate(&session, &mut candidates, false).unwrap();
+        assert_eq!(candidates[0].ident(), "main/app");
+    }
 }

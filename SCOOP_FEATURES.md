@@ -232,7 +232,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Held package protection | [x] | Packages are skipped unless `--force` |
 | Multiple architecture support | [x] | 32bit, 64bit, arm64; `--arch` flag / `SCOOP_ARCH` env override resolution + install record |
 | Cross-bucket package replacement | [x] | When package moves buckets |
-| Candidate selection (multi-bucket) | [x] | Interactive or auto-select |
+| Candidate selection (multi-bucket) | [x] | Interactive prompt, or `BUCKET_PRIORITY` auto-select under `-y`/no-TTY |
 | Global app installation | [x] | **Implemented** - `-g/--global` on install/uninstall/upgrade scopes the session root to `global_path` (admin-gated); shims/shortcuts/persist/env follow automatically; cache stays user-scoped |
 | Isolated app installation | [x] | **Implemented** - `bagger install <manifest-url|path.json>` installs without a bucket (deps resolve from buckets, `__isolated__` marker in install.json) |
 | Aria2 integration | [x] | **Implemented** - `aria2c` used when `aria2-enabled` + binary on PATH (split/connections/cookie/proxy/extra-opts honored), curl fallback + optional missing-binary warning |
