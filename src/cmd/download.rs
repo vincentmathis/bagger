@@ -26,9 +26,15 @@ pub struct Args {
     /// Download for offline use (implies no hash check)
     #[arg(long, action = ArgAction::SetTrue)]
     offline: bool,
+
+    /// Target architecture (32bit, 64bit or arm64; default: host arch)
+    #[arg(long)]
+    arch: Option<String>,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    crate::util::apply_arch_flag(args.arch.as_deref())?;
+
     let queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     let mut options = vec![SyncOption::DownloadOnly];
 

@@ -48,6 +48,7 @@ mod session;
 mod shim;
 mod shortcut;
 
+pub mod arch;
 pub mod operation;
 
 pub use error::Error;

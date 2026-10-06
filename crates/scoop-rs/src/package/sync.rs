@@ -742,7 +742,14 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 }
 
 /// Get the architecture string for the current platform.
+///
+/// Honors the `--arch` override when set, so `install.json` records the
+/// architecture that was actually resolved.
 fn get_arch_string(pkg: &Package) -> String {
+    if let Some(arch) = crate::arch::override_arch() {
+        return arch.as_str().to_owned();
+    }
+
     if let Some(arch) = pkg.manifest().architecture() {
         if cfg!(target_arch = "x86") {
             return if arch.ia32.is_some() {

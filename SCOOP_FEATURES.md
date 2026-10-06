@@ -15,10 +15,10 @@ Legend:
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
-| `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated); `-g/--global` installs for all users (admin) |
+| `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
 | `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal, `-g/--global` |
 | `bagger update <app>` | [x] | Single app update |
-| `bagger upgrade` | [x] | Upgrade all installed apps; `-g/--global` for global scope |
+| `bagger upgrade` | [x] | Upgrade all installed apps; `-g/--global` for global scope; `--arch` override |
 | `bagger search <query>` | [x] | Search across all buckets |
 | `bagger list` | [x] | List installed apps; supports `--upgradable` |
 | `bagger info <app>` | [x] | Show manifest info for any app |
@@ -66,7 +66,7 @@ Legend:
 | :--- | :---: | :--- |
 | `bagger create` | [x] | Create a bucket or manifest template |
 | `bagger depends <app>` | [x] | Show dependencies and reverse dependencies |
-| `bagger download <app>` | [x] | Download package without installing |
+| `bagger download <app>` | [x] | Download package without installing; `--arch` override |
 | `bagger checkver <app>` | [x] | Check latest version from app manifest URLs |
 | `bagger checkver all` | [x] | Check all installed apps for updates |
 | `bagger autofetch <app> [all] [-w]` | [x] | Checkver + autoupdate URL expansion preview; `-w` bumps manifest version |
@@ -231,7 +231,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Parallel bucket updates | [x] | ThreadPool-based |
 | Transactional install/uninstall | [x] | Emit events, rollback support |
 | Held package protection | [x] | Packages are skipped unless `--force` |
-| Multiple architecture support | [x] | 32bit, 64bit, arm64 |
+| Multiple architecture support | [x] | 32bit, 64bit, arm64; `--arch` flag / `SCOOP_ARCH` env override resolution + install record |
 | Cross-bucket package replacement | [x] | When package moves buckets |
 | Candidate selection (multi-bucket) | [x] | Interactive or auto-select |
 | Global app installation | [x] | **Implemented** - `-g/--global` on install/uninstall/upgrade scopes the session root to `global_path` (admin-gated); shims/shortcuts/persist/env follow automatically; cache stays user-scoped |
@@ -285,6 +285,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 16. **checkver jsonpath + arch fallback** - `effective_checkver()` prefers top-level, falls back to `architecture.<arch>.checkver`; `jsonpath` (`$.a.b[0]` subset) evaluated when no `regex` matches
 17. **checkver script support** - `checkver.script` runs via `invoke_script_capture` in the manifest dir context; stdout is the version (optionally filtered by `regex`)
 18. **checkver xpath support** - `roxmltree`-backed subset evaluator (`/`, `//`, `[n]`, `[@attr='value']`, `text()`, `@attr`) with quote-aware step splitting
+19. **Architecture override** - `scoop_rs::arch` module (`set_override`, process-wide); `arch_specific_field!` dispatches on it; `--arch` on install/upgrade/download plus `SCOOP_ARCH` env; `install.json` records the resolved arch
 
 ## Notes
 

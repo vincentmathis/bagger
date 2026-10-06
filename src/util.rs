@@ -102,3 +102,21 @@ pub(crate) fn apply_global_flag(global: bool, session: &scoop_rs::Session) -> Re
         .set_global(true)
         .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
+
+/// Apply the `--arch` selection, falling back to the `SCOOP_ARCH`
+/// environment variable.
+///
+/// Must run before any package sync operation.
+pub(crate) fn apply_arch_flag(arch: Option<&str>) -> Result<()> {
+    if let Some(name) = arch {
+        return scoop_rs::arch::set_override(name).map_err(|e| anyhow::anyhow!(e.to_string()));
+    }
+
+    if let Ok(name) = std::env::var("SCOOP_ARCH") {
+        if !name.trim().is_empty() {
+            scoop_rs::arch::set_override(&name).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        }
+    }
+
+    Ok(())
+}

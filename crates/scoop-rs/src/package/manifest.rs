@@ -715,35 +715,24 @@ impl<'de> Deserialize<'de> for Checkver {
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Macro to generate architecture-specific fields.
+///
+/// The selected section follows [`crate::arch::selected`]: the `--arch`
+/// override when set, otherwise the host architecture. Without an override
+/// this behaves exactly like the previous compile-time `cfg!` dispatch.
 macro_rules! arch_specific_field {
     ($self:ident, $field:ident) => {{
         let mut ret = $self.inner.$field.as_ref();
 
         if let Some(arch) = $self.inner.architecture.as_ref() {
-            if cfg!(target_arch = "x86") {
-                if let Some(ia32) = &arch.ia32 {
-                    let $field = ia32.$field.as_ref();
-                    if $field.is_some() {
-                        ret = $field;
-                    }
-                }
-            }
-
-            if cfg!(target_arch = "x86_64") {
-                if let Some(amd64) = &arch.amd64 {
-                    let $field = amd64.$field.as_ref();
-                    if $field.is_some() {
-                        ret = $field;
-                    }
-                }
-            }
-
-            if cfg!(target_arch = "aarch64") {
-                if let Some(aarch64) = &arch.aarch64 {
-                    let $field = aarch64.$field.as_ref();
-                    if $field.is_some() {
-                        ret = $field;
-                    }
+            let selected = match crate::arch::selected() {
+                crate::arch::Arch::Ia32 => &arch.ia32,
+                crate::arch::Arch::Amd64 => &arch.amd64,
+                crate::arch::Arch::Aarch64 => &arch.aarch64,
+            };
+            if let Some(spec) = selected {
+                let $field = spec.$field.as_ref();
+                if $field.is_some() {
+                    ret = $field;
                 }
             }
         }

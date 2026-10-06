@@ -33,10 +33,14 @@ pub struct Args {
     /// Upgrade globally installed app(s) (requires admin rights)
     #[arg(short = 'g', long, action = ArgAction::SetTrue)]
     global: bool,
+    /// Target architecture (32bit, 64bit or arm64; default: host arch)
+    #[arg(long)]
+    arch: Option<String>,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
     crate::util::apply_global_flag(args.global, session)?;
+    crate::util::apply_arch_flag(args.arch.as_deref())?;
 
     let mut queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     if queries.is_empty() {
