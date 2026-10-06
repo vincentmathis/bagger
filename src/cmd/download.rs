@@ -11,10 +11,6 @@ pub struct Args {
     #[arg(required = true, action = ArgAction::Append)]
     package: Vec<String>,
 
-    /// Download specific version(s)
-    #[arg(long, action = ArgAction::Append)]
-    version: Vec<String>,
-
     /// Assume yes to all prompts
     #[arg(short = 'y', long, action = ArgAction::SetTrue)]
     assume_yes: bool,
