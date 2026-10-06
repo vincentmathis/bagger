@@ -146,18 +146,18 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Field | Status | Notes |
 | :--- | :---: | :--- |
 | `checkver` | [x] | `regex` (+`reverse`, `replace` w/ captures)/`jsonpath`/`xpath`/`script` evaluated; `jsonpath`/`xpath` extract the string `regex` matches; `useragent` honored (else session UA) |
-| `autoupdate` | [x] | URL templates expanded by autofetch; `--write` downloads + rewrites `url`/`hash` for `download`-mode (other modes reported, never touched) |
+| `autoupdate` | [x] | URL templates expanded by autofetch; `--write` resolves `download`/`extract`/`json`/`xpath` hashes (others fall back to downloading the asset, like upstream) |
 | `runtime` | [x] | Resolved like `depends`; shown in `info`/`depends` |
 
 ### Hash Extraction (`autoupdate.hash`)
 
 | Field | Status | Notes |
 | :--- | :---: | :--- |
-| `regex` | [~] | Parsed; auto-applied only in checkver, not for autoupdate hash extraction |
-| `jsonpath` | [x] | Evaluated by checkver (`$.a.b[0]` subset); autoupdate hash extraction still manual |
-| `xpath` | [x] | Evaluated by checkver (`tag`, `*`, `[n]`, `[@a='v']`, trailing `text()`/`@attr`) |
-| `url` | [x] | Used as hash-source hint by autofetch; extraction not automated |
-| `find` | [~] | Alias for `regex`, parsed |
+| `regex` | [~] | Parsed; auto-applied in checkver + extract-mode (`$md5…`/`$checksum` placeholders), not for other hash modes |
+| `jsonpath` | [x] | Evaluated by checkver (`$.a.b[0]` subset) and json-mode hashes |
+| `xpath` | [x] | Evaluated by checkver (`tag`, `*`, `[n]`, `[@a='v']`, trailing `text()`/`@attr`) and xpath-mode hashes |
+| `url` | [x] | Hash-document URL for extract/json/xpath modes |
+| `find` | [x] | Alias for `regex`, honored in extract mode |
 | `type` | [~] | Deprecated field, parsed |
 
 ---
@@ -291,6 +291,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 22. **Shim add/remove symmetry** - `add()` now creates exactly what `remove()` cleans (`{name}.exe`/`.cmd`/`.ps1`/bare); per-file content (ps1 vs cmd wrappers); `which` resolves through `current` junctions; stray `shims/exe` + unleaked `.bat` extras gone
 23. **checkver useragent + quiet shim removal** - `checkver.useragent` sent (session UA fallback); removal progress only announced for files that exist
 24. **autoupdate hash rewriting** - `autofetch -w` downloads expanded URLs, computes sha256 and rewrites `url`/`hash` (shape-preserving, non-download modes skipped); verified end-to-end offline plus unit test
+25. **autoupdate extract/json/xpath hash modes** - upstream-faithful: textfile search with `$sha256…` placeholders, JSON/XPath hash documents, length-inferred `format_hash`, full `$version`/`$match<TitleCase>`/`$basename` substitutions, download fallback; verified offline e2e
 
 ## Notes
 

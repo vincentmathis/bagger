@@ -538,22 +538,379 @@ fn expand_replace(template: &str, captures: &[(String, String)]) -> String {
 /// Supports `$version` plus `$match*` captured variables (`$match1`,
 /// `$matchHead`, …) from the checkver regex match. Longer names are
 /// substituted first so `$match1` never clobbers `$match10`.
+///
+/// For full substitution support (version parts, `$basename`, …) see
+/// [`AutoupdateSubstitutions`].
 pub fn expand_autoupdate_template(
     template: &str,
     version: &str,
     captures: &[(String, String)],
 ) -> String {
-    let mut vars: Vec<(String, &str)> = vec![("version".to_owned(), version)];
-    for (name, value) in captures {
-        vars.push((format!("match{name}"), value.as_str()));
+    AutoupdateSubstitutions {
+        version,
+        asset_url: "",
+        captures,
     }
-    vars.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
+    .expand(template)
+}
 
-    let mut out = template.to_owned();
-    for (name, value) in vars {
-        out = out.replace(&format!("${name}"), value);
+/// Full Scoop substitution set for autoupdate templates.
+///
+/// Covers the variables from upstream `Get-VersionSubstitution` plus the
+/// URL family: `$version`, `$dotVersion`, `$underscoreVersion`,
+/// `$dashVersion`, `$cleanVersion`, `$majorVersion`, `$minorVersion`,
+/// `$patchVersion`, `$buildVersion`, `$preReleaseVersion`, `$matchHead`,
+/// `$matchTail`, `$match<TitleCasedName>` for checkver captures, and
+/// `$url`, `$baseurl`, `$basename`, `$urlNoExt`, `$basenameNoExt` derived
+/// from the expanded asset URL.
+pub struct AutoupdateSubstitutions<'a> {
+    /// The new version.
+    pub version: &'a str,
+    /// The expanded asset URL (fragment stripped for `$basename`).
+    pub asset_url: &'a str,
+    /// Checkver regex captures (`0` = whole match, numbered, named).
+    pub captures: &'a [(String, String)],
+}
+
+impl AutoupdateSubstitutions<'_> {
+    /// Expand all known `$variables` in `template` (longest names first).
+    pub fn expand(&self, template: &str) -> String {
+        let mut vars: Vec<(String, String)> = vec![];
+
+        let version = self.version;
+        vars.push(("version".to_owned(), version.to_owned()));
+        for (sep, name) in [('.', "dotVersion"), ('_', "underscoreVersion"), ('-', "dashVersion")] {
+            vars.push((
+                name.to_owned(),
+                version
+                    .chars()
+                    .map(|c| if c == '.' || c == '_' || c == '-' { sep } else { c })
+                    .collect(),
+            ));
+        }
+        vars.push((
+            "cleanVersion".to_owned(),
+            version
+                .chars()
+                .filter(|c| *c != '.' && *c != '_' && *c != '-')
+                .collect(),
+        ));
+
+        let (first_part, pre_release) = match version.split_once('-') {
+            Some((first, _)) => (first, version.rsplit('-').next().unwrap_or("")),
+            None => (version, ""),
+        };
+        let numbered: Vec<&str> = first_part.split('.').collect();
+        for (idx, name) in ["majorVersion", "minorVersion", "patchVersion", "buildVersion"]
+            .into_iter()
+            .enumerate()
+        {
+            vars.push((
+                name.to_owned(),
+                numbered.get(idx).copied().unwrap_or("").to_owned(),
+            ));
+        }
+        vars.push(("preReleaseVersion".to_owned(), pre_release.to_owned()));
+
+        if let Some(caps) = regex::Regex::new(r"(?P<head>\d+\.\d+(?:\.\d+)?)(?P<tail>.*)")
+            .ok()
+            .and_then(|re| re.captures(version))
+        {
+            vars.push((
+                "matchHead".to_owned(),
+                caps.name("head").map(|m| m.as_str().to_owned()).unwrap_or_default(),
+            ));
+            vars.push((
+                "matchTail".to_owned(),
+                caps.name("tail").map(|m| m.as_str().to_owned()).unwrap_or_default(),
+            ));
+        }
+
+        for (name, value) in self.captures {
+            if name == "0" {
+                continue;
+            }
+            vars.push((format!("match{}", title_case(name)), value.clone()));
+        }
+
+        let origin = self.asset_url.split('#').next().unwrap_or(self.asset_url);
+        let basename = percent_decode(origin.rsplit('/').next().unwrap_or(origin));
+        let baseurl = origin
+            .rsplit_once('/')
+            .map(|(base, _)| base.trim_end_matches('/').to_owned())
+            .unwrap_or_default();
+        vars.push(("url".to_owned(), origin.to_owned()));
+        vars.push(("baseurl".to_owned(), baseurl));
+        vars.push(("basename".to_owned(), basename.clone()));
+        vars.push(("urlNoExt".to_owned(), strip_extension(origin)));
+        vars.push(("basenameNoExt".to_owned(), strip_extension(&basename)));
+
+        vars.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
+
+        let mut out = template.to_owned();
+        for (name, value) in &vars {
+            out = out.replace(&format!("${name}"), value);
+        }
+        out
+    }
+}
+
+/// Uppercase the first character (`vversion` → `Vversion`), matching
+/// upstream `Get-Culture.TextInfo.ToTitleCase` for single-word names.
+fn title_case(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Strip the file extension (`app.zip` → `app`).
+fn strip_extension(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, _)) => stem.to_owned(),
+        None => name.to_owned(),
+    }
+}
+
+/// Decode `%XX` sequences in URL segments.
+fn percent_decode(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let bytes = segment.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        // Need bytes[idx + 1] and bytes[idx + 2] to form a hex pair.
+        if bytes[idx] == b'%' && idx + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (
+                (bytes[idx + 1] as char).to_digit(16),
+                (bytes[idx + 2] as char).to_digit(16),
+            ) {
+                out.push((h * 16 + l) as u8 as char);
+                idx += 3;
+                continue;
+            }
+        }
+        out.push(bytes[idx] as char);
+        idx += 1;
     }
     out
+}
+
+/// Normalize a discovered hash to manifest form.
+///
+/// Strips a `sha256:` prefix and infers the algorithm from the hex length
+/// (32 → `md5:`, 40 → `sha1:`, 64 → bare sha256, 128 → `sha512:`),
+/// mirroring upstream `format_hash`. Returns `None` for unusable values.
+fn format_hash_value(hash: &str) -> Option<String> {
+    let mut hash = hash.trim().to_lowercase();
+    if let Some(stripped) = hash.strip_prefix("sha256:") {
+        hash = stripped.to_owned();
+    }
+    hash.retain(|c| c.is_ascii_hexdigit());
+    match hash.len() {
+        32 => Some(format!("md5:{hash}")),
+        40 => Some(format!("sha1:{hash}")),
+        64 => Some(hash),
+        128 => Some(format!("sha512:{hash}")),
+        _ => None,
+    }
+}
+
+/// Find a hash in a text (checksum) file, mirroring upstream
+/// `find_hash_in_textfile`.
+///
+/// `regex` supports the `$md5`/`$sha1`/`$sha256`/`$sha512`/`$checksum`
+/// placeholders plus full autoupdate substitutions. With no regex, a bare
+/// hex line is accepted, falling back to a `<hash> <basename>` search.
+fn find_hash_in_textfile(
+    content: &str,
+    basename: &str,
+    regex: Option<&str>,
+    subs: &AutoupdateSubstitutions,
+) -> Option<String> {
+    let templates = [
+        ("$md5", "([a-fA-F0-9]{32})"),
+        ("$sha1", "([a-fA-F0-9]{40})"),
+        ("$sha256", "([a-fA-F0-9]{64})"),
+        ("$sha512", "([a-fA-F0-9]{128})"),
+        ("$checksum", "([a-fA-F0-9]{32,128})"),
+    ];
+
+    let pattern = match regex {
+        Some(r) if !r.is_empty() => {
+            let mut expanded = r.to_owned();
+            for (placeholder, group) in templates {
+                expanded = expanded.replace(placeholder, group);
+            }
+            subs.expand(&expanded)
+        }
+        _ => r"^\s*([a-fA-F0-9]+)\s*$".to_owned(),
+    };
+
+    if let Ok(re) = regex::RegexBuilder::new(&pattern)
+        .multi_line(true)
+        .build()
+    {
+        if let Some(caps) = re.captures(content) {
+            if let Some(m) = caps.get(1) {
+                let hash: String =
+                    m.as_str().chars().filter(|c| !c.is_whitespace()).collect();
+                if let Some(formatted) = format_hash_value(&hash) {
+                    return Some(formatted);
+                }
+            }
+        }
+    }
+
+    // Fall back to `<hash> <basename>` / `<basename> <hash>` lines.
+    let escaped_basename = regex::escape(basename);
+    for pattern in [
+        format!(r"([a-fA-F0-9]{{32,128}})[ \t]+.*{escaped_basename}(?:\s|$)"),
+        format!(r"{escaped_basename}[ \t]+.*?([a-fA-F0-9]{{32,128}})"),
+    ] {
+        if let Ok(re) = regex::Regex::new(&pattern) {
+            if let Some(caps) = re.captures(content) {
+                if let Some(m) = caps.get(1) {
+                    if let Some(formatted) = format_hash_value(m.as_str()) {
+                        return Some(formatted);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// How an asset hash was resolved.
+enum AssetHash {
+    /// Hash resolved from remote metadata; write it directly.
+    Found(String),
+    /// Download the asset and hash it (download mode and fallback).
+    Download,
+}
+
+/// Resolve the hash for one expanded asset URL, mirroring upstream
+/// `get_hash_for_app`.
+///
+/// `json`/`xpath` modes fetch the hash document and evaluate the
+/// expression; `extract` mode (or a bare URL) searches a text checksum
+/// file. Site-specific modes (`rdf`, `metalink`, `fosshub`, `sourceforge`,
+/// `github`) and any lookup failure fall back to [`AssetHash::Download`],
+/// exactly like upstream's compute-hashes fallback.
+fn resolve_asset_hash(
+    asset_url: &str,
+    spec: Option<&crate::package::manifest::HashExtraction>,
+    subs: &AutoupdateSubstitutions,
+    proxy: Option<&str>,
+) -> Fallible<AssetHash> {
+    use crate::package::manifest::HashExtractionMode;
+
+    let Some(spec) = spec else {
+        return Ok(AssetHash::Download);
+    };
+
+    // Mode determination mirrors upstream: explicit mode wins, then
+    // jp/jsonpath, then xpath, then a bare URL means extract mode.
+    enum Mode<'a> {
+        Json(&'a str),
+        Xpath(&'a str),
+        Extract(Option<&'a str>),
+        Download,
+    }
+    let mode = match &spec.mode {
+        Some(HashExtractionMode::Download) => Mode::Download,
+        Some(HashExtractionMode::Extract) => Mode::Extract(spec.url.as_deref()),
+        Some(HashExtractionMode::Json) => {
+            Mode::Json(spec.jsonpath.as_deref().unwrap_or(""))
+        }
+        Some(HashExtractionMode::Xpath) => {
+            Mode::Xpath(spec.xpath.as_deref().unwrap_or(""))
+        }
+        // Other site-specific modes fall back to downloading the asset.
+        Some(_) => Mode::Download,
+        None => {
+            if spec.jsonpath.is_some() {
+                Mode::Json(spec.jsonpath.as_deref().unwrap_or(""))
+            } else if spec.xpath.is_some() {
+                Mode::Xpath(spec.xpath.as_deref().unwrap_or(""))
+            } else if spec.url.is_some() {
+                Mode::Extract(spec.url.as_deref())
+            } else {
+                Mode::Download
+            }
+        }
+    };
+
+    match mode {
+        Mode::Download => Ok(AssetHash::Download),
+        Mode::Json(jsonpath) => {
+            let hashfile_url = subs.expand(spec.url.as_deref().unwrap_or(""));
+            if hashfile_url.is_empty() {
+                return Ok(AssetHash::Download);
+            }
+            let Some(body) = internal::network::fetch_url(&hashfile_url, proxy) else {
+                return Ok(AssetHash::Download);
+            };
+            match eval_jsonpath(&body, &subs.expand(jsonpath))
+                .and_then(|h| format_hash_value(&h))
+            {
+                Some(hash) => Ok(AssetHash::Found(hash)),
+                None => Ok(AssetHash::Download),
+            }
+        }
+        Mode::Xpath(xpath) => {
+            let hashfile_url = subs.expand(spec.url.as_deref().unwrap_or(""));
+            if hashfile_url.is_empty() {
+                return Ok(AssetHash::Download);
+            }
+            let Some(body) = internal::network::fetch_url(&hashfile_url, proxy) else {
+                return Ok(AssetHash::Download);
+            };
+            match eval_xpath(&body, &subs.expand(xpath)).and_then(|h| format_hash_value(&h)) {
+                Some(hash) => Ok(AssetHash::Found(hash)),
+                None => Ok(AssetHash::Download),
+            }
+        }
+        Mode::Extract(hashfile_url) => {
+            let regex = spec
+                .find
+                .as_deref()
+                .or(spec.regex.as_deref());
+            match hashfile_url {
+                Some(url) => {
+                    let hashfile_url = subs.expand(url);
+                    if hashfile_url.is_empty() {
+                        return Ok(AssetHash::Download);
+                    }
+                    let Some(body) = internal::network::fetch_url(&hashfile_url, proxy) else {
+                        return Ok(AssetHash::Download);
+                    };
+                    let basename = subs.expand("$basename");
+                    match find_hash_in_textfile(&body, &basename, regex, subs) {
+                        Some(hash) => Ok(AssetHash::Found(hash)),
+                        None => Ok(AssetHash::Download),
+                    }
+                }
+                // No hashfile URL: regex applies to the asset URL itself.
+                None => match regex {
+                    Some(pattern) => {
+                        let expanded = subs.expand(pattern);
+                        match regex::Regex::new(&expanded)
+                            .ok()
+                            .and_then(|re| re.captures(asset_url))
+                            .and_then(|caps| caps.get(1))
+                            .and_then(|m| format_hash_value(m.as_str()))
+                        {
+                            Some(hash) => Ok(AssetHash::Found(hash)),
+                            None => Ok(AssetHash::Download),
+                        }
+                    }
+                    None => Ok(AssetHash::Download),
+                },
+            }
+        }
+    }
 }
 
 /// Outcome of [`autoupdate_apply`].
@@ -670,22 +1027,9 @@ pub fn autoupdate_apply(
             templates,
             hash_specs,
         } = scope;
-        let mode_is_download = hash_specs
-            .and_then(|specs| specs.devectorize().first().cloned())
-            .map(|h| {
-                matches!(
-                    &h.mode,
-                    None | Some(crate::package::manifest::HashExtractionMode::Download)
-                )
-            })
-            .unwrap_or(true);
-
-        if !mode_is_download {
-            result.skipped.push(format!(
-                "{label}: non-download hash mode is not automated"
-            ));
-            continue;
-        }
+        let specs: Vec<_> = hash_specs
+            .map(|s| s.devectorize())
+            .unwrap_or_default();
 
         let expanded: Vec<String> = templates
             .iter()
@@ -716,13 +1060,27 @@ pub fn autoupdate_apply(
         }
 
         let mut hashes = vec![];
-        for url in &expanded {
-            let bytes = internal::network::fetch_bytes(url, proxy.as_deref()).ok_or_else(|| {
-                Error::Custom(format!("failed to download autoupdate URL '{url}'"))
-            })?;
-            let mut hasher = bagger_hash::ChecksumBuilder::new().sha256().build();
-            hasher.consume(&bytes);
-            hashes.push(format!("sha256:{}", hasher.finalize()));
+        for (idx, url) in expanded.iter().enumerate() {
+            // Fewer extraction templates than URLs: reuse the last one,
+            // mirroring upstream HashHelper.
+            let spec = specs.get(idx).copied().or(specs.last().copied());
+            let subs = AutoupdateSubstitutions {
+                version: latest,
+                asset_url: url,
+                captures,
+            };
+            match resolve_asset_hash(url, spec, &subs, proxy.as_deref())? {
+                AssetHash::Found(hash) => hashes.push(hash),
+                AssetHash::Download => {
+                    let bytes =
+                        internal::network::fetch_bytes(url, proxy.as_deref()).ok_or_else(|| {
+                            Error::Custom(format!("failed to download autoupdate URL '{url}'"))
+                        })?;
+                    let mut hasher = bagger_hash::ChecksumBuilder::new().sha256().build();
+                    hasher.consume(&bytes);
+                    hashes.push(format!("sha256:{}", hasher.finalize()));
+                }
+            }
         }
 
         result.rewritten_urls.extend(expanded.iter().cloned());
@@ -747,8 +1105,7 @@ pub fn autoupdate_apply(
 }
 
 /// Build a JSON string or array of strings, mirroring manifest shape.
-fn string_or_array(values: &[String]) -> serde_json::Value {
-    if values.len() == 1 {
+fn string_or_array(values: &[String]) -> serde_json::Value {    if values.len() == 1 {
         serde_json::Value::String(values[0].clone())
     } else {
         serde_json::Value::Array(
@@ -1096,7 +1453,8 @@ fn parse_xpath_step(step: &str, descendant: bool) -> Option<XPathStep<'_>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        eval_jsonpath, eval_xpath, expand_autoupdate_template, expand_replace, match_version,
+        eval_jsonpath, eval_xpath, expand_autoupdate_template, expand_replace,
+        find_hash_in_textfile, format_hash_value, match_version, AutoupdateSubstitutions,
     };
     use crate::package::manifest::Manifest;
     use crate::package::Package;
@@ -1211,7 +1569,7 @@ mod tests {
         ];
         assert_eq!(
             expand_autoupdate_template(
-                "https://example.com/$version/app-$match1-$matchtag.zip",
+                "https://example.com/$version/app-$match1-$matchTag.zip",
                 "2.0",
                 &captures
             ),
@@ -1262,8 +1620,6 @@ mod tests {
     /// Fully offline via `file://` payloads.
     #[test]
     fn autoupdate_rewrites_download_hashes() {
-        use bagger_hash::ChecksumBuilder;
-
         let dir = std::env::temp_dir().join("bagger-test-autoupdate");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("app-2.0.bin"), b"new-bytes").unwrap();
@@ -1294,7 +1650,7 @@ mod tests {
         let done = super::autoupdate_apply(&session, &pkg, "2.0", &[], true).unwrap();
         assert!(done.wrote);
 
-        let mut hasher = ChecksumBuilder::new().sha256().build();
+        let mut hasher = bagger_hash::ChecksumBuilder::new().sha256().build();
         hasher.consume(b"new-bytes");
         let expected = format!("sha256:{}", hasher.finalize());
 
@@ -1309,6 +1665,88 @@ mod tests {
             .ends_with("app-2.0.bin"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn test_subs<'a>(version: &'a str, url: &'a str) -> AutoupdateSubstitutions<'a> {
+        AutoupdateSubstitutions {
+            version,
+            asset_url: url,
+            captures: &[],
+        }
+    }
+
+    #[test]
+    fn substitution_families() {
+        let subs = test_subs(
+            "1.2.3-beta",
+            "https://example.com/dl/app-1.2.3-beta.zip",
+        );
+        assert_eq!(subs.expand("$version"), "1.2.3-beta");
+        assert_eq!(subs.expand("$dotVersion"), "1.2.3.beta");
+        assert_eq!(subs.expand("$underscoreVersion"), "1_2_3_beta");
+        assert_eq!(subs.expand("$cleanVersion"), "123beta");
+        assert_eq!(subs.expand("$majorVersion"), "1");
+        assert_eq!(subs.expand("$minorVersion"), "2");
+        assert_eq!(subs.expand("$patchVersion"), "3");
+        assert_eq!(subs.expand("$preReleaseVersion"), "beta");
+        assert_eq!(subs.expand("$matchHead"), "1.2.3");
+        assert_eq!(subs.expand("$matchTail"), "-beta");
+        assert_eq!(subs.expand("$basename"), "app-1.2.3-beta.zip");
+        assert_eq!(subs.expand("$basenameNoExt"), "app-1.2.3-beta");
+        assert_eq!(subs.expand("$baseurl"), "https://example.com/dl");
+    }
+
+    #[test]
+    fn substitution_match_title_case() {
+        let captures = vec![("vversion".to_owned(), "v2".to_owned())];
+        let subs = AutoupdateSubstitutions {
+            version: "2.0",
+            asset_url: "",
+            captures: &captures,
+        };
+        // Upstream TitleCases capture names: $matchVversion, not $matchvversion.
+        assert_eq!(subs.expand("$matchVversion"), "v2");
+    }
+
+    #[test]
+    fn format_hash_lengths() {
+        assert_eq!(
+            format_hash_value("sha256:ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789"),
+            Some("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned())
+        );
+        assert_eq!(
+            format_hash_value(&"a".repeat(40)),
+            Some(format!("sha1:{}", "a".repeat(40)))
+        );
+        assert_eq!(format_hash_value("xyz"), None);
+    }
+
+    #[test]
+    fn textfile_hash_modes() {
+        let subs = test_subs("2.0", "https://example.com/app-2.0.zip");
+        let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        // $sha256 placeholder.
+        let content = format!("starts {sha} end");
+        assert_eq!(
+            find_hash_in_textfile(&content, "app-2.0.zip", Some("$sha256"), &subs),
+            Some(sha.to_owned())
+        );
+        // Bare hex line default.
+        assert_eq!(
+            find_hash_in_textfile(&format!("  {sha}  \n"), "other.zip", None, &subs),
+            Some(sha.to_owned())
+        );
+        // Basename fallback.
+        let content = format!("{sha}  app-2.0.zip\n");
+        assert_eq!(
+            find_hash_in_textfile(&content, "app-2.0.zip", Some("nomatchhere"), &subs),
+            Some(sha.to_owned())
+        );
+        // Unusable content.
+        assert_eq!(
+            find_hash_in_textfile("no hashes here", "app.zip", None, &subs),
+            None
+        );
     }
 }
 

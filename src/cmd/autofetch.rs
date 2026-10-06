@@ -144,8 +144,8 @@ fn autofetch_one(session: &Session, pkg: &scoop_rs::Package, write: bool) -> Res
         }
     }
 
-    // Report hash extraction modes so users know what `checkver` automation
-    // would do next.
+    // Report hash extraction modes so users know what autoupdate
+    // automation will do next (a bare URL means extract mode upstream).
     let mut hash_modes: Vec<String> = Vec::new();
     if let Some(hashes) = autoupdate.hash.as_ref() {
         for h in hashes.devectorize() {
@@ -153,7 +153,13 @@ fn autofetch_one(session: &Session, pkg: &scoop_rs::Package, write: bool) -> Res
                 .mode
                 .as_ref()
                 .map(|m| format!("{m:?}").to_lowercase())
-                .unwrap_or_else(|| "download".to_string());
+                .unwrap_or_else(|| {
+                    if h.url.is_some() {
+                        "extract".to_string()
+                    } else {
+                        "download".to_string()
+                    }
+                });
             let url = h.url.as_deref().unwrap_or("<asset url>");
             hash_modes.push(format!("{mode} from {url}"));
         }
@@ -169,7 +175,13 @@ fn autofetch_one(session: &Session, pkg: &scoop_rs::Package, write: bool) -> Res
                         .mode
                         .as_ref()
                         .map(|m| format!("{m:?}").to_lowercase())
-                        .unwrap_or_else(|| "download".to_string());
+                        .unwrap_or_else(|| {
+                            if h.url.is_some() {
+                                "extract".to_string()
+                            } else {
+                                "download".to_string()
+                            }
+                        });
                     let url = h.url.as_deref().unwrap_or("<asset url>");
                     hash_modes.push(format!("{mode} from {url}"));
                 }
