@@ -295,6 +295,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 ## Notes
 
 - The core install/uninstall/upgrade flow is fully implemented with commit logic supporting archives, shims, shortcuts, persist, psmodule, env, and scripts.
+- Verified by offline end-to-end runs against scratch roots: isolated `file://` install, bucket install (arch default), 1.0→2.0 upgrade, `--arch 32bit` + `SCOOP_ARCH` selection, invalid-arch rejection, `list`/`prefix`/`which`/`shim ls`/`status`/`checkup`, and clean uninstalls with no leftovers.
 - PowerShell script invocation is functional but requires `powershell.exe` (Windows-only).
 - Archive extraction depends on an external `7z` executable.
 - The library (`scoop-rs`) is API-complete for manifests but some options are parsed-but-not-active.
