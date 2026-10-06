@@ -145,7 +145,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Field | Status | Notes |
 | :--- | :---: | :--- |
 | `checkver` | [x] | String form, `github` shorthand (`releases/latest` + tag regex), `regex` (+`reverse`, `replace` w/ captures)/`jsonpath`/`xpath`/`script` evaluated; `jsonpath`/`xpath` extract the string `regex` matches; `useragent` honored (else session UA) |
-| `autoupdate` | [x] | URL templates expanded by autofetch; `--write` resolves `download`/`extract`/`json`/`xpath` hashes (others fall back to downloading the asset, like upstream) |
+| `autoupdate` | [x] | URL templates expanded by autofetch; `--write` resolves `download`/`extract`/`json`/`xpath`/`rdf`/`fosshub`/`sourceforge`/`github` hashes (`metalink` + failures fall back to downloading the asset, like upstream) |
 | `runtime` | [x] | Resolved like `depends`; shown in `info`/`depends` |
 
 ### Hash Extraction (`autoupdate.hash`)
@@ -291,9 +291,10 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 23. **checkver useragent + quiet shim removal** - `checkver.useragent` sent (session UA fallback); removal progress only announced for files that exist
 24. **autoupdate hash rewriting** - `autofetch -w` downloads expanded URLs, computes sha256 and rewrites `url`/`hash` (shape-preserving, non-download modes skipped); verified end-to-end offline plus unit test
 25. **autoupdate extract/json/xpath hash modes** - upstream-faithful: textfile search with `$sha256…` placeholders, JSON/XPath hash documents, length-inferred `format_hash`, full `$version`/`$match<TitleCase>`/`$basename` substitutions, download fallback; verified offline e2e
-26. **Schema-compat hardening** - verified string-form `checkver`/`sourceforge` and `github` shorthand parsing against the upstream schema; added missing `github` hash mode; live-verified `github:` checkver against api real releases page
-27. **Real installing import** - `import [FILE] [-y]` installs exported apps through the install flow (was list-only) and restores holds; verified offline roundtrip incl. hold state
-28. **Cold-path fixes from execution** - `download --help` no longer panics (`-v` collided with global verbose; now long-only `--version`); `reset` repoints `current` via junction-aware removal (was os error 183); verified by reset/cleanup e2e across two versions
+26. **autoupdate site hash modes** - `fosshub`/`sourceforge`/`github` auto-detected from asset URLs (page/API scraping as upstream) plus `rdf` digest docs; `metalink` documented as download-fallback; live-verified sourceforge against the real 7-Zip files page
+27. **Schema-compat hardening** - verified string-form `checkver`/`sourceforge` and `github` shorthand parsing against the upstream schema; added missing `github` hash mode; live-verified `github:` checkver against api real releases page
+28. **Real installing import** - `import [FILE] [-y]` installs exported apps through the install flow (was list-only) and restores holds; verified offline roundtrip incl. hold state
+29. **Cold-path fixes from execution** - `download --help` no longer panics (`-v` collided with global verbose; now long-only `--version`); `reset` repoints `current` via junction-aware removal (was os error 183); verified by reset/cleanup e2e across two versions
 29. **Alias persistence + shim rm alias** - `config set alias` accepts the JSON alias map (alias add/rm were broken end-to-end); `shim rm` alias added; `create` builds the real `bucket/` layout; verified alias/config/shim/create/completions/virustotal-no-key behavior live
 
 ## Notes

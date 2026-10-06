@@ -790,14 +790,172 @@ enum AssetHash {
     Download,
 }
 
+/// A site-specific hash source auto-detected from the asset URL.
+///
+/// Mirrors the URL-pattern branches of upstream `get_hash_for_app`, which
+/// apply when no hash section is configured.
+enum SiteMode {
+    /// Fosshub download pages embed `"sha256":"…"`.
+    Fosshub { filename: String },
+    /// SourceForge project file listings embed `"basename":"…","sha1":"…"`.
+    Sourceforge { project: String, file: String },
+    /// GitHub release assets expose `digest` via the releases API.
+    Github { owner: String, repo: String },
+}
+
+/// Auto-detect a site-specific hash source from an asset URL.
+fn detect_site_mode(asset_url: &str) -> Option<SiteMode> {
+    let url = asset_url.split('#').next().unwrap_or(asset_url);
+
+    if let Some(caps) = regex::Regex::new(r"^(?:.*fosshub\.com\/).*(?:\/|\?dwl=)(?<filename>.*)$")
+        .ok()?
+        .captures(url)
+    {
+        return Some(SiteMode::Fosshub {
+            filename: caps["filename"].to_owned(),
+        });
+    }
+
+    if let Some(caps) = regex::Regex::new(
+        r"(?:downloads\.)?sourceforge\.net\/projects?\/(?<project>[^\/]+)\/(?:files\/)?(?<file>.*)",
+    )
+    .ok()?
+    .captures(url)
+    {
+        return Some(SiteMode::Sourceforge {
+            project: caps["project"].to_owned(),
+            file: caps["file"].to_owned(),
+        });
+    }
+
+    if let Some(caps) = regex::Regex::new(
+        r"https:\/\/github\.com\/(?<owner>[^\/]+)\/(?<repo>[^\/]+)\/releases\/download\/[^\/]+\/[^\/]+",
+    )
+    .ok()?
+    .captures(url)
+    {
+        return Some(SiteMode::Github {
+            owner: caps["owner"].to_owned(),
+            repo: caps["repo"].to_owned(),
+        });
+    }
+
+    None
+}
+
+/// Resolve a site-specific hash, returning `None` when the lookup fails
+/// (the caller then falls back to downloading the asset).
+fn resolve_site_hash(
+    mode: &SiteMode,
+    asset_url: &str,
+    basename: &str,
+    proxy: Option<&str>,
+) -> Option<String> {
+    match mode {
+        SiteMode::Fosshub { filename } => {
+            let body = internal::network::fetch_url(asset_url, proxy)?;
+            fosshub_hash_in_page(&body, filename)
+        }
+        SiteMode::Sourceforge { project, file } => {
+            // The checksums live on the project files page, not the
+            // (mirror-bounced) download URL.
+            let page = format!("https://sourceforge.net/projects/{project}/files/{file}");
+            let dir = page.rsplit_once('/').map(|(d, _)| d).unwrap_or(&page);
+            let body = internal::network::fetch_url(dir, proxy)?;
+            sourceforge_hash_in_page(&body, basename)
+        }
+        SiteMode::Github { owner, repo } => {
+            let api = format!("https://api.github.com/repos/{owner}/{repo}/releases");
+            let body = internal::network::fetch_url(&api, proxy)?;
+            github_asset_digest(&body, asset_url)
+        }
+    }
+}
+
+/// Find a fosshub-embedded sha256 for `filename` in a download page.
+fn fosshub_hash_in_page(page: &str, filename: &str) -> Option<String> {
+    let pattern = format!(
+        r#"{}.*?"sha256":"([a-fA-F0-9]{{64}})"#,
+        regex::escape(filename)
+    );
+    regex::Regex::new(&pattern)
+        .ok()?
+        .captures(page)?
+        .get(1)
+        .and_then(|m| format_hash_value(m.as_str()))
+}
+
+/// Find a sha1 for `basename` in a SourceForge project files page.
+fn sourceforge_hash_in_page(page: &str, basename: &str) -> Option<String> {
+    let pattern = format!(
+        r#""{}":.*?"sha1":\s*"([a-fA-F0-9]{{40}})"#,
+        regex::escape(basename)
+    );
+    regex::Regex::new(&pattern)
+        .ok()?
+        .captures(page)?
+        .get(1)
+        .and_then(|m| format_hash_value(m.as_str()))
+}
+
+/// Find the `digest` of a release asset by its download URL.
+fn github_asset_digest(releases_json: &str, origin_url: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(releases_json).ok()?;
+    for release in json.as_array()? {
+        for asset in release.get("assets")?.as_array()? {
+            if asset.get("browser_download_url")?.as_str()? == origin_url {
+                let digest = asset.get("digest")?.as_str()?;
+                let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+                return format_hash_value(hex);
+            }
+        }
+    }
+    None
+}
+
+/// Find a `sha256` digest in an RDF document for the given basename.
+///
+/// Mirrors upstream `find_hash_in_rdf`: `<Content about="basename">` entries
+/// carrying a `sha256` child. Namespace prefixes are ignored.
+fn rdf_sha256(doc_xml: &str, basename: &str) -> Option<String> {
+    let doc = roxmltree::Document::parse(doc_xml).ok()?;
+    let root = doc.root_element();
+    for content in root
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "Content")
+    {
+        let is_ours = content
+            .attributes()
+            .any(|a| a.name() == "about" && a.value() == basename);
+        if !is_ours {
+            continue;
+        }
+        for child in content.children().filter(|n| n.is_element()) {
+            if child.tag_name().name() == "sha256" {
+                if let Some(hash) = xpath_text_content(&child)
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .and_then(format_hash_value)
+                {
+                    return Some(hash);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Resolve the hash for one expanded asset URL, mirroring upstream
 /// `get_hash_for_app`.
 ///
 /// `json`/`xpath` modes fetch the hash document and evaluate the
 /// expression; `extract` mode (or a bare URL) searches a text checksum
-/// file. Site-specific modes (`rdf`, `metalink`, `fosshub`, `sourceforge`,
-/// `github`) and any lookup failure fall back to [`AssetHash::Download`],
-/// exactly like upstream's compute-hashes fallback.
+/// file; `rdf` reads an RDF digest document; `fosshub`/`sourceforge`/
+/// `github` are detected from the asset URL (or set explicitly) and
+/// resolved from site metadata. `metalink` (needs raw HEAD headers) and
+/// any lookup failure fall back to [`AssetHash::Download`], exactly like
+/// upstream's compute-hashes fallback.
 fn resolve_asset_hash(
     asset_url: &str,
     spec: Option<&crate::package::manifest::HashExtraction>,
@@ -806,8 +964,19 @@ fn resolve_asset_hash(
 ) -> Fallible<AssetHash> {
     use crate::package::manifest::HashExtractionMode;
 
+    // No hash section: upstream still tries site-specific sources based on
+    // the asset URL before falling back to downloading it.
     let Some(spec) = spec else {
-        return Ok(AssetHash::Download);
+        return Ok(match detect_site_mode(asset_url) {
+            Some(site) => {
+                let basename = subs.expand("$basename");
+                match resolve_site_hash(&site, asset_url, &basename, proxy) {
+                    Some(hash) => AssetHash::Found(hash),
+                    None => AssetHash::Download,
+                }
+            }
+            None => AssetHash::Download,
+        });
     };
 
     // Mode determination mirrors upstream: explicit mode wins, then
@@ -816,6 +985,8 @@ fn resolve_asset_hash(
         Json(&'a str),
         Xpath(&'a str),
         Extract(Option<&'a str>),
+        Rdf(Option<&'a str>),
+        Site,
         Download,
     }
     let mode = match &spec.mode {
@@ -827,7 +998,15 @@ fn resolve_asset_hash(
         Some(HashExtractionMode::Xpath) => {
             Mode::Xpath(spec.xpath.as_deref().unwrap_or(""))
         }
-        // Other site-specific modes fall back to downloading the asset.
+        Some(HashExtractionMode::Rdf) => Mode::Rdf(spec.url.as_deref()),
+        // Fosshub/sourceforge/github resolve from the asset URL itself.
+        Some(
+            HashExtractionMode::Fosshub
+            | HashExtractionMode::Sourceforge
+            | HashExtractionMode::Github,
+        ) => Mode::Site,
+        // Metalink (needs raw HEAD headers) and anything else fall back
+        // to downloading the asset.
         Some(_) => Mode::Download,
         None => {
             if spec.jsonpath.is_some() {
@@ -844,6 +1023,32 @@ fn resolve_asset_hash(
 
     match mode {
         Mode::Download => Ok(AssetHash::Download),
+        Mode::Site => match detect_site_mode(asset_url) {
+            Some(site) => {
+                let basename = subs.expand("$basename");
+                match resolve_site_hash(&site, asset_url, &basename, proxy) {
+                    Some(hash) => Ok(AssetHash::Found(hash)),
+                    None => Ok(AssetHash::Download),
+                }
+            }
+            None => Ok(AssetHash::Download),
+        },
+        Mode::Rdf(hashfile_url) => {
+            let hashfile_url = hashfile_url
+                .map(|url| subs.expand(url))
+                .unwrap_or_default();
+            if hashfile_url.is_empty() {
+                return Ok(AssetHash::Download);
+            }
+            let Some(body) = internal::network::fetch_url(&hashfile_url, proxy) else {
+                return Ok(AssetHash::Download);
+            };
+            let basename = subs.expand("$basename");
+            match rdf_sha256(&body, &basename) {
+                Some(hash) => Ok(AssetHash::Found(hash)),
+                None => Ok(AssetHash::Download),
+            }
+        }
         Mode::Json(jsonpath) => {
             let hashfile_url = subs.expand(spec.url.as_deref().unwrap_or(""));
             if hashfile_url.is_empty() {
@@ -1772,6 +1977,87 @@ mod tests {
             find_hash_in_textfile("no hashes here", "app.zip", None, &subs),
             None
         );
+    }
+
+    #[test]
+    fn site_mode_detection() {
+        match super::detect_site_mode("https://www.fosshub.com/Foo.html?dwl=foo-2.0.exe") {
+            Some(super::SiteMode::Fosshub { filename }) => {
+                assert_eq!(filename, "foo-2.0.exe")
+            }
+            _ => panic!("expected fosshub"),
+        }
+        match super::detect_site_mode(
+            "https://downloads.sourceforge.net/project/sevenzip/7-Zip/24.09/7z2409-x64.exe",
+        ) {
+            Some(super::SiteMode::Sourceforge { project, .. }) => {
+                assert_eq!(project, "sevenzip")
+            }
+            _ => panic!("expected sourceforge"),
+        }
+        match super::detect_site_mode(
+            "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_windows_amd64.zip",
+        ) {
+            Some(super::SiteMode::Github { owner, repo }) => {
+                assert_eq!((owner.as_str(), repo.as_str()), ("cli", "cli"))
+            }
+            _ => panic!("expected github"),
+        }
+        assert!(super::detect_site_mode("https://example.com/a.zip").is_none());
+    }
+
+    #[test]
+    fn site_page_parsers() {
+        let sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+
+        let fosshub_page = format!(r#"var x = "foo-2.0.exe blah"; "sha256":"{sha256}";"#);
+        assert_eq!(
+            super::fosshub_hash_in_page(&fosshub_page, "foo-2.0.exe").as_deref(),
+            Some(sha256)
+        );
+
+        let sf_page = format!("\"foo-2.0.zip\":{{\"name\":\"x\",\"sha1\": \"{sha1}\"}}");
+        let expected_sf = format!("sha1:{sha1}");
+        assert_eq!(
+            super::sourceforge_hash_in_page(&sf_page, "foo-2.0.zip").as_deref(),
+            Some(expected_sf.as_str())
+        );
+
+        let releases = format!(
+            r#"[{{"tag_name": "v2.0",
+                "assets": [{{"browser_download_url": "https://github.com/o/r/releases/download/v2.0/a.zip",
+                             "digest": "sha256:{sha256}"}}]}}]"#
+        );
+        assert_eq!(
+            super::github_asset_digest(
+                &releases,
+                "https://github.com/o/r/releases/download/v2.0/a.zip"
+            )
+            .as_deref(),
+            Some(sha256)
+        );
+        assert_eq!(
+            super::github_asset_digest(&releases, "https://github.com/o/r/other.zip"),
+            None
+        );
+    }
+
+    #[test]
+    fn rdf_digest_lookup() {
+        let sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let rdf = format!(
+            r#"<?xml version="1.0"?>
+            <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+              <Content rdf:about="app-2.0.zip"><sha256>{sha256}</sha256></Content>
+              <Content rdf:about="other.zip"><sha256>00</sha256></Content>
+            </rdf:RDF>"#
+        );
+        assert_eq!(
+            super::rdf_sha256(&rdf, "app-2.0.zip").as_deref(),
+            Some(sha256)
+        );
+        assert_eq!(super::rdf_sha256(&rdf, "missing.zip"), None);
     }
 }
 
