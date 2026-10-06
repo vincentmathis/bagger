@@ -89,7 +89,12 @@ impl PackageCache<'_> {
     fn update_valid_state(&mut self) {
         let mut cnt = 0;
         for (_, cache) in self.inner.iter() {
-            if cache.local_size == cache.remote_size {
+            // A file only counts as valid when its remote size is known and
+            // matches the local size. Unknown remote sizes (servers omitting
+            // Content-Length, non-HTTP URLs) must never validate a missing
+            // (or any) local file, otherwise downloads would be skipped and
+            // the integrity check would fail on absent files.
+            if cache.remote_size > 0 && cache.local_size == cache.remote_size {
                 cnt += 1;
             }
         }
@@ -896,3 +901,50 @@ fn progress(
 
 //     Ok(())
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::manifest::Manifest;
+    use crate::Session;
+
+    #[test]
+    fn downloads_files_with_unknown_remote_size() {
+        // Regression test: servers (or schemes like file://) that report no
+        // Content-Length must not mark missing files as valid cache, which
+        // used to skip the download and fail the integrity check.
+        let dir = std::env::temp_dir().join("bagger-probe-dl");
+        std::fs::create_dir_all(dir.join("cache")).unwrap();
+        std::fs::write(dir.join("payload.bin"), b"0123456789").unwrap();
+        std::env::set_var("SCOOP_CACHE", dir.join("cache"));
+
+        let url = format!(
+            "file:///{}/payload.bin",
+            dir.to_string_lossy().replace('\\', "/")
+        );
+        let json = format!(
+            r#"{{"version": "1.0", "homepage": "https://example.com",
+                "license": "MIT", "url": "{url}",
+                "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}"#
+        );
+        let manifest = Manifest::parse_bytes(json.as_bytes(), &dir.join("probe.json")).unwrap();
+        let session = Session::new();
+        assert_eq!(session.config().cache_path(), dir.join("cache").as_path());
+        let pkg = Package::from("probe", "main", manifest);
+        let pkgs = [&pkg];
+        let mut set = PackageSet::new(&session, &pkgs, true).unwrap();
+        let size = set.calculate_download_size().unwrap();
+        assert_eq!(size.total, 0);
+        set.download().unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(dir.join("cache"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(entries.len(), 1, "cache should contain the download");
+        assert_eq!(std::fs::read(&entries[0]).unwrap(), b"0123456789");
+
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

@@ -60,6 +60,25 @@ pub fn fetch_url_with_headers(
     String::from_utf8(content).ok().map(|body| (code, body))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_url_get_returns_body() {
+        let dir = std::env::temp_dir().join("bagger-probe-net");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hello.txt"), b"hi").unwrap();
+        let url = format!(
+            "file:///{}/hello.txt",
+            dir.to_string_lossy().replace('\\', "/")
+        );
+        let got = fetch_url(&url, None);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(got.as_deref(), Some("hi"));
+    }
+}
+
 /// Fetch the content from a URL as a string.
 pub fn fetch_url(url: &str, proxy: Option<&str>) -> Option<String> {
     let mut easy = Easy::new();

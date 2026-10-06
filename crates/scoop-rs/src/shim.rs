@@ -113,34 +113,13 @@ pub fn add(session: &Session, package: &Package) -> Fallible<()> {
         for shim_def in bins {
             let shim = Shim::new(shim_def);
 
-            let shim_path = shims_dir.join(shim.name);
-            let exts: Vec<String> = match shim.ty {
-                ShimType::Exe => vec!["exe".to_string(), format!("{}.{}", shim.name, pkg_name)],
-                ShimType::PowerShell => vec![
-                    format!("{}.{}", shim.name, pkg_name),
-                    format!("{}.cmd", shim.name),
-                    format!("{}.ps1", shim.name),
-                ],
-                _ => vec![
-                    format!("{}.{}", shim.name, pkg_name),
-                    format!("{}.cmd", shim.name),
-                ],
-            };
-
-            let real_path = shims_dir.join(&exts[0]);
-
             // Determine the target binary path
             let apps_dir = config.root_path().join("apps");
             let bin_dir = apps_dir.join(pkg_name).join(&version);
             let target = bin_dir.join(shim.real_name);
 
-            create_shim(&real_path, &target, &shim)?;
-
-            // Create alternate extension shims
-            for alt_ext in exts.iter().skip(1) {
-                let alt_shim_path = shims_dir.join(alt_ext);
-                let _ = std::fs::remove_file(&alt_shim_path);
-                let _ = std::fs::copy(&real_path, &alt_shim_path);
+            for (filename, content_kind) in shim_files(&shim) {
+                create_shim(&shims_dir.join(&filename), &target, &shim, content_kind)?;
             }
         }
     }
@@ -148,27 +127,50 @@ pub fn add(session: &Session, package: &Package) -> Fallible<()> {
     Ok(())
 }
 
+/// Shim files created for one `bin` entry.
+///
+/// Every name produced here must stay within the universe that `remove()`
+/// cleans and `which`/`shim ls` understand: bare `{name}` plus standard
+/// executable extensions.
+fn shim_files(shim: &Shim) -> Vec<(String, ShimContent)> {
+    match shim.ty {
+        ShimType::Exe => vec![(format!("{}.exe", shim.name), ShimContent::Batch)],
+        ShimType::PowerShell => vec![
+            (format!("{}.cmd", shim.name), ShimContent::PowerShellInvoke),
+            (format!("{}.ps1", shim.name), ShimContent::PowerShell),
+        ],
+        // Extensionless (Bash) shims live at the bare name.
+        ShimType::Bash => vec![(shim.name.to_owned(), ShimContent::Batch)],
+        _ => vec![(format!("{}.cmd", shim.name), ShimContent::Batch)],
+    }
+}
+
+/// The script flavor written into a shim file.
+#[derive(Clone, Copy)]
+enum ShimContent {
+    /// Batch wrapper (`@echo off`, direct or `java`/`python` launch).
+    Batch,
+    /// Batch wrapper invoking a PowerShell script target.
+    PowerShellInvoke,
+    /// Native PowerShell script.
+    PowerShell,
+}
+
 /// Create a shim file that forwards execution to the target binary.
-fn create_shim(shim_path: &Path, target: &Path, shim: &Shim) -> Fallible<()> {
+fn create_shim(shim_path: &Path, target: &Path, shim: &Shim, content: ShimContent) -> Fallible<()> {
     // On Windows, create a batch file as a simple shim
     // A proper implementation would embed the shim.exe binary
     #[cfg(windows)]
     {
         let _ = std::fs::remove_file(shim_path);
-        let content = create_shim_content(target, shim)?;
+        let content = create_shim_content(target, shim, content)?;
         std::fs::write(shim_path, &content)?;
-
-        // Also create .bat/.cmd variants for Batch and PowerShell types
-        if shim.ty == ShimType::Batch || shim.ty == ShimType::PowerShell {
-            let bat_path = shim_path.with_extension("bat");
-            std::fs::write(&bat_path, &content)?;
-        }
     }
 
     #[cfg(unix)]
     {
         let _ = std::fs::remove_file(shim_path);
-        let content = create_shim_content(target, shim)?;
+        let content = create_shim_content(target, shim, content)?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(shim_path, &content)?;
         let mut perms = std::fs::metadata(shim_path)?.permissions();
@@ -180,7 +182,7 @@ fn create_shim(shim_path: &Path, target: &Path, shim: &Shim) -> Fallible<()> {
 }
 
 /// Generate shim script content for the given target.
-fn create_shim_content(target: &Path, shim: &Shim) -> Fallible<String> {
+fn create_shim_content(target: &Path, shim: &Shim, content: ShimContent) -> Fallible<String> {
     let target_str = target.to_string_lossy();
 
     let args_str = if let Some(args) = &shim.args {
@@ -188,6 +190,17 @@ fn create_shim_content(target: &Path, shim: &Shim) -> Fallible<String> {
     } else {
         String::new()
     };
+
+    if let ShimContent::PowerShell = content {
+        return Ok(format!("& \"{}\" {}\n", target_str, args_str));
+    }
+
+    if let ShimContent::PowerShellInvoke = content {
+        return Ok(format!(
+            "@echo off\npowershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" {}\n",
+            target_str, args_str
+        ));
+    }
 
     #[cfg(windows)]
     {
@@ -325,4 +338,34 @@ pub fn remove(session: &Session, package: &Package) -> Fallible<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shim_of<'a>(def: &[&'a str]) -> Shim<'a> {
+        Shim::new(def.to_vec())
+    }
+
+    #[test]
+    fn created_files_stay_in_removable_universe() {
+        // Every file add() creates must be discoverable by which/shim ls
+        // and removable by remove(): bare name or standard exe extensions.
+        let cases = [
+            (vec!["app.exe"], vec!["app.exe"]),
+            (vec!["tool.ps1"], vec!["tool.cmd", "tool.ps1"]),
+            (vec!["run"], vec!["run"]),
+            (vec!["prog.jar"], vec!["prog.cmd"]),
+            (vec!["setup.bat"], vec!["setup.cmd"]),
+        ];
+        for (def, expected) in cases {
+            let shim = shim_of(&def);
+            let files: Vec<String> = shim_files(&shim)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+            assert_eq!(files, expected, "shim files for {def:?}");
+        }
+    }
 }

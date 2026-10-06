@@ -481,7 +481,11 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         }
 
         let download_size = set.calculate_download_size()?;
-        should_offline = download_size.total == 0;
+        // Only skip downloading when every size is known (not estimated)
+        // and nothing is missing: servers that omit Content-Length (or
+        // non-HTTP URLs like file://) report zero sizes, which must still
+        // be downloaded.
+        should_offline = download_size.total == 0 && !download_size.estimated;
         transaction.set_download_size(download_size);
     }
 

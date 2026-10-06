@@ -287,6 +287,8 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 18. **checkver xpath support** - `roxmltree`-backed subset evaluator (`/`, `//`, `[n]`, `[@attr='value']`, `text()`, `@attr`) with quote-aware step splitting
 19. **Architecture override** - `scoop_rs::arch` module (`set_override`, process-wide); `arch_specific_field!` dispatches on it; `--arch` on install/upgrade/download plus `SCOOP_ARCH` env; `install.json` records the resolved arch
 20. **checkver reverse/replace/captures** - `reverse` matches last occurrence; `replace` expands `$1`/`${name}` from captures (.NET-style, `$$` escape); `jsonpath`/`xpath` extract the string `regex` matches; captures feed autofetch `$match*` URL variables
+21. **Download unknown-size fix** - unknown remote sizes no longer validate missing cache (`0==0` bug) nor skip downloads; found by first real end-to-end install
+22. **Shim add/remove symmetry** - `add()` now creates exactly what `remove()` cleans (`{name}.exe`/`.cmd`/`.ps1`/bare); per-file content (ps1 vs cmd wrappers); `which` resolves through `current` junctions; stray `shims/exe` + unleaked `.bat` extras gone
 
 ## Notes
 
