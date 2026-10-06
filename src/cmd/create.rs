@@ -47,14 +47,18 @@ fn create_bucket(name: &str, dir: &std::path::Path) -> Result<()> {
 
     std::fs::create_dir_all(&bucket_dir)?;
 
-    // Create a minimal bucket structure
+    // Create a minimal bucket structure (manifests live in `bucket/`,
+    // which is where enumeration looks for them).
+    let bucket_subdir = bucket_dir.join("bucket");
+    std::fs::create_dir_all(&bucket_subdir)?;
+
     let gitignore = bucket_dir.join(".gitignore");
     std::fs::write(&gitignore, "*.json\n")?;
 
     let readme = bucket_dir.join("README.md");
     std::fs::write(&readme, format!("# {}\n\n", name))?;
 
-    let manifest = bucket_dir.join(format!("{}.json", name));
+    let manifest = bucket_subdir.join(format!("{}.json", name));
     std::fs::write(&manifest, SAMPLE_MANIFEST)?;
 
     println!(

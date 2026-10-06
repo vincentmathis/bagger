@@ -32,6 +32,7 @@ enum Command {
         target: String,
     },
     /// Remove a shim
+    #[clap(alias = "rm")]
     Remove {
         /// The shim name (without extension)
         shim: String,

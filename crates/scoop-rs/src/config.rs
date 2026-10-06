@@ -437,6 +437,13 @@ impl Config {
                     false => Some(value.to_string()),
                 }
             }
+            "alias" => match is_unset {
+                true => self.inner.alias = None,
+                false => match serde_json::from_str::<HashMap<String, String>>(value) {
+                    Ok(value) => self.inner.alias = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
             "last_update" => {
                 self.inner.last_update = match is_unset {
                     true => None,

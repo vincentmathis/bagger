@@ -54,7 +54,7 @@ Legend:
 | `bagger cleanup <app>` | [x] | Remove old versions, keep current |
 | `bagger home <app>` | [x] | Open app homepage in browser |
 | `bagger shim` | [x] | List, add, and remove shims |
-| `bagger alias` | [x] | Manage command aliases (list, add, rm) |
+| `bagger alias` | [x] | Manage command aliases (list, add, rm; persisted to config) |
 | `bagger import` | [x] | Import apps from export file/stdin and install them (restores holds, skips isolated) |
 | `bagger export` | [x] | Export installed apps to JSON |
 | `bagger help` | [x] | Auto-generated via clap |
@@ -294,6 +294,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 26. **Schema-compat hardening** - verified string-form `checkver`/`sourceforge` and `github` shorthand parsing against the upstream schema; added missing `github` hash mode; live-verified `github:` checkver against api real releases page
 27. **Real installing import** - `import [FILE] [-y]` installs exported apps through the install flow (was list-only) and restores holds; verified offline roundtrip incl. hold state
 28. **Cold-path fixes from execution** - `download --help` no longer panics (`-v` collided with global verbose; now long-only `--version`); `reset` repoints `current` via junction-aware removal (was os error 183); verified by reset/cleanup e2e across two versions
+29. **Alias persistence + shim rm alias** - `config set alias` accepts the JSON alias map (alias add/rm were broken end-to-end); `shim rm` alias added; `create` builds the real `bucket/` layout; verified alias/config/shim/create/completions/virustotal-no-key behavior live
 
 ## Notes
 

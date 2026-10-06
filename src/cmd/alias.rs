@@ -24,6 +24,7 @@ enum Command {
         command: String,
     },
     /// Remove an alias
+    #[clap(alias = "rm")]
     Remove {
         /// The alias name to remove
         name: String,
