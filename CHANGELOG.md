@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-beta.11 (unreleased)
+
+### Bug Fixes
+
+* **cleanup:** resolve the `current` link target as the active version before consulting manifests; never delete metadata-less version dirs; continue past locked versions with an in-use hint
+* **shim:** `target_of` resolves relative alias targets against the shims dir and prefers sh-style comment targets; `checkup` only assesses recognized shim files; `Exe` shims write `.cmd` (batch in `.exe` cannot execute); all flavors forward caller args; new `shim refresh` repairs all installed apps
+* **extract:** native Inno Setup extraction via innounp; `.msi` via lessmsi/msiexec; `extract_dir` promotes; downloads stage under real URL basenames
+* **sync:** bulk operations skip apps with running processes instead of aborting; `installer.file` executes with substitution; `persist` store wins on upgrade
+* **hook scope:** manifest scripts run with upstream variables (`$dir`, `$version`, …) plus `Expand-*` archive helpers
+
+---
+
 ## 0.1.0-beta.10 (2026-10-07)
 
 
