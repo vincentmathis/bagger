@@ -183,6 +183,16 @@ fn cleanup(
     } else {
         print!("Removing {}{}:", app, if global { " (global)" } else { "" });
         for (version, version_path) in old_versions {
+            // Never delete a version directory that lacks bagger install
+            // metadata: it may be a failed/partial upgrade whose `current`
+            // link already points at it. Deleting those destroys the
+            // pending upgrade instead of the old version.
+            if !version_path.join("manifest.json").is_file()
+                || !version_path.join("install.json").is_file()
+            {
+                eprintln!("\nSkipping {app} {version}: no install metadata (leaving it alone).");
+                continue;
+            }
             let removal = unlink_persist_links(&version_path)
                 .map_err(|error| {
                     anyhow::anyhow!("failed to unlink persist paths for {app} {version}: {error}")

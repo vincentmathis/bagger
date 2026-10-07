@@ -671,15 +671,20 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             internal::fs::ensure_dir(&working_dir)?;
 
             let filenames = pkg.download_filenames();
+            let staged = pkg.download_staged_filenames();
 
             let cache_root = config.cache_path();
 
-            for filename in filenames.iter() {
+            // Stage downloads under their real URL basenames (upstream
+            // `url_filename`; `#/...` fragments coerce the name), so hook
+            // scripts, installer files, and shim targets observe the names
+            // manifests were written against.
+            for (filename, staged_name) in filenames.iter().zip(staged.iter()) {
                 let src = cache_root.join(filename);
                 if !src.exists() {
                     continue;
                 }
-                let dst = working_dir.join(filename);
+                let dst = working_dir.join(staged_name);
                 let _ = std::fs::remove_file(&dst);
                 std::fs::copy(&src, &dst)?;
             }
@@ -942,9 +947,8 @@ fn extract_package(
     pkg: &Package,
     working_dir: &std::path::Path,
 ) -> Fallible<()> {
-    let filenames = pkg.download_filenames();
+    let filenames = pkg.download_staged_filenames();
     let config = session.config();
-    let cache_root = config.cache_path();
 
     for filename in filenames.iter() {
         let archive_path = working_dir.join(filename);
@@ -1094,12 +1098,21 @@ fn handle_extract_location(
             .join(extract_to[0]);
         internal::fs::ensure_dir(&target_dir)?;
 
+        // Never relocate the downloaded archives themselves: consumed ones
+        // are already gone, and skipped ones (e.g. an unextractable `.exe`
+        // that IS the app binary, as in oh-my-posh) must stay at the top
+        // level where shims expect them.
+        let archives: std::collections::HashSet<String> =
+            pkg.download_staged_filenames().into_iter().collect();
         let entries = std::fs::read_dir(working_dir)?;
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name();
             let path = entry.path();
             if path == target_dir {
+                continue;
+            }
+            if archives.contains(&name.to_string_lossy().into_owned()) {
                 continue;
             }
             let dest = target_dir.join(&name);
@@ -1441,5 +1454,27 @@ mod tests {
         std::env::remove_var("SCOOP_GLOBAL");
         std::env::remove_var("SCOOP_CACHE");
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Staged filenames mirror upstream `url_filename`: real basenames with
+    /// `#/...` fragments coerced, so hook scripts and shim targets resolve.
+    #[test]
+    fn staged_filenames_use_url_basenames() {
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT",
+                "architecture": {"64bit": {"url": ["https://example.com/Obsidian-1.14.4.exe#/dl.7z", "https://example.com/app.zip?v=2"]}}}"#,
+            std::path::Path::new("staged.json"),
+        )
+        .unwrap();
+        let pkg = Package::from("staged", "main", manifest);
+        assert_eq!(
+            pkg.download_staged_filenames(),
+            vec!["dl.7z".to_string(), "app.zip".to_string()]
+        );
+        // Cache names stay hashed and distinct.
+        let cached = pkg.download_filenames();
+        assert_eq!(cached.len(), 2);
+        assert!(cached[0].starts_with("staged#1.0#"));
+        assert_ne!(cached[0], cached[1]);
     }
 }

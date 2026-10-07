@@ -498,7 +498,7 @@ pub(crate) fn build_prelude_for(
         ps_quote(&bucket_dir.to_string_lossy())
     ));
     let fnames: Vec<String> = package
-        .download_filenames()
+        .download_staged_filenames()
         .iter()
         .map(|f| ps_quote(f))
         .collect();

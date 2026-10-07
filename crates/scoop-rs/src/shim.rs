@@ -128,6 +128,13 @@ pub fn add(session: &Session, package: &Package) -> Fallible<()> {
                 }
             }
 
+            // A shim pointing at a missing target is always broken (the
+            // install never materialized it); say so loudly instead of
+            // succeeding silently, mirroring upstream's abort.
+            if !target.exists() {
+                warn_missing_target(pkg_name, &shim, &target);
+            }
+
             for (filename, content_kind) in shim_files(&shim) {
                 create_shim(&shims_dir.join(&filename), &target, &shim, content_kind)?;
             }
@@ -135,6 +142,20 @@ pub fn add(session: &Session, package: &Package) -> Fallible<()> {
     }
 
     Ok(())
+}
+
+/// Warn about a shim whose target was never materialized.
+///
+/// Upstream aborts the install here; bagger warns and continues so one bad
+/// `bin` entry cannot wedge an otherwise good install, but the breakage is
+/// impossible to miss.
+fn warn_missing_target(pkg_name: &str, shim: &Shim, target: &Path) {
+    eprintln!(
+        "warning: shim '{}' for '{}' points at missing target '{}'",
+        shim.name,
+        pkg_name,
+        target.display()
+    );
 }
 
 /// Shim files created for one `bin` entry.

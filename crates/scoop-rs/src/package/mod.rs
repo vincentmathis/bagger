@@ -220,6 +220,35 @@ impl Package {
             .collect::<Vec<_>>()
     }
 
+    /// Get the filenames downloads are staged under in the app directory.
+    ///
+    /// Mirrors upstream `url_filename`: the leaf after the last slash, with
+    /// any `?...` query dropped. A `#/...` fragment therefore coerces the
+    /// name (e.g. `Obsidian-1.14.4.exe#/dl.7z` stages as `dl.7z`), which is
+    /// what hook scripts, `installer.file` paths, and shim targets observe.
+    pub(crate) fn download_staged_filenames(&self) -> Vec<String> {
+        let cache_fallback = self.download_filenames();
+        self.manifest
+            .url()
+            .into_iter()
+            .enumerate()
+            .map(|(i, u)| {
+                let leaf = u
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(u)
+                    .split('?')
+                    .next()
+                    .unwrap_or(u);
+                if leaf.is_empty() {
+                    cache_fallback[i].clone()
+                } else {
+                    leaf.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+    }
+
     pub(crate) fn download_hashes(&self) -> Vec<&HashString> {
         self.manifest.hash()
     }
