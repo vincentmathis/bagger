@@ -13,9 +13,6 @@ jobs:
   ci_style_check:
     name: Code Style Check
     runs-on: windows-latest
-    env:
-      SCCACHE_GHA_ENABLED: true
-      RUSTC_WRAPPER: sccache
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -25,9 +22,6 @@ jobs:
         with:
           toolchain: stable
           components: clippy, rustfmt
-
-      - name: Cache Setup
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Format Check
         run: cargo fmt -- --check
@@ -47,9 +41,6 @@ jobs:
           - target: i686-pc-windows-msvc
           - target: aarch64-pc-windows-msvc
     runs-on: windows-latest
-    env:
-      SCCACHE_GHA_ENABLED: true
-      RUSTC_WRAPPER: sccache
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -59,9 +50,6 @@ jobs:
         with:
           toolchain: stable
           target: ${{ matrix.target }}
-
-      - name: Cache Setup
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Tests Check
         run: cargo test --workspace
@@ -109,9 +97,6 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     continue-on-error: true
-    env:
-      SCCACHE_GHA_ENABLED: true
-      RUSTC_WRAPPER: sccache
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
@@ -121,9 +106,6 @@ jobs:
         with:
           toolchain: stable
           target: ${{ matrix.target }}
-
-      - name: Cache Setup
-        uses: mozilla-actions/sccache-action@v0.0.6
 
       - name: Production Build
         run: cargo build --release --locked --target ${{ matrix.target }}
