@@ -17,7 +17,9 @@ Legend:
 | :--- | :---: | :--- |
 | `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
 | `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal, `-g/--global` |
-| `bagger update` | [x] | Pull all subscribed buckets (no args; app upgrades live in `upgrade`; per-bucket update intentionally absent, matching upstream Scoop) |
+| `bagger update` | [x] | Pull all subscribed buckets (no args) |
+
+> **Note on `update *`:** In older Scoop, `scoop update *` meant "upgrade all apps". In modern Scoop (and in `bagger`), use `bagger upgrade` (with no arguments) to upgrade all installed apps. The `update` command only updates bucket manifests and does not accept app names or wildcards.
 | `bagger upgrade` | [x] | Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override |
 | `bagger search <query>` | [x] | Search across all buckets |
 | `bagger list` | [x] | List installed apps; supports `--upgradable` |
