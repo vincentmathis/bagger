@@ -118,6 +118,16 @@ pub fn add(session: &Session, package: &Package) -> Fallible<()> {
             let bin_dir = apps_dir.join(pkg_name).join(&version);
             let target = bin_dir.join(shim.real_name);
 
+            // Older bagger versions wrote batch content into `{name}.exe`,
+            // which shadows the working `.cmd` and fails on execution.
+            // Remove the poison, but never touch a native binary.
+            if shim.ty == ShimType::Exe {
+                let poisoned = shims_dir.join(format!("{}.exe", shim.name));
+                if is_poisoned_exe(&poisoned) {
+                    let _ = std::fs::remove_file(&poisoned);
+                }
+            }
+
             for (filename, content_kind) in shim_files(&shim) {
                 create_shim(&shims_dir.join(&filename), &target, &shim, content_kind)?;
             }
@@ -132,9 +142,15 @@ pub fn add(session: &Session, package: &Package) -> Fallible<()> {
 /// Every name produced here must stay within the universe that `remove()`
 /// cleans and `which`/`shim ls` understand: bare `{name}` plus standard
 /// executable extensions.
+///
+/// NOTE: `{name}.exe` is deliberately never written. Upstream Scoop places
+/// the native shim binary there; a script with an `.exe` extension cannot
+/// execute (Windows reports os error 216 for it) and would shadow both the
+/// native binary and `{name}.cmd` in `PATH` resolution. Console launches
+/// resolve `{name}.cmd` fine.
 fn shim_files(shim: &Shim) -> Vec<(String, ShimContent)> {
     match shim.ty {
-        ShimType::Exe => vec![(format!("{}.exe", shim.name), ShimContent::Batch)],
+        ShimType::Exe => vec![(format!("{}.cmd", shim.name), ShimContent::Batch)],
         ShimType::PowerShell => vec![
             (format!("{}.cmd", shim.name), ShimContent::PowerShellInvoke),
             (format!("{}.ps1", shim.name), ShimContent::PowerShell),
@@ -143,6 +159,22 @@ fn shim_files(shim: &Shim) -> Vec<(String, ShimContent)> {
         ShimType::Bash => vec![(shim.name.to_owned(), ShimContent::Batch)],
         _ => vec![(format!("{}.cmd", shim.name), ShimContent::Batch)],
     }
+}
+
+/// Whether a `{name}.exe` file is bagger-poison: script content wearing an
+/// executable extension.
+///
+/// Such files were written by older bagger versions and can neither execute
+/// nor be shadowed — `PATH` resolution finds them first and fails. Native
+/// (MZ-header) binaries are always left alone.
+fn is_poisoned_exe(path: &Path) -> bool {
+    let Ok(content) = std::fs::read(path) else {
+        return false;
+    };
+    if content.len() >= 2 && content[0] == b'M' && content[1] == b'Z' {
+        return false;
+    }
+    content.starts_with(b"@echo off") || content.starts_with(b"@rem ")
 }
 
 /// The script flavor written into a shim file.
@@ -192,12 +224,12 @@ fn create_shim_content(target: &Path, shim: &Shim, content: ShimContent) -> Fall
     };
 
     if let ShimContent::PowerShell = content {
-        return Ok(format!("& \"{}\" {}\n", target_str, args_str));
+        return Ok(format!("& \"{}\" {} @args\n", target_str, args_str));
     }
 
     if let ShimContent::PowerShellInvoke = content {
         return Ok(format!(
-            "@echo off\npowershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" {}\n",
+            "@echo off\npowershell -NoProfile -ExecutionPolicy Bypass -File \"{}\" {} %*\n",
             target_str, args_str
         ));
     }
@@ -205,17 +237,17 @@ fn create_shim_content(target: &Path, shim: &Shim, content: ShimContent) -> Fall
     #[cfg(windows)]
     {
         if shim.ty == ShimType::Exe || shim.ty == ShimType::Bash {
-            return Ok(format!("@echo off\n\"{}\" {}\n", target_str, args_str));
+            return Ok(format!("@echo off\n\"{}\" {} %*\n", target_str, args_str));
         }
         if shim.ty == ShimType::Java {
             return Ok(format!(
-                "@echo off\njava -jar \"{}\" {}\n",
+                "@echo off\njava -jar \"{}\" {} %*\n",
                 target_str, args_str
             ));
         }
         if shim.ty == ShimType::Python {
             return Ok(format!(
-                "@echo off\npython \"{}\" {}\n",
+                "@echo off\npython \"{}\" {} %*\n",
                 target_str, args_str
             ));
         }
@@ -224,23 +256,29 @@ fn create_shim_content(target: &Path, shim: &Shim, content: ShimContent) -> Fall
     #[cfg(unix)]
     {
         if shim.ty == ShimType::Exe || shim.ty == ShimType::Bash {
-            return Ok(format!("#!/bin/sh\n\"{}\" {}\n", target_str, args_str));
+            return Ok(format!(
+                "#!/bin/sh\n\"{}\" {} \"$@\"\n",
+                target_str, args_str
+            ));
         }
         if shim.ty == ShimType::Java {
             return Ok(format!(
-                "#!/bin/sh\njava -jar \"{}\" {}\n",
+                "#!/bin/sh\njava -jar \"{}\" {} \"$@\"\n",
                 target_str, args_str
             ));
         }
         if shim.ty == ShimType::Python {
             return Ok(format!(
-                "#!/bin/sh\npython \"{}\" {}\n",
+                "#!/bin/sh\npython \"{}\" {} \"$@\"\n",
                 target_str, args_str
             ));
         }
     }
 
-    Ok(format!("#!/bin/sh\n\"{}\" {}\n", target_str, args_str))
+    Ok(format!(
+        "#!/bin/sh\n\"{}\" {} \"$@\"\n",
+        target_str, args_str
+    ))
 }
 
 /// Extract the target path referenced by a shim file, if any.
@@ -264,6 +302,74 @@ pub fn target_of(shim_file: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Repair executable shims for all installed apps.
+///
+/// Rewrites missing or outdated `{name}.cmd` wrappers for `Exe` bins and
+/// removes poisoned (batch-content) `{name}.exe` files left by older bagger
+/// versions. Native binaries are never touched. Returns the names of
+/// packages that were repaired.
+pub fn refresh(session: &Session) -> Fallible<Vec<String>> {
+    let installed = crate::package::query::query_installed(session, &["*"], &[])?;
+    let shims_dir = session.config().root_path().join("shims");
+
+    let mut repaired = vec![];
+    for pkg in installed.iter() {
+        let mut needs_repair = false;
+        if let Some(bins) = pkg.manifest().bin() {
+            for shim_def in bins {
+                let shim = Shim::new(shim_def);
+                if shim.ty != ShimType::Exe {
+                    continue;
+                }
+                let cmd = shims_dir.join(format!("{}.cmd", shim.name));
+                let exe = shims_dir.join(format!("{}.exe", shim.name));
+                // Outdated content counts as broken: regenerate the expected
+                // wrapper in-memory and compare with what is on disk.
+                let target = shim_target_path(session, pkg.name(), shim.real_name);
+                let expected = create_shim_content(&target, &shim, ShimContent::Batch).ok();
+                let actual = std::fs::read_to_string(&cmd).ok();
+                if actual != expected || is_poisoned_exe(&exe) {
+                    needs_repair = true;
+                    break;
+                }
+            }
+        }
+        if needs_repair {
+            add(session, pkg)?;
+            repaired.push(pkg.name().to_owned());
+        }
+    }
+    Ok(repaired)
+}
+
+/// Resolve the app-relative target of a shim entry to an absolute path.
+///
+/// Uses the same version/current layout as [`add`].
+fn shim_target_path(session: &Session, pkg_name: &str, real_name: &str) -> PathBuf {
+    let config = session.config();
+    let apps_dir = config.root_path().join("apps");
+    let version = if config.no_junction() {
+        // `installed_version` is unavailable here; fall back to the newest
+        // version directory, mirroring link resolution.
+        apps_dir
+            .join(pkg_name)
+            .read_dir()
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                    .filter(|e| e.file_name() != "current")
+                    .max_by(|a, b| a.file_name().cmp(&b.file_name()))
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "current".to_string())
+    } else {
+        "current".to_string()
+    };
+    apps_dir.join(pkg_name).join(version).join(real_name)
+}
+
 /// Remove shims for a package.
 pub fn remove(session: &Session, package: &Package) -> Fallible<()> {
     assert!(package.is_installed());
@@ -285,7 +391,7 @@ pub fn remove(session: &Session, package: &Package) -> Fallible<()> {
         for shim in bins.into_iter().map(Shim::new) {
             let mut shim_path = shims_dir.join(shim.name);
             let exts = match shim.ty {
-                ShimType::Exe => vec!["exe", "shim"],
+                ShimType::Exe => vec!["cmd", "exe", "shim"],
                 ShimType::PowerShell => vec!["cmd", "ps1", ""],
                 _ => vec!["cmd", ""],
             };
@@ -376,8 +482,11 @@ mod tests {
     fn created_files_stay_in_removable_universe() {
         // Every file add() creates must be discoverable by which/shim ls
         // and removable by remove(): bare name or standard exe extensions.
+        // NOTE: `{name}.exe` is never written — a script wearing an `.exe`
+        // extension cannot execute (os error 216) and shadows the working
+        // `.cmd`; console launches resolve the `.cmd` fine.
         let cases = [
-            (vec!["app.exe"], vec!["app.exe"]),
+            (vec!["app.exe"], vec!["app.cmd"]),
             (vec!["tool.ps1"], vec!["tool.cmd", "tool.ps1"]),
             (vec!["run"], vec!["run"]),
             (vec!["prog.jar"], vec!["prog.cmd"]),
@@ -391,6 +500,99 @@ mod tests {
                 .collect();
             assert_eq!(files, expected, "shim files for {def:?}");
         }
+    }
+
+    #[test]
+    fn shim_content_forwards_caller_arguments() {
+        // Every shim flavor must pass caller arguments through to the
+        // target (upstream `%*` / `"$@"` / `@args`); without this, e.g.
+        // `7z x archive.7z` runs bare `7z`.
+        let exe = shim_of(&["app.exe"]);
+        let batch = create_shim_content(
+            std::path::Path::new("C:\\x\\app.exe"),
+            &exe,
+            ShimContent::Batch,
+        )
+        .unwrap();
+        assert!(batch.trim_end().ends_with("%*"), "exe batch: {batch:?}");
+
+        let ps = shim_of(&["tool.ps1", "tool"]);
+        let invoke = create_shim_content(
+            std::path::Path::new("C:\\x\\tool.ps1"),
+            &ps,
+            ShimContent::PowerShellInvoke,
+        )
+        .unwrap();
+        assert!(invoke.trim_end().ends_with("%*"), "ps1 invoke: {invoke:?}");
+        let script = create_shim_content(
+            std::path::Path::new("C:\\x\\tool.ps1"),
+            &ps,
+            ShimContent::PowerShell,
+        )
+        .unwrap();
+        assert!(
+            script.trim_end().ends_with("@args"),
+            "ps1 script: {script:?}"
+        );
+    }
+
+    #[test]
+    fn poison_detection_keeps_native_binaries() {
+        let dir = std::env::temp_dir().join("bagger-test-shim-poison");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Batch content with an .exe extension: poison.
+        let poisoned = dir.join("tool.exe");
+        std::fs::write(&poisoned, "@echo off\n\"C:\\apps\\x\\tool.exe\"\n").unwrap();
+        assert!(is_poisoned_exe(&poisoned));
+
+        // Native binary: never poison, even with an .exe extension.
+        let native = dir.join("real.exe");
+        std::fs::write(&native, b"MZ-binary-junk").unwrap();
+        assert!(!is_poisoned_exe(&native));
+
+        // Missing file: not poison.
+        assert!(!is_poisoned_exe(&dir.join("ghost.exe")));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn add_writes_cmd_and_heals_poison() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-shim-add");
+        let _ = std::fs::remove_dir_all(&base);
+        std::env::set_var("SCOOP", base.join("root"));
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+
+        let manifest = crate::package::manifest::Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT", "bin": ["tool.exe"]}"#,
+            std::path::Path::new("shim.json"),
+        )
+        .unwrap();
+        let pkg = crate::package::Package::from("shimapp", "main", manifest);
+        let session = Session::new();
+        let shims = base.join("root/shims");
+
+        // Poisoned .exe gets removed, working .cmd gets written.
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::write(shims.join("tool.exe"), "@echo off\n\"C:\\x\\tool.exe\"\n").unwrap();
+        add(&session, &pkg).unwrap();
+        assert!(!shims.join("tool.exe").exists());
+        let cmd = std::fs::read_to_string(shims.join("tool.cmd")).unwrap();
+        assert!(cmd.contains("tool.exe"));
+
+        // Native .exe is preserved, .cmd still written alongside.
+        std::fs::write(shims.join("tool.exe"), b"MZ-native").unwrap();
+        add(&session, &pkg).unwrap();
+        assert_eq!(&std::fs::read(shims.join("tool.exe")).unwrap()[..2], b"MZ");
+        assert!(shims.join("tool.cmd").is_file());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

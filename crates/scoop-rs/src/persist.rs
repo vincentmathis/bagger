@@ -53,29 +53,157 @@ pub fn link(session: &Session, package: &Package) -> Fallible<()> {
             let app_path_item = app_version_path.join(rel_path);
             let persist_path_item = persist_root.join(rel_path);
 
-            if app_path_item.is_dir() {
-                // Move the directory to persist and create a symlink
+            // Mirror upstream `persist_data`: existing store data always
+            // wins (e.g. upgrading over a previous install); fresh app
+            // content is moved into the store; otherwise an empty store
+            // directory is created. Never rename over existing data.
+            if persist_path_item.exists() {
+                // Stash conflicting fresh content as `<name>.original`
+                // (upstream parity), then link the store over it.
+                if app_path_item.exists() && !is_link(&app_path_item) {
+                    let original = app_path_item.with_file_name(format!(
+                        "{}.original",
+                        app_path_item
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ));
+                    let _ = std::fs::remove_file(&original);
+                    let _ = std::fs::remove_dir_all(&original);
+                    std::fs::rename(&app_path_item, &original)?;
+                }
+                link_item(&persist_path_item, &app_path_item)?;
+            } else if app_path_item.exists() && !is_link(&app_path_item) {
                 internal::fs::ensure_dir(persist_path_item.parent().unwrap())?;
                 std::fs::rename(&app_path_item, &persist_path_item)?;
-                internal::fs::symlink_dir(&persist_path_item, &app_path_item)?;
-            } else if app_path_item.is_file() {
-                // Move the file to persist and create a symlink
-                internal::fs::ensure_dir(persist_path_item.parent().unwrap())?;
-                std::fs::rename(&app_path_item, &persist_path_item)?;
-                internal::fs::symlink_file(&persist_path_item, &app_path_item)?;
+                link_item(&persist_path_item, &app_path_item)?;
             } else {
-                // The file/directory doesn't exist yet, create parents
-                internal::fs::ensure_dir(persist_path_item.parent().unwrap())?;
-                // Create a symlink from app dir to persist dir (may be created later)
-                if persist_path_item.is_dir() {
-                    internal::fs::remove_symlink(&app_path_item)?;
-                    internal::fs::symlink_dir(&persist_path_item, &app_path_item)?;
-                } else if persist_path_item.is_file() {
-                    internal::fs::remove_symlink(&app_path_item)?;
-                    internal::fs::symlink_file(&persist_path_item, &app_path_item)?;
+                // Neither side exists yet. Upstream creates a directory by
+                // default (a file entry misdetected as a directory is the
+                // documented tradeoff); link it so later content persists.
+                if !is_link(&app_path_item) {
+                    internal::fs::ensure_dir(&persist_path_item)?;
+                    link_item(&persist_path_item, &app_path_item)?;
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Whether `path` is itself a symlink/junction (not just pointing at one).
+fn is_link(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Link `app_path` at the persist store entry, removing a stale link first.
+fn link_item(persist_path_item: &std::path::Path, app_path_item: &std::path::Path) -> Fallible<()> {
+    internal::fs::remove_symlink(app_path_item)?;
+    if persist_path_item.is_dir() {
+        internal::fs::symlink_dir(persist_path_item, app_path_item)?;
+    } else {
+        internal::fs::symlink_file(persist_path_item, app_path_item)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::manifest::Manifest;
+    use crate::package::Package;
+
+    fn persist_package() -> Package {
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "2.0", "homepage": "https://example.com", "license": "MIT", "persist": ["Configurations"]}"#,
+            std::path::Path::new("persist.json"),
+        )
+        .expect("fixture manifest should parse");
+        Package::from("persistapp", "main", manifest)
+    }
+
+    fn test_session(base: &std::path::Path) -> Session {
+        std::env::set_var("SCOOP", base.join("root"));
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        Session::new()
+    }
+
+    /// Upgrading over an existing store keeps user data (the old code
+    /// renamed the fresh dir over the store and died with os error 5).
+    #[test]
+    fn link_keeps_existing_store_on_upgrade() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-persist-upgrade");
+        let _ = std::fs::remove_dir_all(&base);
+        let session = test_session(&base);
+        let pkg = persist_package();
+
+        // Previous install's user data already in the store.
+        let store = base.join("root/persist/persistapp/Configurations");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("user.txt"), "user-data").unwrap();
+
+        // Fresh version dir ships defaults.
+        let app_item = base.join("root/apps/persistapp/current/Configurations");
+        std::fs::create_dir_all(&app_item).unwrap();
+        std::fs::write(app_item.join("defaults.txt"), "defaults").unwrap();
+
+        link(&session, &pkg).expect("link should succeed");
+
+        // Store wins; defaults stashed as `.original`; app path links store.
+        assert_eq!(
+            std::fs::read_to_string(store.join("user.txt")).unwrap(),
+            "user-data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app_item.join("user.txt")).unwrap(),
+            "user-data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                base.join("root/apps/persistapp/current/Configurations.original/defaults.txt")
+            )
+            .unwrap(),
+            "defaults"
+        );
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Fresh installs still move app content into the store and link back.
+    #[test]
+    fn link_moves_fresh_content_into_store() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-persist-fresh");
+        let _ = std::fs::remove_dir_all(&base);
+        let session = test_session(&base);
+        let pkg = persist_package();
+
+        let app_item = base.join("root/apps/persistapp/current/Configurations");
+        std::fs::create_dir_all(&app_item).unwrap();
+        std::fs::write(app_item.join("fresh.txt"), "fresh").unwrap();
+
+        link(&session, &pkg).expect("link should succeed");
+
+        let store = base.join("root/persist/persistapp/Configurations");
+        assert_eq!(
+            std::fs::read_to_string(store.join("fresh.txt")).unwrap(),
+            "fresh"
+        );
+        assert_eq!(
+            std::fs::read_to_string(app_item.join("fresh.txt")).unwrap(),
+            "fresh"
+        );
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
 }

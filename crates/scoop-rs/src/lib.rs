@@ -57,4 +57,5 @@ pub use error::Error;
 pub use event::Event;
 pub use package::{Package, QueryOption, SyncOption, Transaction};
 pub use session::Session;
+pub use shim::refresh as shim_refresh;
 pub use shim::target_of as shim_target_of;

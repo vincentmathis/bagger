@@ -82,6 +82,9 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         while let Ok(event) = rx.recv() {
             match event {
                 Event::PackageResolveStart => println!("{}", flavor::progress("resolve")),
+                Event::PackageRunningSkipped { name, processes } => {
+                    println!("Skipping '{name}' (running: {processes}). Quit it and retry to include it.");
+                }
                 Event::PackageDownloadSizingStart => println!("{}", flavor::progress("sizing")),
                 Event::PackageDownloadStart => println!("{}", flavor::progress("download")),
                 Event::PackageDownloadProgress(ctx) => {

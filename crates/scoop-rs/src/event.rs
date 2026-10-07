@@ -142,6 +142,18 @@ pub enum Event {
     /// Package resolving has finished.
     PackageResolveDone,
 
+    /// A package was skipped because it has running processes.
+    ///
+    /// Emitted for bulk operations (e.g. `upgrade` with no arguments) so the
+    /// rest of the transaction can proceed; explicitly requested packages
+    /// still fail with an error instead.
+    PackageRunningSkipped {
+        /// Package name.
+        name: String,
+        /// Comma-separated running process names.
+        processes: String,
+    },
+
     /// Package shim removal has started.
     PackageShimRemoveStart,
 

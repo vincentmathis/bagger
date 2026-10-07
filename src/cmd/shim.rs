@@ -37,6 +37,8 @@ enum Command {
         /// The shim name (without extension)
         shim: String,
     },
+    /// Repair executable shims for all installed apps
+    Refresh,
 }
 
 pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
@@ -52,6 +54,17 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
         }
         Command::Remove { shim } => {
             remove_shim(&shims_dir, &shim)?;
+        }
+        Command::Refresh => {
+            let repaired = scoop_rs::shim_refresh(session)?;
+            if repaired.is_empty() {
+                println!("All executable shims are clean.");
+            } else {
+                for name in &repaired {
+                    println!("Repaired shims for '{}'.", name.clone().green());
+                }
+                println!("Repaired {} app(s).", repaired.len());
+            }
         }
     }
 
@@ -166,15 +179,15 @@ fn add_shim(shims_dir: &std::path::Path, shim: &str, target: &str) -> Result<()>
 
     #[cfg(windows)]
     {
-        // On Windows, create a batch file shim
-        let content = format!("@echo off\n\"{}\"\n", target);
+        // On Windows, create a batch file shim (forwarding caller arguments)
+        let content = format!("@echo off\n\"{}\" %*\n", target);
         std::fs::write(&shim_path, content)?;
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let content = format!("#!/bin/sh\n\"{}\"\n", target);
+        let content = format!("#!/bin/sh\n\"{}\" \"$@\"\n", target);
         std::fs::write(&shim_path, content)?;
         let mut perms = std::fs::metadata(&shim_path)?.permissions();
         perms.set_mode(0o755);

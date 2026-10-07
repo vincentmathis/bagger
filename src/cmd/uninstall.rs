@@ -64,6 +64,9 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         while let Ok(event) = rx.recv() {
             match event {
                 Event::PackageResolveStart => println!("{}", flavor::progress("resolve")),
+                Event::PackageRunningSkipped { name, processes } => {
+                    println!("Skipping '{name}' (running: {processes}). Quit it and retry to include it.");
+                }
                 Event::PromptTransactionNeedConfirm(transaction) => {
                     if let Some(remove) = transaction.remove_view() {
                         println!("The following packages will be REMOVED:");

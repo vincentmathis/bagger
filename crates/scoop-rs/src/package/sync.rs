@@ -316,30 +316,73 @@ impl Default for Transaction {
     }
 }
 
-/// Abort the transaction if any package has running processes, unless the
-/// `ignore_running_processes` config is enabled.
-fn ensure_no_running_processes(session: &Session, packages: &[&Package]) -> Fallible<()> {
+/// Split packages into committable ones and ones blocked by running
+/// processes.
+///
+/// With `ignore_running_processes` set, nothing is blocked and the input is
+/// returned unchanged.
+fn partition_runnable(
+    session: &Session,
+    packages: Vec<Package>,
+) -> (Vec<Package>, Vec<(String, String)>) {
     if session.config().ignore_running_processes() {
-        return Ok(());
+        return (packages, vec![]);
     }
 
-    let config = session.config();
-    let apps_dir = config.root_path().join("apps");
-
+    let apps_dir = session.config().root_path().join("apps");
+    let mut runnable = Vec::with_capacity(packages.len());
+    let mut blocked = vec![];
     for pkg in packages {
-        let app_path = apps_dir.join(pkg.name());
-        match internal::os::running_apps(&app_path) {
+        match internal::os::running_apps(&apps_dir.join(pkg.name())) {
             Ok(procs) if !procs.is_empty() => {
-                return Err(Error::PackageRunningProcesses(
-                    pkg.name().to_owned(),
-                    procs.join(", "),
-                ));
+                blocked.push((pkg.name().to_owned(), procs.join(", ")))
             }
-            _ => {}
+            _ => runnable.push(pkg),
         }
     }
+    (runnable, blocked)
+}
 
-    Ok(())
+/// Drop blocked packages from the transaction, notifying the frontend.
+///
+/// A transaction left with nothing runnable fails with the running-process
+/// error (this is also what an explicitly requested single package gets);
+/// otherwise the blocked entries are skipped so the rest can proceed.
+fn filter_running(session: &Session, packages: Vec<Package>) -> Fallible<Vec<Package>> {
+    let (runnable, blocked) = partition_runnable(session, packages);
+    for (name, processes) in &blocked {
+        if let Some(tx) = session.emitter() {
+            let _ = tx.send(Event::PackageRunningSkipped {
+                name: name.clone(),
+                processes: processes.clone(),
+            });
+        }
+    }
+    if runnable.is_empty() {
+        if let Some((name, processes)) = blocked.into_iter().next() {
+            return Err(Error::PackageRunningProcesses(name, processes));
+        }
+    }
+    Ok(runnable)
+}
+
+/// Whether a single package is currently blocked by running processes.
+///
+/// Re-checked at commit time to close the gap between resolving and
+/// committing (a process may have started while downloading).
+fn running_blocked(session: &Session, package: &Package) -> Option<String> {
+    if session.config().ignore_running_processes() {
+        return None;
+    }
+    let app_path = session
+        .config()
+        .root_path()
+        .join("apps")
+        .join(package.name());
+    match internal::os::running_apps(&app_path) {
+        Ok(procs) if !procs.is_empty() => Some(procs.join(", ")),
+        _ => None,
+    }
 }
 
 /// Sync operation: install and/or upgrade packages.
@@ -428,6 +471,11 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         let assume_yes = options.contains(&SyncOption::AssumeYes);
         resolve::resolve_dependencies(session, &mut packages, assume_yes)?;
     }
+
+    // Drop packages blocked by running processes before building the
+    // transaction, so the confirmation prompt and downloads only cover
+    // what will actually be committed.
+    let packages = filter_running(session, packages)?;
 
     let (installed, installable): (Vec<_>, Vec<_>) =
         packages.into_iter().partition(|p| p.is_installed());
@@ -586,8 +634,6 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 
     let download_only = options.contains(&SyncOption::DownloadOnly);
     if !download_only {
-        ensure_no_running_processes(session, &packages)?;
-
         let config = session.config();
         let apps_dir = config.root_path().join("apps");
 
@@ -605,6 +651,18 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         }
 
         for pkg in packages.iter() {
+            // Re-check at commit time: a process may have started while
+            // downloading. Skip it rather than failing the transaction.
+            if let Some(processes) = running_blocked(session, pkg) {
+                if let Some(tx) = session.emitter() {
+                    let _ = tx.send(Event::PackageRunningSkipped {
+                        name: pkg.name().to_owned(),
+                        processes,
+                    });
+                }
+                continue;
+            }
+
             if let Some(tx) = session.emitter() {
                 let _ = tx.send(Event::PackageCommitStart(pkg.name().to_owned()));
             }
@@ -937,11 +995,19 @@ fn extract_package(
 
             if is_tar || is_compressed_tar {
                 // 7z handles .tar files natively, and .tar.gz etc. automatically
-                internal::archive::extract(&archive_path, working_dir)?;
+                internal::archive::extract_with_root(
+                    &archive_path,
+                    working_dir,
+                    Some(config.root_path()),
+                )?;
             } else {
                 // Extract to a temporary subdirectory first
                 let extract_dir = working_dir.join(format!("__extract_{}", filename));
-                internal::archive::extract(&archive_path, &extract_dir)?;
+                internal::archive::extract_with_root(
+                    &archive_path,
+                    &extract_dir,
+                    Some(config.root_path()),
+                )?;
 
                 // Move contents from extract_dir to working_dir
                 let entries = std::fs::read_dir(&extract_dir)?;
@@ -1122,6 +1188,10 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
         resolve::resolve_cascade(session, &mut packages, escape_hold)?;
     }
 
+    // Drop packages blocked by running processes before confirming, so the
+    // prompt only covers what will actually be removed.
+    let packages = filter_running(session, packages)?;
+
     if let Some(tx) = session.emitter() {
         let _ = tx.send(Event::PackageResolveDone);
     }
@@ -1155,14 +1225,23 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
     }
 
     if let Some(packages) = transaction.remove_view() {
-        let refs = packages.iter().collect::<Vec<_>>();
-        ensure_no_running_processes(session, &refs)?;
-
         let purge = options.contains(&SyncOption::Purge);
         let config = session.config();
         let root_dir = config.root_path();
 
         for package in packages.iter() {
+            // Re-check at commit time: a process may have started while
+            // confirming. Skip it rather than failing the transaction.
+            if let Some(processes) = running_blocked(session, package) {
+                if let Some(tx) = session.emitter() {
+                    let _ = tx.send(Event::PackageRunningSkipped {
+                        name: package.name().to_owned(),
+                        processes,
+                    });
+                }
+                continue;
+            }
+
             if let Some(tx) = session.emitter() {
                 let _ = tx.send(Event::PackageCommitStart(package.name().to_owned()));
             }
@@ -1251,4 +1330,116 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::manifest::Manifest;
+
+    /// Build an installed-looking package with the given name/version.
+    fn test_package(name: &str) -> Package {
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+            std::path::Path::new("running.json"),
+        )
+        .expect("fixture manifest should parse");
+        Package::from(name, "main", manifest)
+    }
+
+    /// A busy app blocks the transaction while an idle app stays runnable.
+    ///
+    /// Spawns a real process from a copy of powershell.exe placed inside the
+    /// fake app directory, mirroring e.g. FanControl running from its
+    /// version dir during `bagger upgrade`.
+    #[test]
+    #[cfg(windows)]
+    fn filter_running_skips_busy_apps() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-running-skip");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let busy_dir = root.join("apps").join("busyapp").join("1.0");
+        std::fs::create_dir_all(&busy_dir).unwrap();
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+
+        // A sleeper exe living inside the app dir, like FanControl.exe.
+        let system_ps = std::path::PathBuf::from(
+            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string()),
+        )
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let sleeper = busy_dir.join("sleeper.exe");
+        std::fs::copy(&system_ps, &sleeper).expect("powershell.exe should be copyable");
+
+        let session = Session::new();
+        let mut child = std::process::Command::new(&sleeper)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep 30",
+            ])
+            .spawn()
+            .expect("sleeper should spawn");
+
+        // The process needs a moment to appear in the sysinfo snapshot.
+        let mut seen = false;
+        for _ in 0..20 {
+            let (_, blocked) = partition_runnable(
+                &session,
+                vec![test_package("busyapp"), test_package("idleapp")],
+            );
+            if blocked.iter().any(|(n, _)| n == "busyapp") {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        assert!(seen, "busyapp should be detected as running");
+
+        let (runnable, blocked) = partition_runnable(
+            &session,
+            vec![test_package("busyapp"), test_package("idleapp")],
+        );
+        assert_eq!(runnable.len(), 1);
+        assert_eq!(runnable[0].name(), "idleapp");
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].0, "busyapp");
+        assert!(!blocked[0].1.is_empty());
+
+        // An explicitly requested single package still fails loudly.
+        let err = filter_running(&session, vec![test_package("busyapp")]).unwrap_err();
+        assert!(err.to_string().contains("busyapp"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn filter_running_passes_everything_when_ignored() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-running-ignore");
+        let _ = std::fs::remove_dir_all(&base);
+        std::env::set_var("SCOOP", base.join("root"));
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+
+        let session = Session::new();
+        // `ignore_running_processes` cannot be set without a config file;
+        // without it, idle apps (no processes) always pass through.
+        let runnable = filter_running(&session, vec![test_package("idleapp")]).unwrap();
+        assert_eq!(runnable.len(), 1);
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
 }
