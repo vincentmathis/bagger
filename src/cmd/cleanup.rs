@@ -228,9 +228,13 @@ fn cleanup(
     if cache {
         let files = operation::cache_list(session, "*")?;
         for file in files {
-            if file.package_name().eq_ignore_ascii_case(app)
-                && file.version() != active_version.manifest_version
-            {
+            // Without a known active manifest version (dangling `current`),
+            // keep every cache file rather than risk pruning the live one.
+            let stale = match &active_version.manifest_version {
+                Some(active) => file.version() != *active,
+                None => false,
+            };
+            if file.package_name().eq_ignore_ascii_case(app) && stale {
                 fs::remove_file(file.path())?;
             }
         }
@@ -241,11 +245,29 @@ fn cleanup(
 
 struct ActiveVersion {
     directory_name: String,
-    manifest_version: String,
+    manifest_version: Option<String>,
 }
 
 fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
     let current_path = app_path.join("current");
+
+    // The `current` link target is sacred: whatever it points at is the
+    // live version and must never be treated as an old version — even when
+    // its directory lacks install metadata (e.g. a failed upgrade left a
+    // manifest-less dir behind and repointed the link). Only fall back to
+    // manifest scanning when there is no `current` link at all.
+    if let Ok(target) = fs::read_link(&current_path) {
+        let directory_name = target.file_name().map(|n| n.to_string_lossy().into_owned());
+        if let Some(directory_name) = directory_name {
+            let current_manifest = current_path.join("manifest.json");
+            let manifest_version = read_manifest_version(&current_manifest).ok();
+            return Ok(Some(ActiveVersion {
+                directory_name,
+                manifest_version,
+            }));
+        }
+    }
+
     let current_manifest = current_path.join("manifest.json");
     if current_manifest.is_file() {
         let active_path = fs::canonicalize(&current_path)?;
@@ -258,7 +280,7 @@ fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
             if fs::canonicalize(entry.path())? == active_path {
                 return Ok(Some(ActiveVersion {
                     directory_name: entry.file_name().to_string_lossy().into_owned(),
-                    manifest_version: read_manifest_version(&current_manifest)?,
+                    manifest_version: Some(read_manifest_version(&current_manifest)?),
                 }));
             }
         }
@@ -283,7 +305,7 @@ fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
         if manifest.is_file() && install_info.is_file() {
             candidates.push(ActiveVersion {
                 directory_name: entry.file_name().to_string_lossy().into_owned(),
-                manifest_version: read_manifest_version(&manifest)?,
+                manifest_version: Some(read_manifest_version(&manifest)?),
             });
         }
     }
@@ -384,4 +406,64 @@ fn is_safe_app_name(name: &str) -> bool {
         && !name.contains('/')
         && !name.contains(':')
         && !name.contains("..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_manifest(dir: &std::path::Path, version: &str) {
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!(r#"{{"version": "{version}"}}"#),
+        )
+        .unwrap();
+        std::fs::write(dir.join("install.json"), "{}").unwrap();
+    }
+
+    /// The `current` target is sacred: even when it lacks install metadata
+    /// (failed upgrade), it must be reported as active — never deleted as
+    /// old. This is the regression test for cleanup eating pending upgrades.
+    #[test]
+    #[cfg(windows)]
+    fn active_version_prefers_current_target() {
+        let base = std::env::temp_dir().join("bagger-test-cleanup-active");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let old = app.join("1.0");
+        let pending = app.join("2.0");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&pending).unwrap();
+        write_manifest(&old, "1.0");
+        // 2.0 has no manifests (failed upgrade), yet `current` points at it.
+        junction::create(&pending, app.join("current")).unwrap();
+
+        let active = active_version(&app).unwrap().expect("active expected");
+        assert_eq!(active.directory_name, "2.0");
+        assert_eq!(active.manifest_version, None);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A healthy layout still resolves through manifests.
+    #[test]
+    #[cfg(windows)]
+    fn active_version_resolves_healthy_layout() {
+        let base = std::env::temp_dir().join("bagger-test-cleanup-healthy");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let old = app.join("1.0");
+        let new = app.join("2.0");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        write_manifest(&old, "1.0");
+        write_manifest(&new, "2.0");
+        junction::create(&new, app.join("current")).unwrap();
+
+        let active = active_version(&app).unwrap().expect("active expected");
+        assert_eq!(active.directory_name, "2.0");
+        assert_eq!(active.manifest_version.as_deref(), Some("2.0"));
+
+        std::fs::remove_dir_all(&base).ok();
+    }
 }

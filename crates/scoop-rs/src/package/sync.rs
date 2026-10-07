@@ -981,6 +981,48 @@ fn extract_package(
             continue;
         }
 
+        // Inno Setup executables go through innounp natively (mirroring
+        // upstream `Expand-InnoArchive`, which `Invoke-Extraction` selects
+        // for `.exe` files with `innosetup` set).
+        let is_inno = archive_path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false)
+            && pkg.manifest().innosetup();
+        if is_inno {
+            if let Some(tx) = session.emitter() {
+                let _ = tx.send(Event::PackageCommitStart(format!(
+                    "extracting archive for {}",
+                    pkg.name()
+                )));
+            }
+            let innounp =
+                crate::internal::ps::helper_exe(session, "innounp-unicode", "innounp.exe")
+                    .or_else(|| crate::internal::ps::helper_exe(session, "innounp", "innounp.exe"))
+                    .ok_or_else(|| {
+                        crate::Error::Custom(format!(
+                            "cannot extract Inno Setup file '{}': innounp app is not installed",
+                            archive_path.display()
+                        ))
+                    })?;
+            let status = std::process::Command::new(&innounp)
+                .arg("-x")
+                .arg(format!("-d{}", working_dir.to_string_lossy()))
+                .arg(&archive_path)
+                .arg("-y")
+                .arg("-c{app}")
+                .status()?;
+            if !status.success() {
+                return Err(crate::Error::Custom(format!(
+                    "innounp failed to extract '{}' ({})",
+                    archive_path.display(),
+                    status
+                )));
+            }
+            let _ = std::fs::remove_file(&archive_path);
+            continue;
+        }
+
         if let Some(format) = internal::archive::Format::detect(&archive_path) {
             if let Some(tx) = session.emitter() {
                 let _ = tx.send(Event::PackageCommitStart(format!(

@@ -304,23 +304,61 @@ fn create_shim_content(target: &Path, shim: &Shim, content: ShimContent) -> Fall
 
 /// Extract the target path referenced by a shim file, if any.
 ///
-/// Shim files quote their target (`"C:\…\app.exe"`, `& "…"`, …); the first
-/// quoted string on the first non-directive line wins. Returns `None` for
-/// binary or otherwise unparseable shims.
+/// Handles the upstream shim flavors:
+/// - quoted targets (`"C:\…\app.exe"`, `& "…"`, `path = "…"`);
+/// - unquoted sh-style comments (`# <path>` in bare files,
+///   `@rem <path>` in `.cmd` files), preferred over quoted strings
+///   further down such as `"$(wslpath …)"` wrappers;
+/// - relative targets (`..\apps\…`), resolved against the shim directory.
+///
+/// Returns `None` for binary or otherwise unparseable shims.
 pub fn target_of(shim_file: &Path) -> Option<PathBuf> {
     let content = std::fs::read_to_string(shim_file).ok()?;
+    let parent = shim_file.parent();
+    let mut fallback: Option<PathBuf> = None;
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with("@echo off") || line.starts_with("#!") {
             continue;
         }
-        if let Some(start) = line.find('"') {
-            if let Some(end) = line[start + 1..].find('"') {
-                return Some(PathBuf::from(&line[start + 1..start + 1 + end]));
+        for marker in ["@rem ", "# "] {
+            if let Some(rest) = line.strip_prefix(marker) {
+                let rest = rest.trim().trim_matches('"');
+                if looks_like_path(rest) {
+                    return Some(resolve_target(parent, rest));
+                }
+            }
+        }
+        if fallback.is_none() {
+            if let Some(start) = line.find('"') {
+                if let Some(end) = line[start + 1..].find('"') {
+                    fallback = Some(resolve_target(parent, &line[start + 1..start + 1 + end]));
+                }
             }
         }
     }
-    None
+    fallback
+}
+
+/// Heuristic: does this comment remainder look like a file path?
+fn looks_like_path(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    s.contains(['\\', '/']) || (bytes.len() >= 2 && bytes[1] == b':')
+}
+
+/// Join a possibly-relative shim target onto the shim directory.
+fn resolve_target(parent: Option<&Path>, target: &str) -> PathBuf {
+    let path = PathBuf::from(target);
+    if path.is_absolute() {
+        path
+    } else if let Some(dir) = parent {
+        dir.join(path)
+    } else {
+        path
+    }
 }
 
 /// Repair executable shims for all installed apps.
@@ -649,6 +687,71 @@ mod tests {
         let binary = dir.join("d.exe");
         std::fs::write(&binary, b"\x7fELF-binary-junk").unwrap();
         assert_eq!(target_of(&binary), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn target_of_prefers_sh_style_comments() {
+        // Upstream sh-style shims record the target as an unquoted comment;
+        // quoted `"$(wslpath …)"` wrappers further down must not win.
+        let dir = std::env::temp_dir().join("bagger-test-shim-comments");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let bare = dir.join("tool");
+        std::fs::write(
+            &bare,
+            "#!/bin/sh\n# C:\\apps\\tool\\current\\tool\nif [ $WSL_INTEROP ]\nthen\n  \"$(wslpath -u 'C:\\apps\\tool\\current\\tool')\"  \"$@\"\nfi\n",
+        )
+        .unwrap();
+        assert_eq!(
+            target_of(&bare).as_deref(),
+            Some(std::path::Path::new("C:\\apps\\tool\\current\\tool"))
+        );
+
+        let cmd = dir.join("tool.cmd");
+        std::fs::write(
+            &cmd,
+            "@rem C:\\apps\\tool\\current\\tool\n@echo off\nbash \"$(wslpath -u 'C:\\apps\\tool\\current\\tool')\"  %*\n",
+        )
+        .unwrap();
+        assert_eq!(
+            target_of(&cmd).as_deref(),
+            Some(std::path::Path::new("C:\\apps\\tool\\current\\tool"))
+        );
+
+        // A comment without a path falls back to quoted strings.
+        let odd = dir.join("odd.cmd");
+        std::fs::write(
+            &odd,
+            "@rem just a note\n@echo off\n\"C:\\apps\\x\\t.exe\" %*\n",
+        )
+        .unwrap();
+        assert_eq!(
+            target_of(&odd).as_deref(),
+            Some(std::path::Path::new("C:\\apps\\x\\t.exe"))
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn target_of_resolves_relative_targets() {
+        // Upstream alias shims (scoop.ps1, sudo.ps1) use relative targets.
+        let dir = std::env::temp_dir().join("bagger-test-shim-relative");
+        let sub = dir.join("shims");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let alias = sub.join("scoop.ps1");
+        std::fs::write(
+            &alias,
+            "# alias\n& \"..\\apps\\scoop\\current\\bin\\scoop.ps1\" @args\n",
+        )
+        .unwrap();
+        assert_eq!(
+            target_of(&alias),
+            Some(sub.join("..\\apps\\scoop\\current\\bin\\scoop.ps1"))
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

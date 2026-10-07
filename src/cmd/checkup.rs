@@ -92,6 +92,20 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
                 if name.starts_with('.') {
                     continue;
                 }
+                // Only assess recognized shim files: bare shims have no
+                // extension; anything else must be a shim flavor. Stray
+                // files (e.g. a `.txt` dropped in the directory) are not
+                // shims and would only produce nonsense targets.
+                let is_shim = match path.extension().and_then(|e| e.to_str()) {
+                    None => !name.contains('.'),
+                    Some(ext) => matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "exe" | "cmd" | "ps1" | "bat" | "sh"
+                    ),
+                };
+                if !is_shim {
+                    continue;
+                }
                 match scoop_rs::shim_target_of(&path) {
                     Some(target) if !target.exists() => {
                         broken_shims.push(format!("{} (missing target {})", name, target.display()))

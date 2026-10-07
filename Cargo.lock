@@ -121,6 +121,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "indicatif",
+ "junction",
  "regex",
  "remove_dir_all",
  "scoop-rs",
