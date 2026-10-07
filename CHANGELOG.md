@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1-beta.10](https://github.com/vincentmathis/bagger/compare/v0.1.0-beta.10...v0.1.1-beta.10) (2026-10-07)
+
+
+### Bug Fixes
+
+* install.ps1 asset resolution, version check, arg forwarding ([27ab12d](https://github.com/vincentmathis/bagger/commit/27ab12da8568ead3f7d5e753615a422edb058dc8))
+
 ## 0.1.0-beta.10 (2026-10-07)
 
 
