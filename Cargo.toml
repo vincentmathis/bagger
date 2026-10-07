@@ -39,7 +39,7 @@ features = ["rustcrypto-hash"]
 path = "./crates/scoop-rs"
 
 [dev-dependencies]
-junction = "1.2.0"
+junction = "2.1.0"
 
 [profile.release]
 debug = false
