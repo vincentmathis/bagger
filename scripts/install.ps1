@@ -3,13 +3,12 @@
 .SYNOPSIS
     One-liner install script for bagger (Scoop in Rust).
 .DESCRIPTION
-    Downloads the latest bagger release binary from GitHub, places it on PATH
-    (per-user or system-wide), and optionally initializes a Scoop-compatible
-    ~/.local/share/bagger root so it can be used as a drop-in Scoop replacement.
+    Downloads a bagger release binary from GitHub and places it on PATH
+    (per-user or system-wide).
 .NOTES
     Windows-only.  Requires PowerShell 5.1+ and an internet connection.
 .EXAMPLE
-    PS> iwr -useb https://bagger.sh/install.ps1 | iex
+    PS> iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/main/scripts/install.ps1 | iex
 #>
 param(
     [switch]$System,          # install to Program Files (machine-wide, requires admin)
@@ -38,28 +37,35 @@ if (-not $Dir) {
 }
 $Dir = [System.IO.Path]::GetFullPath($Dir)
 
-# — fetch latest release asset URL ──────────────────────────────────────
-Write-Step "Resolving latest release ..."
-$base = "https://github.com/vincentmathis/bagger/releases"
-$api  = if ($Tag -eq "latest") { "$base/latest" } else { "$base/tag/$Tag" }
-$r = irm "$api" -Headers @{"Accept"="application/json"} 2>$null
-if (-not $r) { Write-Step "falling back to releases list"; $r = (irm -u "$base.atom" 2>$null) }
-$asset = $r.assets | Where-Object { $_.name -match '^bagger-windows.*\.zip$' } |
-         Sort-Object { [Version]($_.name -replace '.*windows-[^-]+-(?:x64|i686|arm64)-(\d+\.\d+\.\d+).*','$1') } -Desc |
-         Select-Object -First 1
-if (-not $asset) { Die "Could not find a suitable Windows binary in the release. Check $api manually." }
+# — fetch release asset URL ─────────────────────────────────────────
+Write-Step "Resolving release ..."
+$apiBase = "https://api.github.com/repos/vincentmathis/bagger/releases"
+$release = if ($Tag -eq "latest") {
+    irm "$apiBase/latest"
+} else {
+    $t = $Tag.TrimStart('v')
+    try { irm "$apiBase/tags/v$t" } catch { irm "$apiBase/tags/$t" }
+}
+if (-not $release) { Die "Could not find release '$Tag'." }
+try { $remote = [Version]($release.tag_name.TrimStart('v')) } catch { $remote = $null }
+
+# Pick the asset matching this machine's architecture.
+$arch = if ([System.Environment]::Is64BitOperatingSystem) {
+    if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
+} else { 'i686' }
+$want = "bagger-$arch-pc-windows-msvc.zip"
+$asset = @($release.assets | Where-Object { $_.name -eq $want })[0]
+if (-not $asset) { Die "Release $($release.tag_name) has no asset '$want'." }
 
 $zipUrl = $asset.browser_download_url
 $zipTmp = "$env:TEMP\bagger-install.zip"
-$verCmp = { param($a,$b) [Version]$a -ge [Version]$b }
 
 # — check existing ─────────────────────────────────────────────────────
 if (-not $Force -and (Test-Path "$Dir\bagger.exe")) {
     try {
         $local = [Version]((Get-Item "$Dir\bagger.exe").VersionInfo.ProductVersion)
-    } catch { $local = [Version]"0.0.0" }
-    try { $remote = [Version]($asset.name -replace '.*-(\d+\.\d+\.\d+).*','$1') } catch { $remote = $local }
-    if ($local -ge $remote) {
+    } catch { $local = $null }
+    if ($local -and $remote -and ($local -ge $remote)) {
         Write-Step "$Dir\bagger.exe (v$local) is up to date (remote v$remote). Use -Force to reinstall."
         exit 0
     }
@@ -67,7 +73,7 @@ if (-not $Force -and (Test-Path "$Dir\bagger.exe")) {
 
 # — download ───────────────────────────────────────────────────────────
 Write-Step "Downloading $($asset.name) ..."
-irm -u $zipUrl -OutFile $zipTmp
+irm -Uri $zipUrl -OutFile $zipTmp
 
 # — extract ────────────────────────────────────────────────────────────
 Write-Step "Extracting to $Dir ..."
@@ -92,6 +98,7 @@ if (-not $NoEnv) {
 # — smoke test ─────────────────────────────────────────────────────────
 Write-Step "Verifying install ..."
 $env:Path = "$Dir;$env:Path"
-if ((bagger --version 2>$null) -match '(\S+)') { Write-Host "bagger $($Matches[1]) installed to $exe" -ForegroundColor Green }
+$verOut = (bagger --version 2>$null)
+if ($verOut -match 'bagger (\S+)') { Write-Host "bagger $($Matches[1]) installed to $exe" -ForegroundColor Green }
 else { Die "bagger.exe failed to start after install." }
 Write-Host "Run 'bagger help' to get started." -ForegroundColor Green
