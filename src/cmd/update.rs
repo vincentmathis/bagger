@@ -2,7 +2,7 @@ use clap::Parser;
 use crossterm::{cursor, ExecutableCommand};
 use scoop_rs::{operation, Event, Session};
 
-use crate::{cui, Result};
+use crate::{cui, flavor, Result};
 
 /// Fetch and update subscribed buckets
 #[derive(Debug, Parser)]
@@ -37,7 +37,7 @@ pub fn execute(_: Args, session: &Session) -> Result<()> {
         let _ = stdout.execute(cursor::MoveToNextLine(step)).unwrap();
     });
 
-    println!("Updating buckets");
+    println!("{}", flavor::progress("buckets"));
 
     let mut stdout = std::io::stdout();
     let _ = stdout.execute(cursor::Hide);

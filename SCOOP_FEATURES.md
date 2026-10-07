@@ -245,6 +245,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Custom installer/uninstaller | [x] | Supports script or file-based installers |
 | Aria2 warning suppression | [x] | **Implemented** - `aria2_warning_enabled` config getter and setter |
 | Ignore running processes | [x] | **Implemented** - guard in sync install/remove, bypass via config |
+| Heavy-machinery CLI flavor | [x] | **Implemented** - `BAGGER_FLAVOR=heavy` swaps progress lines (`Surveying the pit…`, `Hauling…`, `Assaying the ore…`); default output stays script-compatible |
 
 ---
 

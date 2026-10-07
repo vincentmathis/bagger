@@ -6,6 +6,7 @@ use std::{fmt::Display, io};
 
 mod cmd;
 mod cui;
+mod flavor;
 mod util;
 
 type Result<T> = anyhow::Result<T>;

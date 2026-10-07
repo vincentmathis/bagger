@@ -1,11 +1,103 @@
 # bagger
 
-> Bagger is a CLI implementation of [Scoop](https://scoop.sh/) in Rust
+> Same buckets. Heavy machinery.
+
+```raw
+                          _________
+                         |  CABIN  |
+              ___________|_________|__________________
+             /                                          \
+     .---.  /                                            \     _______
+    / o o \/                                              \___/       \
+   | o   o |====================BOOM========================| COUNTER |
+   | o + o |------------------------------------------------| WEIGHT  |
+    \ o o /\                                                \_______/
+     `---`  \____________________________________________/
+             _/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_/_\_
+            |_|_|_|_|_|_|_|_|_|_|_|_|_|_|_|_|_|_|_|_|_|_|_|
+```
+
+*Bagger 288 (13,500 tonnes). Our binary is 8.5 MB. Same energy.*
+
+Bagger is a Rust rewrite of Scoop for Windows, built like its namesake:
+enormous capacity, relentless throughput, no wasted motion. One native
+binary, no PowerShell startup, working with the Scoop buckets you already use.
+
+Moves mountains. Installs apps.
 
 [![crate](https://img.shields.io/crates/v/bagger)](https://crates.io/crates/bagger)
 [![license][license-badge]](LICENSE)
 
+## Why a 13,500-tonne machine to install `jq`
+
+- **Speed.** Native binary, no shell startup cost, parallel manifest parsing.
+  Numbers below, measured — not projected.
+- **Zero setup.** One 8.5 MB `.exe`. No execution-policy fiddling: the
+  installer runs in-memory (like Scoop's own), and bagger passes
+  `-ExecutionPolicy Bypass` itself whenever a manifest needs PowerShell.
+- **Compatible.** Reads your existing Scoop buckets, `config.json`, cache,
+  and `apps/` layout in place. Set `SCOOP` to your current root and keep
+  digging. See the [compatibility table](#compatibility) for exactly
+  what that promise covers — and what it doesn't.
+
+## Benchmarks
+
+Median of 5 runs, fresh process each time, one warmup discarded.
+Ryzen 7 3700X, Windows, 102 installed apps, 7 buckets.
+`bagger` 0.1.0-beta.9 (release build) vs Scoop at current `master`
+invoked through its `scoop.ps1` shim (which is the point: the ~1 s
+PowerShell startup is included in Scoop's column).
+
+| Operation            | Scoop (PS) | bagger | Speedup |
+| :---                 | ---:       | ---:   | ---:    |
+| `--version`          | 993 ms     | 17 ms  | ~58x    |
+| `list`               | 1405 ms    | 26 ms  | ~54x    |
+| `search python`      | 1515 ms    | 34 ms  | ~45x    |
+| `info 7zip`          | 810 ms     | 30 ms  | ~27x    |
+
+The manifest parser is parallel, so parsing 6,100 manifests takes ~30 ms
+*without* any cache — enabling `use_sqlite_cache` measured 31 ms on the
+same query. The cache exists for constrained disks, not for speed.
+
+## Compatibility
+
+Bagger shares Scoop's on-disk surfaces, so the two tools can work the same
+root. Anything not listed here is not promised.
+
+| Surface | Scoop | bagger | Notes |
+| :--- | :---: | :---: | :--- |
+| Bucket dirs + manifest JSON | ✓ | ✓ | reads your existing buckets in place; all 7 built-in buckets known |
+| `config.json` keys | ✓ | ✓ | same file (`config list` prints its path); unknown keys ignored |
+| `apps/<app>/<version>` + `current` junction | ✓ | ✓ | identical layout; upgrades keep version history |
+| `install.json` (arch/bucket/url) | ✓ | ✓ | written on every install |
+| Cache names `app#version#sha7.ext` | ✓ | ✓ | same naming scheme — caches are interchangeable |
+| `shims/` (`.exe`/`.cmd`/`.ps1`/`.shim`) | ✓ | ✓ | same directory, symmetric add/remove |
+| `persist/`, `modules/`, shortcuts | ✓ | ✓ | same locations |
+| `-g/--global` under `%ProgramData%\scoop` | ✓ (admin) | ✓ (admin-gated) | gate verified; cache stays user-scoped |
+| Hook scripts (`$dir`, `Expand-7zipArchive`, …) | ✓ | ✓ in source (unreleased) | full hook scope + archive helpers ship after `beta.9` |
+| `BAGGER_FLAVOR=heavy` progress strings | — | ✓ | opt-in only; default output is script-compatible |
+| Self-update (`update scoop`) | ✓ | — | reinstall via `install.ps1` or `cargo install -f bagger` |
+| Non-Windows | — | — | Windows-only, like Scoop |
+
 ## Install
+
+### One-liner (Windows, user scope)
+
+```ps1
+iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/main/scripts/install.ps1 | iex
+```
+
+System-wide instead (requires admin):
+
+```ps1
+iex (iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/main/scripts/install.ps1).Content -args -System
+```
+
+### From crates.io
+
+```sh
+cargo install bagger
+```
 
 ### From source
 
@@ -16,21 +108,10 @@ cargo build --release
 # the binary lives at target/release/bagger.exe
 ```
 
-### One-liner install script (Windows, requires admin for system-wide)
-
-```ps1
-# User scope (installs to $Env:LOCALAPPDATA\bagger):
-iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/feat/install-commit/scripts/install.ps1 | iex
-
-# System-wide (installs to $Env:ProgramFiles\bagger, requires admin):
-iex (iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/feat/install-commit/scripts/install.ps1).Content -args -System
-```
-
-🚧 **Stability caveat**: `bagger` is on a pre-1.0 track (`0.1.0-beta.8`); while the core
-Scoop command surface is fully implemented, individual flag behaviour may differ slightly from upstream
-Scoop. Pinned releases and checksums are available on the [GitHub releases page](https://github.com/vincentmathis/bagger/releases).
-
-**Prerequisites** (Windows-only): PowerShell 5+, an internet connection on first install.
+🚧 **Stability caveat**: `bagger` is on a pre-1.0 track; the core Scoop
+command surface is fully implemented, but individual flag behaviour may
+differ slightly from upstream Scoop. Pinned releases and checksums are on
+the [GitHub releases page](https://github.com/vincentmathis/bagger/releases).
 
 ---
 
@@ -93,6 +174,10 @@ Notable extras beyond stock Scoop parity:
 - `bagger checkver` supports `regex` (+`reverse`/`replace`), `jsonpath`, `xpath`, `script`, arch-specific specs and the `github` shorthand
 - `bagger virustotal` looks up cached downloads against the VirusTotal v3 API
 - Downloads use `aria2c` when `aria2-enabled` is set (curl fallback); manifests can be SQLite-cached via `use_sqlite_cache`
+- `BAGGER_FLAVOR=heavy` swaps progress lines for industrial ones
+  (`Surveying the pit...`, `Hauling...`, `Assaying the ore...`,
+  `Nothing to haul — already stockpiled.`). Off by default so scripts
+  keep parsing the plain output.
 
 See [SCOOP_FEATURES.md](SCOOP_FEATURES.md) for the full Scoop-vs-bagger feature comparison.
 
@@ -127,7 +212,7 @@ cargo run -- help
 cargo test --workspace
 # lint
 cargo clippy --all-targets
-# release build (8 MB, fat-LTO, panic=abort)
+# release build (8.5 MB, fat-LTO, panic=abort)
 cargo build --release
 ```
 

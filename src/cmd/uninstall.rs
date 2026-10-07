@@ -2,7 +2,7 @@ use clap::{ArgAction, Parser};
 use crossterm::style::Stylize;
 use scoop_rs::{operation, Event, Session, SyncOption};
 
-use crate::{cui, Result};
+use crate::{cui, flavor, Result};
 
 /// Uninstall package(s)
 #[derive(Debug, Parser)]
@@ -63,7 +63,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     let handle = std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
             match event {
-                Event::PackageResolveStart => println!("Resolving packages..."),
+                Event::PackageResolveStart => println!("{}", flavor::progress("resolve")),
                 Event::PromptTransactionNeedConfirm(transaction) => {
                     if let Some(remove) = transaction.remove_view() {
                         println!("The following packages will be REMOVED:");

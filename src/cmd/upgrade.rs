@@ -7,7 +7,7 @@ use crossterm::{
 };
 use scoop_rs::{operation, Event, Session, SyncOption};
 
-use crate::{cui, util, Result};
+use crate::{cui, flavor, util, Result};
 
 /// Upgrade installed package(s)
 #[derive(Debug, Parser)]
@@ -81,9 +81,9 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     let handle = std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
             match event {
-                Event::PackageResolveStart => println!("Resolving packages..."),
-                Event::PackageDownloadSizingStart => println!("Calculating download size..."),
-                Event::PackageDownloadStart => println!("Downloading packages..."),
+                Event::PackageResolveStart => println!("{}", flavor::progress("resolve")),
+                Event::PackageDownloadSizingStart => println!("{}", flavor::progress("sizing")),
+                Event::PackageDownloadStart => println!("{}", flavor::progress("download")),
                 Event::PackageDownloadProgress(ctx) => {
                     let ident = ctx.ident.to_owned();
                     let url = ctx.url.to_owned();
@@ -94,7 +94,9 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                     dlprogress.update(ident, url, filename, dltotal, dlnow);
                 }
                 Event::PackageDownloadDone => {}
-                Event::PackageIntegrityCheckStart => println!("Checking package integrity..."),
+                Event::PackageIntegrityCheckStart => {
+                    println!("{}", flavor::progress("integrity"))
+                }
                 Event::PackageIntegrityCheckProgress(ctx) => {
                     let mut stdout = std::io::stdout();
                     stdout
@@ -102,7 +104,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                         .unwrap()
                         .execute(Clear(ClearType::CurrentLine))
                         .unwrap();
-                    println!("Checking package integrity...{}", ctx.dark_grey());
+                    println!("{}{}", flavor::progress("integrity"), ctx.dark_grey());
                 }
                 Event::PackageIntegrityCheckDone => {
                     let mut stdout = std::io::stdout();
@@ -111,7 +113,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                         .unwrap()
                         .execute(Clear(ClearType::CurrentLine))
                         .unwrap();
-                    println!("Checking package integrity...{}", "Ok".green());
+                    println!("{}{}", flavor::progress("integrity"), "Ok".green());
                 }
                 Event::PromptTransactionNeedConfirm(transaction) => {
                     if show_manifest {
@@ -189,7 +191,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                                 println!("\nTotal download size: {}", out);
                             }
                         } else {
-                            println!("\nNothing to download, all cached.");
+                            println!("\n{}", flavor::progress("cached"));
                         }
                     }
 
