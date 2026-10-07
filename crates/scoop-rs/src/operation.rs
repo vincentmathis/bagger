@@ -812,6 +812,7 @@ fn find_hash_in_textfile(
         ("$sha256", "([a-fA-F0-9]{64})"),
         ("$sha512", "([a-fA-F0-9]{128})"),
         ("$checksum", "([a-fA-F0-9]{32,128})"),
+        ("$base64", "([a-zA-Z0-9+\\/=]{24,88})"),
     ];
 
     let pattern = match regex {
@@ -828,7 +829,15 @@ fn find_hash_in_textfile(
     if let Ok(re) = regex::RegexBuilder::new(&pattern).multi_line(true).build() {
         if let Some(caps) = re.captures(content) {
             if let Some(m) = caps.get(1) {
-                let hash: String = m.as_str().chars().filter(|c| !c.is_whitespace()).collect();
+                let mut hash: String = m.as_str().chars().filter(|c| !c.is_whitespace()).collect();
+                // Convert base64-encoded hash values (upstream parity):
+                // decode unless already usable hex of a standard length.
+                let is_hex = hash.bytes().all(|b| b.is_ascii_hexdigit());
+                if is_base64_hash(&hash) && !(is_hex && matches!(hash.len(), 32 | 40 | 64 | 128)) {
+                    if let Some(decoded) = decode_base64(&hash) {
+                        hash = decoded.iter().map(|b| format!("{b:02x}")).collect();
+                    }
+                }
                 if let Some(formatted) = format_hash_value(&hash) {
                     return Some(formatted);
                 }
@@ -853,7 +862,106 @@ fn find_hash_in_textfile(
         }
     }
 
+    // Final fallback: metalink `<hash>` elements (upstream parity).
+    if let Ok(re) = regex::Regex::new(r"<hash[^>]+>([a-fA-F0-9]{64})") {
+        if let Some(caps) = re.captures(content) {
+            if let Some(m) = caps.get(1) {
+                if let Some(formatted) = format_hash_value(m.as_str()) {
+                    return Some(formatted);
+                }
+            }
+        }
+    }
+
     None
+}
+
+/// Whether a string has the shape of a base64-encoded hash.
+///
+/// Mirrors the anchored upstream test:
+/// `^(?:[A-Za-z0-9+/]{4})*(?:…{2}==|…{3}=|…{4})$`.
+fn is_base64_hash(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return false;
+    }
+    let sextet = |b: u8| b.is_ascii_alphanumeric() || b == b'+' || b == b'/';
+    let (head, tail) = bytes.split_at(bytes.len() - 4);
+    if !head.iter().all(|&b| sextet(b)) {
+        return false;
+    }
+    match tail {
+        [a, b, c, d] => {
+            sextet(*a)
+                && sextet(*b)
+                && ((*c == b'=' && *d == b'=')
+                    || (sextet(*c) && *d == b'=')
+                    || (sextet(*c) && sextet(*d)))
+        }
+        _ => false,
+    }
+}
+
+/// Decode standard base64 to bytes, or `None` on malformed input.
+fn decode_base64(s: &str) -> Option<Vec<u8>> {
+    fn sextet(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    // Padding (`=`) may only terminate the final quartet (max two).
+    let data_end = bytes.iter().rposition(|&b| b != b'=').map(|i| i + 1)?;
+    if bytes.len() - data_end > 2 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let (chunks, _) = bytes.as_chunks::<4>();
+    for chunk in chunks {
+        let mut n: u32 = 0;
+        let mut pad = 0;
+        for &b in chunk {
+            n <<= 6;
+            if b == b'=' {
+                pad += 1;
+            } else {
+                if pad > 0 {
+                    return None;
+                }
+                n |= sextet(b)? as u32;
+            }
+        }
+        if pad > 2 {
+            return None;
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    // Trailing data-less padding (e.g. `"===="`) decodes empty: reject.
+    if data_end == 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// The effective hash-matching regex for an autoupdate hash section.
+///
+/// Upstream collects `find` first and lets `regex` override it.
+fn hash_regex(spec: &crate::package::manifest::HashExtraction) -> Option<&str> {
+    spec.regex.as_deref().or(spec.find.as_deref())
 }
 
 /// How an asset hash was resolved.
@@ -1144,7 +1252,7 @@ fn resolve_asset_hash(
             }
         }
         Mode::Extract(hashfile_url) => {
-            let regex = spec.find.as_deref().or(spec.regex.as_deref());
+            let regex = hash_regex(spec);
             match hashfile_url {
                 Some(url) => {
                     let hashfile_url = subs.expand(url);
@@ -2078,6 +2186,100 @@ mod tests {
             find_hash_in_textfile("no hashes here", "app.zip", None, &subs),
             None
         );
+    }
+
+    #[test]
+    fn hash_regex_prefers_regex_over_find() {
+        use crate::package::manifest::{HashExtraction, HashExtractionMode};
+
+        let spec = HashExtraction {
+            find: Some("find-pattern".to_owned()),
+            regex: Some("regex-pattern".to_owned()),
+            jsonpath: None,
+            xpath: None,
+            mode: None,
+            url: None,
+        };
+        // Upstream collects `find` first and lets `regex` override it.
+        assert_eq!(super::hash_regex(&spec), Some("regex-pattern"));
+
+        let spec = HashExtraction {
+            find: Some("find-pattern".to_owned()),
+            regex: None,
+            jsonpath: None,
+            xpath: None,
+            mode: Some(HashExtractionMode::Extract),
+            url: None,
+        };
+        assert_eq!(super::hash_regex(&spec), Some("find-pattern"));
+
+        let spec = HashExtraction {
+            find: None,
+            regex: None,
+            jsonpath: None,
+            xpath: None,
+            mode: None,
+            url: None,
+        };
+        assert_eq!(super::hash_regex(&spec), None);
+    }
+
+    #[test]
+    fn textfile_base64_hashes() {
+        let subs = test_subs("2.0", "https://example.com/app-2.0.zip");
+        // sha256("") in base64 (classic test vector).
+        let b64 = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
+        let hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        // Via the $base64 placeholder.
+        let content = format!("hash {b64} end");
+        assert_eq!(
+            find_hash_in_textfile(&content, "app-2.0.zip", Some("$base64"), &subs),
+            Some(hex.to_owned())
+        );
+        // Plain hex of standard length is never base64-decoded.
+        assert_eq!(
+            find_hash_in_textfile(hex, "app-2.0.zip", None, &subs),
+            Some(hex.to_owned())
+        );
+        // Malformed base64 falls back to no match, not garbage.
+        assert_eq!(
+            find_hash_in_textfile("!!!!", "app-2.0.zip", Some("$base64"), &subs),
+            None
+        );
+    }
+
+    #[test]
+    fn textfile_metalink_fallback() {
+        let subs = test_subs("2.0", "https://example.com/app-2.0.zip");
+        let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let content = format!(
+            r#"<?xml version="1.0"?><metalink><file name="other.zip"><hash type="sha-256">{sha}</hash></file></metalink>"#
+        );
+        // Neither the default pattern nor the basename search hits the
+        // metalink document; the `<hash>` fallback does.
+        assert_eq!(
+            find_hash_in_textfile(&content, "app-2.0.zip", None, &subs),
+            Some(sha.to_owned())
+        );
+    }
+
+    #[test]
+    fn base64_codec_vectors() {
+        assert_eq!(super::decode_base64("TWFu"), Some(b"Man".to_vec()));
+        assert_eq!(super::decode_base64("TQ=="), Some(b"M".to_vec()));
+        assert_eq!(super::decode_base64("TWE="), Some(b"Ma".to_vec()));
+        assert_eq!(super::decode_base64(""), None);
+        assert_eq!(super::decode_base64("TWF"), None);
+        assert_eq!(super::decode_base64("TWFu!"), None);
+        assert_eq!(super::decode_base64("===="), None);
+        assert!(super::is_base64_hash(
+            "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
+        ));
+        // A 64-hex string is base64-*shaped* but must never be decoded
+        // (covered end-to-end above); shape alone is not the guard.
+        assert!(super::is_base64_hash(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
     }
 
     #[test]

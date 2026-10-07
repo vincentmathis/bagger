@@ -154,7 +154,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 | Field | Status | Notes |
 | :--- | :---: | :--- |
-| `regex` | [~] | Parsed; auto-applied in checkver + extract-mode (`$md5…`/`$checksum` placeholders), not for other hash modes |
+| `regex` | [x] | **Implemented** - `regex` wins over the `find` alias (was inverted); `$base64` placeholder + base64→hex conversion; metalink `<hash>` fallback; verified live against an Electron-style `latest.yml` (`sha512: <base64>`) end-to-end |
 | `jsonpath` | [x] | Evaluated by checkver (`$.a.b[0]` subset) and json-mode hashes |
 | `xpath` | [x] | Evaluated by checkver (`tag`, `*`, `[n]`, `[@a='v']`, trailing `text()`/`@attr`) and xpath-mode hashes |
 | `url` | [x] | Hash-document URL for extract/json/xpath modes |
