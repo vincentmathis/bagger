@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.0-beta.11](https://github.com/vincentmathis/bagger/compare/v0.1.0-beta.10...v0.1.0-beta.11) (2026-10-07)
+
+
+### Bug Fixes
+
+* current-first cleanup resolution; shim target parsing; native innosetup extraction; repair hollow installs ([c58fc0d](https://github.com/vincentmathis/bagger/commit/c58fc0d1c596fc4e0fdea95c6839c78ad75520f9))
+* install.ps1 asset resolution, version check, arg forwarding ([27ab12d](https://github.com/vincentmathis/bagger/commit/27ab12da8568ead3f7d5e753615a422edb058dc8))
+
 ## 0.1.0-beta.11 (unreleased)
 
 ### Bug Fixes
