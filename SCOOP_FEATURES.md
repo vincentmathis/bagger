@@ -318,7 +318,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 | Feature | Status | Notes |
 | :--- | :---: | :--- |
-| `cargo install bagger` | [x] | Install from crates.io: `cargo install bagger` (publishes `bagger`, `scoop-rs`, `bagger-hash`) |
+| `cargo install bagger` | [x] | Install from crates.io (pre-releases are opt-in: `cargo install bagger --version 0.1.0-beta.10`) |
 | `scripts/install.ps1` | [x] | One-liner PowerShell installer: `iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/main/scripts/install.ps1 \| iex` |
 | GitHub Actions CI | [x] | Lint (fmt+clippy), test matrix (x64/i686/arm64), release build, auto-release via `release-please` |
 | Release artifacts | [x] | `bagger-x86_64/i686/aarch64-pc-windows-msvc.zip` attached to GitHub releases |
