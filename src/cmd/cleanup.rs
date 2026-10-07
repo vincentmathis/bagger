@@ -183,16 +183,34 @@ fn cleanup(
     } else {
         print!("Removing {}{}:", app, if global { " (global)" } else { "" });
         for (version, version_path) in old_versions {
-            unlink_persist_links(&version_path).map_err(|error| {
-                anyhow::anyhow!("failed to unlink persist paths for {app} {version}: {error}")
-            })?;
-            remove_dir_all::remove_dir_all(&version_path).map_err(|error| {
-                anyhow::anyhow!(
-                    "failed to remove old version {}: {error}",
-                    version_path.display()
-                )
-            })?;
-            print!(" {}", version);
+            let removal = unlink_persist_links(&version_path)
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to unlink persist paths for {app} {version}: {error}")
+                })
+                .and_then(|()| {
+                    remove_dir_all::remove_dir_all(&version_path).map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to remove old version {}: {error}",
+                            version_path.display()
+                        )
+                    })
+                });
+            match removal {
+                Ok(()) => print!(" {}", version),
+                // Keep cleaning the rest: a locked old version (e.g. its
+                // files are still loaded by a running process) must not
+                // abort the whole run. Say who holds it when known.
+                Err(error) => {
+                    let mut hint = String::new();
+                    if let Ok(procs) = scoop_rs::running_apps_under(app_path) {
+                        if !procs.is_empty() {
+                            hint =
+                                format!(" (in use by: {}; quit them and retry)", procs.join(", "));
+                        }
+                    }
+                    eprintln!("\nCouldn't remove {app} {version}: {error}{hint}");
+                }
+            }
         }
         println!();
     }
@@ -317,30 +335,9 @@ fn unlink_persist_links(version_path: &Path) -> Result<()> {
             ));
         }
 
-        let link_path = version_path.join(relative);
-        let metadata = match fs::symlink_metadata(&link_path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        if !metadata.file_type().is_symlink() {
-            continue;
-        }
-
-        #[cfg(windows)]
-        {
-            if link_path
-                .metadata()
-                .map(|target| target.is_dir())
-                .unwrap_or(false)
-            {
-                fs::remove_dir(link_path)?;
-            } else {
-                fs::remove_file(link_path)?;
-            }
-        }
-        #[cfg(not(windows))]
-        fs::remove_file(link_path)?;
+        // Unlink via the hardened helper: raw remove_dir fails on
+        // junctions with os error 5.
+        scoop_rs::persist_unlink_links(version_path, &[source])?;
     }
 
     Ok(())

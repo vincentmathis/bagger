@@ -109,6 +109,27 @@ fn link_item(persist_path_item: &std::path::Path, app_path_item: &std::path::Pat
     Ok(())
 }
 
+/// Remove persist links inside an app version directory.
+///
+/// Used when dropping old versions (`cleanup`): each entry is unlinked only
+/// when it is itself a link — regular files and directories (including
+/// stashed `<name>.original` copies) are left alone, and the persist store
+/// itself is never touched. Junction removal goes through the hardened
+/// helper (readonly flags cleared, file-vs-dir aware) because raw
+/// `remove_dir` fails on junctions with os error 5.
+pub fn unlink_links(version_path: &std::path::Path, rel_paths: &[&str]) -> Fallible<()> {
+    for rel in rel_paths {
+        let link_path = version_path.join(rel);
+        match std::fs::symlink_metadata(&link_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                internal::fs::remove_symlink(&link_path)?
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,6 +225,49 @@ mod tests {
         std::env::remove_var("SCOOP");
         std::env::remove_var("SCOOP_GLOBAL");
         std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `unlink_links` removes junctions (the raw `remove_dir` used by the
+    /// old cleanup path fails on them with os error 5) while leaving real
+    /// files, real dirs, and the store itself alone.
+    #[test]
+    #[cfg(windows)]
+    fn unlink_links_removes_junctions_only() {
+        let base = std::env::temp_dir().join("bagger-test-persist-unlink");
+        let _ = std::fs::remove_dir_all(&base);
+        let version = base.join("1.0");
+        let store = base.join("store/Data");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("keep.txt"), "keep").unwrap();
+
+        // A junction like installs create (possibly readonly, like
+        // upstream's `attrib +R` junctions).
+        internal::fs::symlink_dir(&store, &version.join("Data")).unwrap();
+        let mut perms = std::fs::symlink_metadata(version.join("Data"))
+            .unwrap()
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(version.join("Data"), perms).unwrap();
+
+        // A real dir and a real file must survive.
+        std::fs::create_dir_all(version.join("Real")).unwrap();
+        std::fs::write(version.join("notes.txt"), "notes").unwrap();
+
+        unlink_links(&version, &["Data", "Real", "notes.txt", "missing"]).unwrap();
+
+        assert!(
+            !version.join("Data").exists()
+                || std::fs::symlink_metadata(version.join("Data")).is_err()
+        );
+        assert!(version.join("Real").is_dir());
+        assert!(version.join("notes.txt").is_file());
+        assert_eq!(
+            std::fs::read_to_string(store.join("keep.txt")).unwrap(),
+            "keep"
+        );
+
         std::fs::remove_dir_all(&base).ok();
     }
 }

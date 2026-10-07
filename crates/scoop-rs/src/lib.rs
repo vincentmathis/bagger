@@ -55,7 +55,9 @@ pub mod operation;
 
 pub use error::Error;
 pub use event::Event;
+pub use internal::os::running_apps as running_apps_under;
 pub use package::{Package, QueryOption, SyncOption, Transaction};
+pub use persist::unlink_links as persist_unlink_links;
 pub use session::Session;
 pub use shim::refresh as shim_refresh;
 pub use shim::target_of as shim_target_of;
