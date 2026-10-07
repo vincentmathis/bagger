@@ -625,25 +625,40 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 let _ = std::fs::remove_file(&dst);
                 std::fs::copy(&src, &dst)?;
             }
+
+            // Standard extraction first, matching upstream Scoop
+            // (`Invoke-Extraction` runs before any hook script and simply
+            // skips files without a known extractor, leaving those for the
+            // installer file/script below).
+            extract_package(session, pkg, &working_dir)?;
+
+            // Handle extract_dir/extract_to from manifest
+            handle_extract_location(session, pkg, &working_dir)?;
+
+            // Run pre_install after extraction (upstream order): hook
+            // scripts such as `Expand-7zipArchive "$dir\inner.7z"` operate
+            // on the extracted tree.
             if let Some(pre_install) = pkg.manifest().pre_install() {
                 internal::ps::invoke_script(session, pkg, "install", &pre_install, &working_dir)?;
             }
 
-            // Run installer script if present (replaces standard extraction)
+            // Run installer file and/or script if present.
             if let Some(installer) = pkg.manifest().installer() {
+                if let Some(file) = installer.file() {
+                    run_installer_file(
+                        session,
+                        pkg,
+                        &working_dir,
+                        file,
+                        installer.args(),
+                        installer.keep(),
+                        false,
+                    )?;
+                }
                 if let Some(script) = installer.script() {
                     internal::ps::invoke_script(session, pkg, "install", &script, &working_dir)?;
-                } else {
-                    // No script but has installer - fall back to standard extraction
-                    extract_package(session, pkg, &working_dir)?;
                 }
-            } else {
-                // Standard extraction
-                extract_package(session, pkg, &working_dir)?;
             }
-
-            // Handle extract_dir/extract_to from manifest
-            handle_extract_location(session, pkg, &working_dir)?;
 
             // Create the 'current' symlink if not using no_junction
             if !config.no_junction() {
@@ -710,12 +725,28 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             }
 
             if let Some(tx) = session.emitter() {
+                // Substitute `$dir`/`$original_dir`/`$persist_dir` in notes,
+                // mirroring upstream `show_notes`.
+                let dir_str = install_base.to_string_lossy();
+                let original_dir = apps_dir.join(pkg.name()).join(pkg.version());
+                let original_str = original_dir.to_string_lossy();
+                let persist_str = config
+                    .root_path()
+                    .join("persist")
+                    .join(pkg.name())
+                    .to_string_lossy()
+                    .into_owned();
+                let substitute = |s: &str| {
+                    s.replace("$original_dir", original_str.as_ref())
+                        .replace("$persist_dir", persist_str.as_str())
+                        .replace("$dir", dir_str.as_ref())
+                };
                 let notes = pkg
                     .manifest()
                     .notes()
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|s| s.to_owned())
+                    .map(substitute)
                     .collect::<Vec<_>>();
                 let suggest = pkg
                     .manifest()
@@ -752,6 +783,101 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 ///
 /// Honors the `--arch` override when set, so `install.json` records the
 /// architecture that was actually resolved.
+/// Run a manifest `installer.file`/`uninstaller.file` program.
+///
+/// Mirrors upstream `Invoke-Installer`: the file must live inside the app
+/// directory, `args` undergo `$dir`/`$global`/`$version` substitution, `.ps1`
+/// files run as hook scripts while anything else is executed directly, and
+/// the file is removed afterwards unless `keep` is set.
+#[allow(clippy::too_many_arguments)]
+fn run_installer_file(
+    session: &Session,
+    pkg: &Package,
+    working_dir: &std::path::Path,
+    file: &str,
+    args: Option<Vec<&str>>,
+    keep: bool,
+    is_uninstall: bool,
+) -> Fallible<()> {
+    let kind = if is_uninstall {
+        "uninstaller"
+    } else {
+        "installer"
+    };
+    let prog = working_dir.join(file);
+    if !prog.is_file() {
+        return Err(crate::Error::Custom(format!(
+            "{} file '{}' is missing for '{}'",
+            kind,
+            prog.display(),
+            pkg.name(),
+        )));
+    }
+
+    let dir_str = working_dir.to_string_lossy();
+    let global_str = if session.config().is_global_scope() {
+        "True"
+    } else {
+        "False"
+    };
+    let substitute = |s: &str| {
+        s.replace("$dir", dir_str.as_ref())
+            .replace("$global", global_str)
+            .replace("$version", pkg.version())
+    };
+    let fn_args: Vec<String> = args
+        .unwrap_or_default()
+        .iter()
+        .map(|a| substitute(a))
+        .collect();
+
+    if prog.extension().map(|e| e.eq_ignore_ascii_case("ps1")) == Some(true) {
+        // PowerShell files run as hook scripts (with the prelude scope),
+        // invoked with the substituted arguments (upstream `& $prog @args`).
+        let cmd = if is_uninstall { "uninstall" } else { "install" };
+        let mut invocation = format!(
+            "& {}",
+            crate::internal::ps::ps_quote(&prog.to_string_lossy())
+        );
+        for arg in &fn_args {
+            invocation.push(' ');
+            invocation.push_str(&crate::internal::ps::ps_quote(arg));
+        }
+        let lines = vec![invocation.as_str()];
+        internal::ps::invoke_script(session, pkg, cmd, &lines, working_dir)?;
+    } else {
+        if let Some(tx) = session.emitter() {
+            let _ = tx.send(Event::PackageCommitStart(format!(
+                "running {} file for {}",
+                kind,
+                pkg.name()
+            )));
+        }
+        let status = std::process::Command::new(&prog)
+            .args(&fn_args)
+            .current_dir(working_dir)
+            .status()?;
+        if !status.success() {
+            return Err(crate::Error::Custom(format!(
+                "{} file '{}' for '{}' exited with {}",
+                kind,
+                prog.display(),
+                pkg.name(),
+                status
+            )));
+        }
+        if let Some(tx) = session.emitter() {
+            let _ = tx.send(Event::PackageCommitDone(pkg.name().to_owned()));
+        }
+    }
+
+    // Don't remove the installer file if "keep" is set to true.
+    if !keep {
+        let _ = std::fs::remove_file(&prog);
+    }
+    Ok(())
+}
+
 /// Extract downloaded archives in the working directory.
 fn extract_package(
     session: &Session,
@@ -765,6 +891,31 @@ fn extract_package(
     for filename in filenames.iter() {
         let archive_path = working_dir.join(filename);
         if !archive_path.exists() {
+            continue;
+        }
+
+        // MSI packages go through the native MSI extractor (lessmsi or
+        // msiexec, mirroring upstream `Expand-MsiArchive`); 7z mangles
+        // MSI-internal file names, so it must not handle them.
+        let is_msi = archive_path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("msi"))
+            .unwrap_or(false);
+        if is_msi {
+            if let Some(tx) = session.emitter() {
+                let _ = tx.send(Event::PackageCommitStart(format!(
+                    "extracting archive for {}",
+                    pkg.name()
+                )));
+            }
+            let lessmsi = crate::internal::ps::helper_exe(session, "lessmsi", "lessmsi.exe");
+            internal::archive::extract_msi(
+                &archive_path,
+                working_dir,
+                config.use_lessmsi(),
+                lessmsi,
+            )?;
+            let _ = std::fs::remove_file(&archive_path);
             continue;
         }
 
@@ -817,8 +968,13 @@ fn extract_package(
 
 /// Handle extract_dir and extract_to manifest fields.
 ///
-/// - `extract_dir`: move extracted content into a subdirectory
-/// - `extract_to`: move extracted content to a different directory
+/// - `extract_dir`: promote the named subdirectory of the extracted tree
+///   (upstream `Invoke-Extraction` moves `$dest\$extract_dir` up to `$dest`;
+///   a no-op when the subdirectory does not exist, e.g. flat 7z output).
+/// - `extract_to`: move extracted content into a subdirectory of the app dir.
+///
+/// Paths are never moved into their own descendants (a no-op instead of a
+/// platform error).
 fn handle_extract_location(
     session: &Session,
     pkg: &Package,
@@ -828,28 +984,38 @@ fn handle_extract_location(
     let apps_dir = config.root_path().join("apps");
 
     if let Some(extract_dir) = pkg.manifest().extract_dir() {
-        // Move all extracted content into the extract_dir subdirectory
-        let target_dir = working_dir.join(extract_dir[0]);
-        internal::fs::ensure_dir(&target_dir)?;
-
-        let entries = std::fs::read_dir(working_dir)?;
-        for entry in entries {
-            let entry = entry?;
-            let name = entry.file_name();
-            let path = entry.path();
-            // Skip the target directory itself
-            if path == target_dir {
+        for sub in extract_dir {
+            let src_dir = working_dir.join(sub);
+            if !src_dir.is_dir() {
                 continue;
             }
-            // Skip extracted archive filenames (cache-style)
-            if name.to_string_lossy().contains("#") {
-                continue;
+            // Move the subdirectory's contents up into the working dir.
+            let entries = std::fs::read_dir(&src_dir)?;
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name();
+                let src = entry.path();
+                let dst = working_dir.join(&name);
+                if dst.exists() {
+                    if dst.is_dir() {
+                        continue;
+                    }
+                    let _ = std::fs::remove_file(&dst);
+                }
+                std::fs::rename(&src, &dst)?;
             }
-            let dest = target_dir.join(&name);
-            if dest.exists() {
-                let _ = std::fs::remove_file(&dest);
+            // Remove the (now empty) promoted directories, deepest first.
+            let mut dir = src_dir.as_path();
+            while dir.starts_with(working_dir) && dir != working_dir {
+                if std::fs::read_dir(dir)?.next().is_some() {
+                    break;
+                }
+                std::fs::remove_dir(dir)?;
+                match dir.parent() {
+                    Some(parent) => dir = parent,
+                    None => break,
+                }
             }
-            std::fs::rename(&path, &dest)?;
         }
     }
 
@@ -1003,12 +1169,11 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
 
             let app_dir = root_dir.join("apps").join(package.name());
 
-            // Run pre_uninstall script if present
-            let uninstall_dir = if config.no_junction() {
-                app_dir.join(package.installed_version().unwrap_or(package.version()))
-            } else {
-                app_dir.join("current")
-            };
+            // Hook scripts observe the real version directory as `$dir`,
+            // matching upstream Scoop (which never points hooks at the
+            // `current` junction).
+            let uninstall_dir =
+                app_dir.join(package.installed_version().unwrap_or(package.version()));
             if let Some(pre_uninstall) = package.manifest().pre_uninstall() {
                 internal::ps::invoke_script(
                     session,
@@ -1019,8 +1184,19 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
                 )?;
             }
 
-            // Run uninstaller script if present
+            // Run uninstaller file and/or script if present.
             if let Some(uninstaller) = package.manifest().uninstaller() {
+                if let Some(file) = uninstaller.file() {
+                    run_installer_file(
+                        session,
+                        package,
+                        &uninstall_dir,
+                        file,
+                        uninstaller.args(),
+                        false,
+                        true,
+                    )?;
+                }
                 if let Some(script) = uninstaller.script() {
                     internal::ps::invoke_script(
                         session,

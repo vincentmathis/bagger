@@ -5,7 +5,7 @@ use crate::Session;
 use std::path::{Path, PathBuf};
 
 /// Quote a value as a PowerShell single-quoted string literal.
-fn ps_quote(value: &str) -> String {
+pub(crate) fn ps_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
@@ -15,7 +15,7 @@ fn ps_quote(value: &str) -> String {
 /// (user or global) root wins, then the configured global root. Each root
 /// prefers the `current` link and, when junctions are disabled, falls back
 /// to the newest version directory containing the executable.
-fn helper_exe(session: &Session, app: &str, rel_path: &str) -> Option<PathBuf> {
+pub(crate) fn helper_exe(session: &Session, app: &str, rel_path: &str) -> Option<PathBuf> {
     let config = session.config();
     for base in [config.root_path(), config.global_path()] {
         let app_dir = base.join("apps").join(app);
@@ -461,16 +461,23 @@ function uninstall_rm($item) {
 /// The variables mirror the locals visible to hook scripts in upstream
 /// Scoop (`install_app`/`uninstall_app` scope): `$dir` is the version
 /// directory being committed, `$version`/`$architecture` describe the
-/// package, and `$global` is a real boolean (unlike the legacy
-/// stringly-typed environment fallback).
-pub(crate) fn build_prelude(session: &Session, package: &Package, working_dir: &Path) -> String {
+/// package, `$cmd` mirrors the operation in progress, and `$global` is a
+/// real boolean (unlike the legacy stringly-typed environment fallback).
+pub(crate) fn build_prelude_for(
+    session: &Session,
+    package: &Package,
+    cmd: &str,
+    working_dir: &Path,
+) -> String {
     let config = session.config();
     let root = config.root_path();
     let version = package.version().to_string();
     let app_dir = root.join("apps").join(package.name());
-    let bucket_dir = root.join("buckets").join(package.bucket());
+    let buckets_dir = root.join("buckets");
+    let bucket_dir = buckets_dir.join(package.bucket());
 
     let mut out = String::new();
+    out.push_str(&format!("$cmd = {}\n", ps_quote(cmd)));
     out.push_str(&format!(
         "$dir = {}\n",
         ps_quote(&working_dir.to_string_lossy())
@@ -482,6 +489,10 @@ pub(crate) fn build_prelude(session: &Session, package: &Package, working_dir: &
     ));
     out.push_str(&format!("$app = {}\n", ps_quote(package.name())));
     out.push_str(&format!("$bucket = {}\n", ps_quote(package.bucket())));
+    out.push_str(&format!(
+        "$bucketsdir = {}\n",
+        ps_quote(&buckets_dir.to_string_lossy())
+    ));
     out.push_str(&format!(
         "$bucketdir = {}\n",
         ps_quote(&bucket_dir.to_string_lossy())
@@ -643,7 +654,7 @@ pub fn invoke_script(
     // so manifest scripts observe the same scope as under upstream Scoop.
     let ps_script = format!(
         "{}{}",
-        build_prelude(session, package, working_dir),
+        build_prelude_for(session, package, cmd, working_dir),
         script.join("\n")
     );
 
@@ -709,7 +720,7 @@ pub fn invoke_script_capture(
     // silent, so captured stdout still carries only the script's output.
     let ps_script = format!(
         "{}{}",
-        build_prelude(session, package, working_dir),
+        build_prelude_for(session, package, cmd, working_dir),
         script.join("\n")
     );
     let env_vars = build_context_variables(session, package, cmd, working_dir);
@@ -762,7 +773,6 @@ mod tests {
         .expect("fixture manifest should parse");
         Package::from("test-pkg", "main", manifest)
     }
-
     #[test]
     #[cfg(windows)]
     fn capture_returns_trimmed_stdout() {
@@ -793,5 +803,194 @@ mod tests {
         )
         .expect_err("failing script should error");
         assert!(err.to_string().contains("failed"));
+    }
+
+    #[test]
+    fn ps_quote_escapes_single_quotes() {
+        assert_eq!(ps_quote("plain"), "'plain'");
+        assert_eq!(ps_quote("a'b"), "'a''b'");
+        assert_eq!(ps_quote("C:\\a'b\\c"), "'C:\\a''b\\c'");
+    }
+
+    #[test]
+    fn helper_exe_prefers_current_then_global() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-helper-exe");
+        let _ = std::fs::remove_dir_all(&base);
+        let user_root = base.join("user");
+        let global_root = base.join("global");
+        let seven = user_root.join("apps").join("7zip").join("current");
+        let less = global_root.join("apps").join("lessmsi").join("current");
+        std::fs::create_dir_all(&seven).unwrap();
+        std::fs::create_dir_all(&less).unwrap();
+        std::fs::write(seven.join("7z.exe"), b"").unwrap();
+        std::fs::write(less.join("lessmsi.exe"), b"").unwrap();
+        std::env::set_var("SCOOP", &user_root);
+        std::env::set_var("SCOOP_GLOBAL", &global_root);
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+
+        let session = Session::new();
+        assert_eq!(
+            helper_exe(&session, "7zip", "7z.exe"),
+            Some(seven.join("7z.exe"))
+        );
+        assert_eq!(
+            helper_exe(&session, "lessmsi", "lessmsi.exe"),
+            Some(less.join("lessmsi.exe"))
+        );
+        assert_eq!(helper_exe(&session, "nope", "nope.exe"), None);
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn prelude_exposes_hook_variables() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-prelude-vars");
+        let _ = std::fs::remove_dir_all(&base);
+        std::env::set_var("SCOOP", base.join("root"));
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+
+        let session = Session::new();
+        let pkg = test_package();
+        let dir = base.join("apps").join("test-pkg").join("1.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = invoke_script_capture(
+            &session,
+            &pkg,
+            "install",
+            &["\"$cmd|$dir|$version|$architecture|$app|$bucket|$bucketsdir|$global|$original_dir|$persist_dir\""],
+            &dir,
+        )
+        .expect("powershell should run");
+        let root = base.join("root").to_string_lossy().into_owned();
+        let backslashed = root.replace('/', "\\");
+        let expected = format!(
+            "install|{d}|1.0|64bit|test-pkg|main|{r}\\buckets|False|{r}\\apps\\test-pkg\\1.0|{r}\\persist\\test-pkg",
+            d = dir.to_string_lossy(),
+            r = backslashed,
+        );
+        assert_eq!(out, expected);
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn prelude_defines_scoop_helpers() {
+        let session = Session::new();
+        let pkg = test_package();
+        let out = invoke_script_capture(
+            &session,
+            &pkg,
+            "install",
+            &["Get-Command Expand-7zipArchive, Expand-MsiArchive, Expand-InnoArchive, Expand-DarkArchive, Expand-ZipArchive, Expand-ZstdArchive, Get-HelperPath, Invoke-ExternalCommand, uninstall_rm, abort, warn, error, info, success, movedir, ensure, fname, Add-Path, Remove-Path, Get-EnvVar, Set-EnvVar, Test-HelperInstalled -ErrorAction Stop | ForEach-Object { $_.Name }"],
+            &std::env::temp_dir(),
+        )
+        .expect("helpers should be defined");
+        for name in [
+            "Expand-7zipArchive",
+            "Expand-MsiArchive",
+            "Expand-InnoArchive",
+            "Expand-DarkArchive",
+            "Expand-ZipArchive",
+            "Expand-ZstdArchive",
+            "Get-HelperPath",
+            "Invoke-ExternalCommand",
+            "uninstall_rm",
+            "abort",
+            "warn",
+            "error",
+            "info",
+            "success",
+            "movedir",
+            "ensure",
+            "fname",
+            "Add-Path",
+            "Remove-Path",
+            "Get-EnvVar",
+            "Set-EnvVar",
+            "Test-HelperInstalled",
+        ] {
+            assert!(out.contains(name), "missing helper {name}");
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn expand_7ziparchive_roundtrip() {
+        let session = Session::new();
+        let pkg = test_package();
+        // Override the baked helper table with PATH 7z when the Scoop 7zip
+        // app is absent (e.g. CI runners), so the roundtrip still executes.
+        let script = r#"
+$z = Get-HelperPath 7zip
+if (!$z) { $z = (Get-Command 7z.exe -CommandType Application -ErrorAction Ignore).Source }
+if (!$z) { 'NO7Z' } else {
+  $BaggerHelpers['7zip'] = $z
+  $t = Join-Path $env:TEMP 'bagger-test-7zrt'
+  if (Test-Path $t) { Remove-Item $t -Recurse -Force }
+  New-Item -ItemType Directory $t | Out-Null
+  'hello-ore' | Out-File "$t\a.txt" -Encoding ascii -NoNewline
+  Compress-Archive -Path "$t\a.txt" -DestinationPath "$t\a.zip"
+  Expand-7zipArchive "$t\a.zip" "$t\out"
+  if ((Get-Content "$t\out\a.txt" -Raw) -eq 'hello-ore') { 'OK' } else { 'MISMATCH' }
+  Remove-Item $t -Recurse -Force
+}"#;
+        let out =
+            invoke_script_capture(&session, &pkg, "install", &[script], &std::env::temp_dir())
+                .expect("powershell should run");
+        assert!(out == "OK" || out == "NO7Z", "unexpected: {out}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn uninstall_rm_removes_files_and_trees() {
+        let session = Session::new();
+        let pkg = test_package();
+        let script = r#"
+$t = Join-Path $env:TEMP 'bagger-test-uninstallrm'
+if (Test-Path $t) { Remove-Item $t -Recurse -Force }
+New-Item -ItemType Directory "$t\d" | Out-Null
+'f' | Out-File "$t\d\f.txt" -Encoding ascii -NoNewline
+'f' | Out-File "$t\top.txt" -Encoding ascii -NoNewline
+uninstall_rm "$t\d"
+uninstall_rm "$t\top.txt"
+uninstall_rm "$t\does-not-exist"
+if ((Test-Path "$t\d") -or (Test-Path "$t\top.txt")) { 'LEFT' } else { 'OK' }
+Remove-Item $t -Recurse -Force -ErrorAction Ignore"#;
+        let out = invoke_script_capture(
+            &session,
+            &pkg,
+            "uninstall",
+            &[script],
+            &std::env::temp_dir(),
+        )
+        .expect("powershell should run");
+        assert_eq!(out, "OK");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn missing_helpers_resolve_to_null() {
+        let session = Session::new();
+        let pkg = test_package();
+        let out = invoke_script_capture(
+            &session,
+            &pkg,
+            "install",
+            &["$x = Get-HelperPath Lessmsi; if ($null -eq $x) { 'NULL' } elseif (Test-Path $x) { 'FOUND' } else { 'STALE' }"],
+            &std::env::temp_dir(),
+        )
+        .expect("powershell should run");
+        assert!(out == "NULL" || out == "FOUND", "unexpected: {out}");
     }
 }

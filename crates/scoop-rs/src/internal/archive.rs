@@ -10,7 +10,7 @@ pub enum Format {
     Gzip,
     /// .rar
     Rar,
-    /// .7z, .xz, .tar
+    /// .7z, .xz, .tar, .msi (all handled by 7z)
     XZip,
     /// .zip
     Zip,
@@ -30,7 +30,7 @@ impl Format {
             Some("gz") | Some("tgz") => Some(Format::Gzip),
             Some("rar") => Some(Format::Rar),
             Some("7z") | Some("xz") | Some("lzma") | Some("iso") | Some("lzh") | Some("nupkg")
-            | Some("tar") => Some(Format::XZip),
+            | Some("tar") | Some("msi") => Some(Format::XZip),
             Some("zip") => Some(Format::Zip),
             Some("zst") => Some(Format::Zst),
             _ => None,
@@ -86,6 +86,98 @@ fn is_7z_sfx(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// Extract an MSI package to the given destination directory.
+///
+/// Mirrors upstream `Expand-MsiArchive`: with `use_lessmsi` (and the Scoop
+/// `lessmsi` app present) extraction goes through lessmsi, otherwise the
+/// system `msiexec.exe` administrative install is used and its `SourceDir`
+/// output is promoted to the destination.
+pub fn extract_msi<P: AsRef<Path>, Q: AsRef<Path>>(
+    src: P,
+    dst: Q,
+    use_lessmsi: bool,
+    lessmsi_exe: Option<PathBuf>,
+) -> crate::error::Fallible<()> {
+    let src = src.as_ref();
+    let dst = dst.as_ref();
+    crate::internal::fs::ensure_dir(dst)?;
+
+    if use_lessmsi {
+        let exe = lessmsi_exe.ok_or_else(|| {
+            crate::Error::Custom(
+                "cannot extract MSI: 'use_lessmsi' is set but the lessmsi app is not installed"
+                    .to_string(),
+            )
+        })?;
+        let output = std::process::Command::new(&exe)
+            .arg("x")
+            .arg(src)
+            .arg(format!("{}\\", dst.to_string_lossy()))
+            .output()?;
+        if !output.status.success() {
+            return Err(crate::Error::Custom(format!(
+                "lessmsi failed to extract '{}': {}",
+                src.display(),
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        return Ok(());
+    }
+
+    let source_dir = dst.join("SourceDir");
+    let _ = std::fs::remove_dir_all(&source_dir);
+    let status = std::process::Command::new("msiexec.exe")
+        .arg("/a")
+        .arg(src)
+        .arg("/qn")
+        .arg(format!(
+            "TARGETDIR={}\\SourceDir",
+            dst.to_string_lossy().trim_end_matches('\\')
+        ))
+        .status()?;
+    if !status.success() {
+        return Err(crate::Error::Custom(format!(
+            "msiexec failed to extract '{}' ({})",
+            src.display(),
+            status
+        )));
+    }
+    if source_dir.is_dir() {
+        move_dir_contents(&source_dir, dst)?;
+        let _ = std::fs::remove_dir_all(&source_dir);
+    }
+    Ok(())
+}
+
+/// Move the contents of `src` into `dst`, merging directories recursively.
+fn move_dir_contents(src: &Path, dst: &Path) -> crate::error::Fallible<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            if to.is_dir() {
+                move_dir_contents(&from, &to)?;
+                let _ = std::fs::remove_dir(&from);
+            } else {
+                if to.exists() {
+                    let _ = std::fs::remove_file(&to);
+                }
+                std::fs::rename(&from, &to)?;
+            }
+        } else {
+            if to.is_dir() {
+                continue;
+            }
+            if to.exists() {
+                let _ = std::fs::remove_file(&to);
+            }
+            std::fs::rename(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Extract an archive to the given destination directory using 7z.
