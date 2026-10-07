@@ -66,6 +66,8 @@ mod tests {
         assert_eq!(progress("download"), "Downloading packages...");
         assert_eq!(progress("download_complete"), "Download complete.");
         assert_eq!(progress("integrity"), "Checking package integrity...");
+        assert_eq!(progress("verifying"), "Verifying hashes...");
+        assert_eq!(progress("verified"), "Hash verification complete.");
         assert_eq!(progress("cached"), "Nothing to download, all cached.");
         assert_eq!(progress("buckets"), "Updating buckets");
     }

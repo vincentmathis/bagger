@@ -78,7 +78,7 @@ root. Anything not listed here is not promised.
 | `shims/` (`.exe`/`.cmd`/`.ps1`/`.shim`) | ✓ | ✓ | same directory, symmetric add/remove |
 | `persist/`, `modules/`, shortcuts | ✓ | ✓ | same locations |
 | `-g/--global` under `%ProgramData%\scoop` | ✓ (admin) | ✓ (admin-gated) | gate verified; cache stays user-scoped |
-| Hook scripts (`$dir`, `Expand-7zipArchive`, …) | ✓ | ✓ in source (unreleased) | full hook scope + archive helpers ship after `beta.9` |
+| Hook scripts (`$dir`, `Expand-7zipArchive`, …) | ✓ | ✓ (shipped in `0.1.0-beta.10`) | full hook scope + archive helpers |
 | `BAGGER_FLAVOR=heavy` progress strings | — | ✓ | opt-in only; default output is script-compatible |
 | Self-update (`update scoop`) | ✓ | — | reinstall via `install.ps1` or `cargo install -f bagger` |
 | Non-Windows | — | — | Windows-only, like Scoop |

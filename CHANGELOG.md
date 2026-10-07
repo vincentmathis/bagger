@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.0-beta.10](https://github.com/vincentmathis/bagger/compare/v0.1.0-beta.9...v0.1.0-beta.10) (unreleased)
+
+Scoop hook-script compatibility: manifest scripts now run in an upstream-faithful scope, and installs survive running apps, persist data, and poisoned shims.
+
+### Features
+
+- **hook scope:** every manifest script gets upstream variables (`$dir`, `$version`, `$architecture`, `$app`, `$bucket`, `$bucketsdir`, `$fname`, `$global`, `$original_dir`, `$persist_dir`, `$cmd`) plus ports of `Expand-7zipArchive`/`Msi`/`Inno`/`Dark`/`Zip`, `Get-HelperPath`, `Invoke-ExternalCommand`, `movedir`, `Add/Remove-Path`, env vars, and msg helpers
+- **running processes:** bulk install/upgrade/uninstall skips apps with running processes (with a message) instead of aborting; explicit singles still fail; re-checked at commit time
+- **installer.file:** file-based `installer`/`uninstaller` entries execute with `$dir`/`$global`/`$version` substitution (`.ps1` via hook scope, else direct), removed unless `keep`
+- **shim refresh:** new `bagger shim refresh` repairs executable shims for all installed apps; `BAGGER_FLAVOR=heavy` swaps progress lines (opt-in)
+
+### Bug Fixes
+
+- **extract:** `.msi` goes through lessmsi/msiexec (7z mangles MSI names; MSIs were never extracted); `extract_dir` promotes the subdir up (was inverted and crashed); downloads stage under real URL basenames (`url_filename` semantics)
+- **persist:** existing store wins on upgrade (fresh content stashed as `.original`) instead of renaming over it (os error 5); junction unlink goes through the hardened helper; `cleanup` never deletes metadata-less version dirs and continues past locked ones with an in-use hint
+- **shim:** never write batch content into `{name}.exe` (os error 216, 77 apps affected); all flavors forward caller args (`%*`/`"$@"`/`@args`); missing targets warn loudly
+- **ci:** fix `outputs` block indentation (was an invalid workflow); bump `release-as` to `0.1.0-beta.10`
+
+---
+
 ## [0.1.0-beta.9](https://github.com/vincentmathis/bagger/compare/v0.1.0-beta.8...v0.1.0-beta.9) (2026-10-06)
 
 ### Bug Fixes
