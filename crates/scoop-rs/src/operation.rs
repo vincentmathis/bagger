@@ -304,6 +304,67 @@ pub fn install_dir(session: &Session, package: &Package) -> std::path::PathBuf {
     }
 }
 
+/// Resolve the architecture string for a package (`32bit`/`64bit`/`arm64`).
+///
+/// Honors the process-wide override (`--arch`/`SCOOP_ARCH`) first, then the
+/// manifest's architecture table, then the host default. Hook scripts
+/// observe this as `$architecture`, mirroring upstream Scoop.
+pub(crate) fn resolved_arch(pkg: &Package) -> String {
+    if let Some(arch) = crate::arch::override_arch() {
+        return arch.as_str().to_owned();
+    }
+
+    if let Some(arch) = pkg.manifest().architecture() {
+        if cfg!(target_arch = "x86") {
+            return if arch.ia32.is_some() {
+                "32bit".to_string()
+            } else if arch.amd64.is_some() {
+                "64bit".to_string()
+            } else if arch.aarch64.is_some() {
+                "arm64".to_string()
+            } else {
+                runtime_arch()
+            };
+        }
+        if cfg!(target_arch = "x86_64") {
+            return if arch.amd64.is_some() {
+                "64bit".to_string()
+            } else if arch.ia32.is_some() {
+                "32bit".to_string()
+            } else if arch.aarch64.is_some() {
+                "arm64".to_string()
+            } else {
+                runtime_arch()
+            };
+        }
+        if cfg!(target_arch = "aarch64") {
+            return if arch.aarch64.is_some() {
+                "arm64".to_string()
+            } else if arch.amd64.is_some() {
+                "64bit".to_string()
+            } else if arch.ia32.is_some() {
+                "32bit".to_string()
+            } else {
+                runtime_arch()
+            };
+        }
+    }
+    runtime_arch()
+}
+
+/// Determine the runtime architecture string.
+fn runtime_arch() -> String {
+    if cfg!(target_arch = "x86_64") {
+        "64bit".to_string()
+    } else if cfg!(target_arch = "x86") {
+        "32bit".to_string()
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64".to_string()
+    } else {
+        "64bit".to_string()
+    }
+}
+
 /// Result of a checkver operation.
 #[derive(Clone, Debug)]
 pub struct CheckverResult {

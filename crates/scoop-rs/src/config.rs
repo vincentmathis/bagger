@@ -300,6 +300,34 @@ impl Config {
         self.no_junction.unwrap_or_default()
     }
 
+    /// Whether operations are currently scoped to the global root.
+    ///
+    /// True when a runtime root override points at the global path
+    /// (e.g. after `Session::set_global(true)` for `--global` installs).
+    /// Hook scripts observe this as `$global`, mirroring upstream Scoop.
+    #[inline]
+    pub fn is_global_scope(&self) -> bool {
+        self.root_path() == self.global_path()
+    }
+
+    /// Get the `use_external_7zip` config.
+    ///
+    /// When enabled, `Expand-7zipArchive` resolves `7z` from `PATH`
+    /// instead of the Scoop `7zip` app.
+    #[inline]
+    pub fn use_external_7zip(&self) -> bool {
+        self.use_external_7zip.unwrap_or_default()
+    }
+
+    /// Get the `use_lessmsi` config.
+    ///
+    /// When enabled, `Expand-MsiArchive` extracts with the Scoop `lessmsi`
+    /// app; otherwise the system `msiexec.exe` is used.
+    #[inline]
+    pub fn use_lessmsi(&self) -> bool {
+        self.use_lessmsi.unwrap_or_default()
+    }
+
     /// Get the `proxy` config.
     #[inline]
     pub fn proxy(&self) -> Option<&str> {

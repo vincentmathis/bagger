@@ -671,7 +671,7 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 false => Some(pkg.bucket().to_owned()),
             };
             let install_info = InstallInfo::new(
-                get_arch_string(pkg),
+                crate::operation::resolved_arch(pkg),
                 install_bucket,
                 pkg.download_urls().first().map(|u| u.to_string()),
             );
@@ -752,62 +752,6 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 ///
 /// Honors the `--arch` override when set, so `install.json` records the
 /// architecture that was actually resolved.
-fn get_arch_string(pkg: &Package) -> String {
-    if let Some(arch) = crate::arch::override_arch() {
-        return arch.as_str().to_owned();
-    }
-
-    if let Some(arch) = pkg.manifest().architecture() {
-        if cfg!(target_arch = "x86") {
-            return if arch.ia32.is_some() {
-                "32bit".to_string()
-            } else if arch.amd64.is_some() {
-                "64bit".to_string()
-            } else if arch.aarch64.is_some() {
-                "arm64".to_string()
-            } else {
-                get_runtime_arch()
-            };
-        }
-        if cfg!(target_arch = "x86_64") {
-            return if arch.amd64.is_some() {
-                "64bit".to_string()
-            } else if arch.ia32.is_some() {
-                "32bit".to_string()
-            } else if arch.aarch64.is_some() {
-                "arm64".to_string()
-            } else {
-                get_runtime_arch()
-            };
-        }
-        if cfg!(target_arch = "aarch64") {
-            return if arch.aarch64.is_some() {
-                "arm64".to_string()
-            } else if arch.amd64.is_some() {
-                "64bit".to_string()
-            } else if arch.ia32.is_some() {
-                "32bit".to_string()
-            } else {
-                get_runtime_arch()
-            };
-        }
-    }
-    get_runtime_arch()
-}
-
-/// Determine the runtime architecture string.
-fn get_runtime_arch() -> String {
-    if cfg!(target_arch = "x86_64") {
-        "64bit".to_string()
-    } else if cfg!(target_arch = "x86") {
-        "32bit".to_string()
-    } else if cfg!(target_arch = "aarch64") {
-        "arm64".to_string()
-    } else {
-        "64bit".to_string()
-    }
-}
-
 /// Extract downloaded archives in the working directory.
 fn extract_package(
     session: &Session,

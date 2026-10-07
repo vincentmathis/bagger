@@ -2,7 +2,574 @@ use crate::error::Fallible;
 use crate::internal;
 use crate::package::Package;
 use crate::Session;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Quote a value as a PowerShell single-quoted string literal.
+fn ps_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Resolve the executable shipped by a Scoop helper app.
+///
+/// Mirrors upstream `Get-HelperPath`/`Get-AppFilePath`: the effective
+/// (user or global) root wins, then the configured global root. Each root
+/// prefers the `current` link and, when junctions are disabled, falls back
+/// to the newest version directory containing the executable.
+fn helper_exe(session: &Session, app: &str, rel_path: &str) -> Option<PathBuf> {
+    let config = session.config();
+    for base in [config.root_path(), config.global_path()] {
+        let app_dir = base.join("apps").join(app);
+        let current = app_dir.join("current").join(rel_path);
+        if current.is_file() {
+            return Some(current);
+        }
+        if config.no_junction() {
+            let mut best: Option<(PathBuf, String)> = None;
+            if let Ok(entries) = std::fs::read_dir(&app_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.eq_ignore_ascii_case("current") {
+                        continue;
+                    }
+                    let candidate = entry.path().join(rel_path);
+                    if !candidate.is_file() {
+                        continue;
+                    }
+                    let newer = match &best {
+                        Some((_, best_name)) => {
+                            internal::compare_versions(&name, best_name)
+                                == std::cmp::Ordering::Greater
+                        }
+                        None => true,
+                    };
+                    if newer {
+                        best = Some((candidate, name));
+                    }
+                }
+            }
+            if let Some((path, _)) = best {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Scoop-compatibility prelude prepended to every hook script.
+///
+/// Upstream Scoop executes manifest hook scripts (`pre_install`,
+/// `installer.script`, `post_install`, `pre_uninstall`, ...) in a scope
+/// populated with hook variables (`$dir`, `$version`, ...) and helper
+/// functions (`Expand-7zipArchive`, ...). The function definitions below
+/// are faithful ports of `lib/core.ps1`, `lib/decompress.ps1` and
+/// `lib/system.ps1` from ScoopInstaller/Scoop, reduced to the subset that
+/// is self-contained (no Scoop installation required on the machine).
+const HOOK_PRELUDE: &str = r##"
+function abort($msg, [int]$exit_code = 1) { Write-Host $msg -ForegroundColor Red; exit $exit_code }
+function error($msg) { Write-Host "ERROR $msg" -ForegroundColor DarkRed }
+function warn($msg) { Write-Host "WARN  $msg" -ForegroundColor DarkYellow }
+function info($msg) { Write-Host "INFO  $msg" -ForegroundColor DarkGray }
+function success($msg) { Write-Host $msg -ForegroundColor DarkGreen }
+function fname($path) { Split-Path $path -Leaf }
+function strip_ext($fname) { $fname -replace '\.[^\.]*$', '' }
+function friendly_path($path) {
+    $h = (Get-PSProvider 'FileSystem').Home
+    if (!$h.EndsWith('\')) { $h += '\' }
+    if ($h -eq '\') { return $path }
+    return $path -replace ([Regex]::Escape($h)), '~\'
+}
+function is_admin {
+    $admin = [security.principal.windowsbuiltinrole]::administrator
+    $id = [security.principal.windowsidentity]::getcurrent()
+    ([security.principal.windowsprincipal]($id)).isinrole($admin)
+}
+function Test-CommandAvailable {
+    param([String]$Name)
+    return [Boolean](Get-Command $Name -ErrorAction Ignore)
+}
+function ensure($dir) {
+    if (!(Test-Path -Path $dir)) { New-Item -Path $dir -ItemType Directory | Out-Null }
+    Convert-Path -Path $dir
+}
+function get_config($name, $default) {
+    $name = $name.ToLowerInvariant()
+    if ($null -eq $BaggerConfig[$name] -and $null -ne $default) { return $default }
+    return $BaggerConfig[$name]
+}
+function Get-HelperPath {
+    [CmdletBinding()]
+    [OutputType([String])]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [ValidateSet('Git', '7zip', 'Lessmsi', 'Innounp', 'Dark', 'Aria2')]
+        [String]$Helper
+    )
+    process {
+        $p = $BaggerHelpers[$Helper]
+        if ($p -and (Test-Path $p -PathType Leaf)) { return $p }
+        if ($Helper -eq 'Git') {
+            return (Get-Command git -CommandType Application -TotalCount 1 -ErrorAction Ignore).Source
+        }
+        return $null
+    }
+}
+function Test-HelperInstalled {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [ValidateSet('7zip', 'Lessmsi', 'Innounp', 'Dark', 'Aria2')]
+        [String]$Helper
+    )
+    return ![String]::IsNullOrWhiteSpace((Get-HelperPath -Helper $Helper))
+}
+function Publish-EnvVar {
+    if (-not ('Win32.NativeMethods' -as [Type])) {
+        Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+    }
+    $HWND_BROADCAST = [IntPtr] 0xffff
+    $WM_SETTINGCHANGE = 0x1a
+    $result = [UIntPtr]::Zero
+    [Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref] $result) | Out-Null
+}
+function Get-EnvVar {
+    param([string]$Name, [switch]$Global)
+    $registerKey = if ($Global) { Get-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' } else { Get-Item -Path 'HKCU:' }
+    $envRegisterKey = $registerKey.OpenSubKey('Environment')
+    $registryValueOption = [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+    $envRegisterKey.GetValue($Name, $null, $registryValueOption)
+}
+function Set-EnvVar {
+    param([string]$Name, [string]$Value, [switch]$Global)
+    $registerKey = if ($Global) { Get-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' } else { Get-Item -Path 'HKCU:' }
+    $envRegisterKey = $registerKey.OpenSubKey('Environment', $true)
+    if ($null -eq $Value -or $Value -eq '') {
+        if ($envRegisterKey.GetValue($Name)) { $envRegisterKey.DeleteValue($Name) }
+    } else {
+        $registryValueKind = if ($Value.Contains('%')) { [Microsoft.Win32.RegistryValueKind]::ExpandString }
+        elseif ($envRegisterKey.GetValue($Name)) { $envRegisterKey.GetValueKind($Name) }
+        else { [Microsoft.Win32.RegistryValueKind]::String }
+        $envRegisterKey.SetValue($Name, $Value, $registryValueKind)
+    }
+    Publish-EnvVar
+}
+function Split-PathLikeEnvVar {
+    param([string[]]$Pattern, [string]$Path)
+    if ($null -eq $Path -and $Path -eq '') { return $null, $null }
+    $splitPattern = $Pattern.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)
+    $splitPath = $Path.Split(';', [System.StringSplitOptions]::RemoveEmptyEntries)
+    $inPath = @()
+    foreach ($p in $splitPattern) {
+        $inPath += $splitPath.Where({ $_ -like $p })
+        $splitPath = $splitPath.Where({ $_ -notlike $p })
+    }
+    return ($inPath -join ';'), ($splitPath -join ';')
+}
+function Add-Path {
+    param([string[]]$Path, [string]$TargetEnvVar = 'PATH', [switch]$Global, [switch]$Force, [switch]$Quiet)
+    $inPath, $strippedPath = Split-PathLikeEnvVar $Path (Get-EnvVar -Name $TargetEnvVar -Global:$Global)
+    if (!$inPath -or $Force) {
+        if (!$Quiet) { $Path | ForEach-Object { Write-Host "Adding $(friendly_path $_) to $(if ($Global) {'global'} else {'your'}) path." } }
+        Set-EnvVar -Name $TargetEnvVar -Value ((@($Path) + $strippedPath) -join ';') -Global:$Global
+    }
+    $inPath, $strippedPath = Split-PathLikeEnvVar $Path $env:PATH
+    if (!$inPath -or $Force) { $env:PATH = (@($Path) + $strippedPath) -join ';' }
+}
+function Remove-Path {
+    param([string[]]$Path, [string]$TargetEnvVar = 'PATH', [switch]$Global, [switch]$Quiet, [switch]$PassThru)
+    $inPath, $strippedPath = Split-PathLikeEnvVar $Path (Get-EnvVar -Name $TargetEnvVar -Global:$Global)
+    if ($inPath) {
+        if (!$Quiet) { $Path | ForEach-Object { Write-Host "Removing $(friendly_path $_) from $(if ($Global) {'global'} else {'your'}) path." } }
+        Set-EnvVar -Name $TargetEnvVar -Value $strippedPath -Global:$Global
+    }
+    $inSessionPath, $strippedPath = Split-PathLikeEnvVar $Path $env:PATH
+    if ($inSessionPath) { $env:PATH = $strippedPath }
+    if ($PassThru) { return $inPath }
+}
+function Show-DeprecatedWarning {
+    param($Invocation, [String]$New)
+    warn ('"{0}" will be deprecated. Please change your code/manifest to use "{1}"' -f $Invocation.MyCommand.Name, $New)
+}
+function Invoke-ExternalCommand {
+    [CmdletBinding()]
+    [OutputType([Boolean])]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [String]$FilePath,
+        [Parameter(Position = 1)]
+        [String[]]$ArgumentList,
+        [Alias('Msg')]
+        [String]$Activity,
+        [Alias('cec')]
+        [Hashtable]$ContinueExitCodes,
+        [Alias('Log')]
+        [String]$LogPath
+    )
+    if ($Activity) { Write-Host "$Activity " -NoNewline }
+    try {
+        if ($LogPath -and ($FilePath -match '^msiexec(.exe)?$')) {
+            $ArgumentList += "/lwe `"$LogPath`""
+            & $FilePath @ArgumentList
+        } elseif ($LogPath) {
+            & $FilePath @ArgumentList 2>&1 | Out-File -FilePath $LogPath -Encoding utf8
+        } else {
+            & $FilePath @ArgumentList
+        }
+    } catch {
+        if ($Activity) { Write-Host 'Error.' -ForegroundColor DarkRed }
+        error $_.Exception.Message
+        return $false
+    }
+    if ($LASTEXITCODE -ne 0) {
+        if ($ContinueExitCodes -and ($ContinueExitCodes.ContainsKey($LASTEXITCODE))) {
+            if ($Activity) { Write-Host 'Done.' -ForegroundColor DarkYellow }
+            warn $ContinueExitCodes[$LASTEXITCODE]
+            return $true
+        }
+        if ($Activity) { Write-Host 'Error.' -ForegroundColor DarkRed }
+        error "Exit code was $LASTEXITCODE!"
+        return $false
+    }
+    if ($Activity) { Write-Host 'Done.' -ForegroundColor Green }
+    return $true
+}
+function movedir($from, $to) {
+    $from = $from.TrimEnd('\')
+    $to = $to.TrimEnd('\')
+    $proc = Start-Process -FilePath 'robocopy.exe' -ArgumentList "`"$from`"", "`"$to`"", '/e', '/move' -NoNewWindow -Wait -PassThru
+    if ($proc.ExitCode -ge 8) { throw "Could not move '$(fname $from)'! (robocopy error $($proc.ExitCode))" }
+    1..10 | ForEach-Object { if (Test-Path $from) { Start-Sleep -Milliseconds 100 } }
+}
+function Expand-7zipArchive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [String]$Path,
+        [Parameter(Position = 1)]
+        [String]$DestinationPath = (Split-Path $Path),
+        [String]$ExtractDir,
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [String]$Switches,
+        [ValidateSet('All', 'Skip', 'Rename')]
+        [String]$Overwrite,
+        [Switch]$Removal
+    )
+    if ((get_config USE_EXTERNAL_7ZIP)) {
+        try { $7zPath = (Get-Command '7z' -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source }
+        catch { abort "`nCannot find external 7-Zip (7z.exe) while 'use_external_7zip' is 'true'!`nRun 'bagger config set use_external_7zip false' or install 7-Zip manually and try again." }
+    } else {
+        $7zPath = Get-HelperPath -Helper 7zip
+    }
+    if (!$7zPath) { abort "Cannot find 7-Zip executable! Install the '7zip' app or set 'use_external_7zip' and try again." }
+    $LogPath = "$(Split-Path $Path)\7zip.log"
+    $DestinationPath = $DestinationPath.TrimEnd('\')
+    $ArgList = @('x', $Path, "-o$DestinationPath", '-xr!*.nsis', '-y')
+    $IsTar = ((strip_ext $Path) -match '\.tar$') -or ($Path -match '\.t[abgpx]z2?$')
+    if (!$IsTar -and $ExtractDir) { $ArgList += "-ir!$ExtractDir\*" }
+    if ($Switches) { $ArgList += (-split $Switches) }
+    switch ($Overwrite) {
+        'All' { $ArgList += '-aoa' }
+        'Skip' { $ArgList += '-aos' }
+        'Rename' { $ArgList += '-aou' }
+    }
+    $Status = Invoke-ExternalCommand $7zPath $ArgList -LogPath $LogPath
+    if (!$Status) { abort "Failed to extract files from $Path.`nLog file:`n  $(friendly_path $LogPath)" }
+    if ($IsTar) {
+        $Status = Invoke-ExternalCommand $7zPath @('l', $Path) -LogPath $LogPath
+        if ($Status) {
+            $TarFile = (Select-String -Path $LogPath -Pattern '[^ ]*tar$').Matches.Value
+            Expand-7zipArchive -Path "$DestinationPath\$TarFile" -DestinationPath $DestinationPath -ExtractDir $ExtractDir -Removal
+        } else {
+            abort "Failed to list files in $Path.`nNot a 7-Zip supported archive file."
+        }
+    }
+    if (!$IsTar -and $ExtractDir) {
+        movedir "$DestinationPath\$ExtractDir" $DestinationPath | Out-Null
+        $ExtractDirTopPath = [string] "$DestinationPath\$($ExtractDir -replace '[\\/].*')"
+        if ((Get-ChildItem -Path $ExtractDirTopPath -Force -ErrorAction Ignore).Count -eq 0) {
+            Remove-Item -Path $ExtractDirTopPath -Recurse -Force -ErrorAction Ignore
+        }
+    }
+    if (Test-Path $LogPath) { Remove-Item $LogPath -Force }
+    if ($Removal) {
+        if (($Path -replace '.*\.([^\.]*)$', '$1') -eq '001') {
+            Get-ChildItem "$($Path -replace '\.[^\.]*$', '').???" | Remove-Item -Force
+        } elseif (($Path -replace '.*\.part(\d+)\.rar$', '$1')[-1] -eq '1') {
+            Get-ChildItem "$($Path -replace '\.part(\d+)\.rar$', '').part*.rar" | Remove-Item -Force
+        } else {
+            Remove-Item $Path -Force
+        }
+    }
+}
+function Expand-ZstdArchive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [String]$Path,
+        [Parameter(Position = 1)]
+        [String]$DestinationPath = (Split-Path $Path),
+        [String]$ExtractDir,
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [String]$Switches,
+        [Switch]$Removal
+    )
+    Show-DeprecatedWarning $MyInvocation 'Expand-7zipArchive'
+    Expand-7zipArchive -Path $Path -DestinationPath $DestinationPath -ExtractDir $ExtractDir -Switches $Switches -Removal:$Removal
+}
+function Expand-MsiArchive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [String]$Path,
+        [Parameter(Position = 1)]
+        [String]$DestinationPath = (Split-Path $Path),
+        [String]$ExtractDir,
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [String]$Switches,
+        [Switch]$Removal
+    )
+    $DestinationPath = $DestinationPath.TrimEnd('\')
+    if ($ExtractDir) {
+        $OriDestinationPath = $DestinationPath
+        $DestinationPath = "$DestinationPath\_tmp"
+    }
+    if ((get_config USE_LESSMSI)) {
+        $MsiPath = Get-HelperPath -Helper Lessmsi
+        if (!$MsiPath) { abort "Cannot find Lessmsi executable! Install the 'lessmsi' app or unset 'use_lessmsi' and try again." }
+        $ArgList = @('x', $Path, "$DestinationPath\")
+    } else {
+        $MsiPath = 'msiexec.exe'
+        $ArgList = @('/a', $Path, '/qn', "TARGETDIR=$DestinationPath\SourceDir")
+    }
+    $LogPath = "$(Split-Path $Path)\msi.log"
+    if ($Switches) { $ArgList += (-split $Switches) }
+    $Status = Invoke-ExternalCommand $MsiPath $ArgList -LogPath $LogPath
+    if (!$Status) { abort "Failed to extract files from $Path.`nLog file:`n  $(friendly_path $LogPath)" }
+    if ($ExtractDir -and (Test-Path "$DestinationPath\SourceDir")) {
+        movedir "$DestinationPath\SourceDir\$ExtractDir" $OriDestinationPath | Out-Null
+        Remove-Item $DestinationPath -Recurse -Force
+    } elseif ($ExtractDir) {
+        movedir "$DestinationPath\$ExtractDir" $OriDestinationPath | Out-Null
+        Remove-Item $DestinationPath -Recurse -Force
+    } elseif (Test-Path "$DestinationPath\SourceDir") {
+        movedir "$DestinationPath\SourceDir" $DestinationPath | Out-Null
+    }
+    if (($DestinationPath -ne (Split-Path $Path)) -and (Test-Path "$DestinationPath\$(fname $Path)")) {
+        Remove-Item "$DestinationPath\$(fname $Path)" -Force
+    }
+    if (Test-Path $LogPath) { Remove-Item $LogPath -Force }
+    if ($Removal) { Remove-Item $Path -Force }
+}
+function Expand-InnoArchive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [String]$Path,
+        [Parameter(Position = 1)]
+        [String]$DestinationPath = (Split-Path $Path),
+        [String]$ExtractDir,
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [String]$Switches,
+        [Switch]$Removal
+    )
+    $LogPath = "$(Split-Path $Path)\innounp.log"
+    $ArgList = @('-x', "-d$DestinationPath", $Path, '-y')
+    switch -Regex ($ExtractDir) {
+        '^[^{].*' { $ArgList += "-c{app}\$ExtractDir" }
+        '^{.*' { $ArgList += "-c$ExtractDir" }
+        Default { $ArgList += '-c{app}' }
+    }
+    if ($Switches) { $ArgList += (-split $Switches) }
+    $InnounpPath = Get-HelperPath -Helper Innounp
+    if (!$InnounpPath) { abort "Cannot find Innounp executable! Install the 'innounp' app and try again." }
+    $Status = Invoke-ExternalCommand $InnounpPath $ArgList -LogPath $LogPath
+    if (!$Status) { abort "Failed to extract files from $Path.`nLog file:`n  $(friendly_path $LogPath)" }
+    if (Test-Path $LogPath) { Remove-Item $LogPath -Force }
+    if ($Removal) { Remove-Item $Path -Force }
+}
+function Expand-ZipArchive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [String]$Path,
+        [Parameter(Position = 1)]
+        [String]$DestinationPath = (Split-Path $Path),
+        [String]$ExtractDir,
+        [Switch]$Removal
+    )
+    if ($ExtractDir) {
+        $OriDestinationPath = $DestinationPath
+        $DestinationPath = "$DestinationPath\_tmp"
+    }
+    $oldProgressPreference = $ProgressPreference
+    $global:ProgressPreference = 'SilentlyContinue'
+    Microsoft.PowerShell.Archive\Expand-Archive -Path $Path -DestinationPath $DestinationPath -Force
+    $global:ProgressPreference = $oldProgressPreference
+    if ($ExtractDir) {
+        movedir "$DestinationPath\$ExtractDir" $OriDestinationPath | Out-Null
+        Remove-Item $DestinationPath -Recurse -Force
+    }
+    if ($Removal) { Remove-Item $Path -Force }
+}
+function Expand-DarkArchive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true)]
+        [String]$Path,
+        [Parameter(Position = 1)]
+        [String]$DestinationPath = (Split-Path $Path),
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [String]$Switches,
+        [Switch]$Removal
+    )
+    $LogPath = "$(Split-Path $Path)\dark.log"
+    $DarkPath = Get-HelperPath -Helper Dark
+    if (!$DarkPath) { abort "Cannot find Dark (WiX) executable! Install the 'dark' app and try again." }
+    if ((Split-Path $DarkPath -Leaf) -eq 'wix.exe') {
+        $ArgList = @('burn', 'extract', $Path, '-out', $DestinationPath, '-outba', "$DestinationPath\UX")
+    } else {
+        $ArgList = @('-nologo', '-x', $DestinationPath, $Path)
+    }
+    if ($Switches) { $ArgList += (-split $Switches) }
+    $Status = Invoke-ExternalCommand $DarkPath $ArgList -LogPath $LogPath
+    if (!$Status) { abort "Failed to extract files from $Path.`nLog file:`n  $(friendly_path $LogPath)" }
+    if (Test-Path "$DestinationPath\WixAttachedContainer") {
+        Rename-Item "$DestinationPath\WixAttachedContainer" 'AttachedContainer' -ErrorAction Ignore
+    } else {
+        if (Test-Path "$DestinationPath\AttachedContainer\a0") {
+            $Xml = [xml](Get-Content -Raw "$DestinationPath\UX\manifest.xml" -Encoding utf8)
+            $Xml.BurnManifest.UX.Payload | ForEach-Object {
+                Rename-Item "$DestinationPath\UX\$($_.SourcePath)" $_.FilePath -ErrorAction Ignore
+            }
+            $Xml.BurnManifest.Payload | ForEach-Object {
+                Rename-Item "$DestinationPath\AttachedContainer\$($_.SourcePath)" $_.FilePath -ErrorAction Ignore
+            }
+        }
+    }
+    if (Test-Path $LogPath) { Remove-Item $LogPath -Force }
+    if ($Removal) { Remove-Item $Path -Force }
+}
+function uninstall_rm($item) {
+    if (Test-Path $item) { Remove-Item $item -Recurse -Force }
+}
+"##;
+
+/// Build the hook-script prelude: variables plus [`HOOK_PRELUDE`].
+///
+/// The variables mirror the locals visible to hook scripts in upstream
+/// Scoop (`install_app`/`uninstall_app` scope): `$dir` is the version
+/// directory being committed, `$version`/`$architecture` describe the
+/// package, and `$global` is a real boolean (unlike the legacy
+/// stringly-typed environment fallback).
+pub(crate) fn build_prelude(session: &Session, package: &Package, working_dir: &Path) -> String {
+    let config = session.config();
+    let root = config.root_path();
+    let version = package.version().to_string();
+    let app_dir = root.join("apps").join(package.name());
+    let bucket_dir = root.join("buckets").join(package.bucket());
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "$dir = {}\n",
+        ps_quote(&working_dir.to_string_lossy())
+    ));
+    out.push_str(&format!("$version = {}\n", ps_quote(&version)));
+    out.push_str(&format!(
+        "$architecture = {}\n",
+        ps_quote(&crate::operation::resolved_arch(package))
+    ));
+    out.push_str(&format!("$app = {}\n", ps_quote(package.name())));
+    out.push_str(&format!("$bucket = {}\n", ps_quote(package.bucket())));
+    out.push_str(&format!(
+        "$bucketdir = {}\n",
+        ps_quote(&bucket_dir.to_string_lossy())
+    ));
+    let fnames: Vec<String> = package
+        .download_filenames()
+        .iter()
+        .map(|f| ps_quote(f))
+        .collect();
+    out.push_str(&format!("$fname = @({})\n", fnames.join(", ")));
+    out.push_str(&format!(
+        "$global = {}\n",
+        if config.is_global_scope() {
+            "$true"
+        } else {
+            "$false"
+        }
+    ));
+    out.push_str(&format!(
+        "$original_dir = {}\n",
+        ps_quote(&app_dir.join(&version).to_string_lossy())
+    ));
+    out.push_str(&format!(
+        "$persist_dir = {}\n",
+        ps_quote(&root.join("persist").join(package.name()).to_string_lossy())
+    ));
+    let scoop_path_var = match config.use_isolated_path() {
+        None => "PATH".to_string(),
+        Some(crate::config::IsolatedPath::Boolean(true)) => "SCOOP_PATH".to_string(),
+        Some(crate::config::IsolatedPath::Boolean(false)) => "PATH".to_string(),
+        Some(crate::config::IsolatedPath::Named(name)) => name.to_uppercase(),
+    };
+    out.push_str(&format!(
+        "$scoopPathEnvVar = {}\n",
+        ps_quote(&scoop_path_var)
+    ));
+
+    let helper = |app: &str, rel: &str| {
+        helper_exe(session, app, rel)
+            .map(|p| ps_quote(&p.to_string_lossy()))
+            .unwrap_or_else(|| "''".to_string())
+    };
+    let innounp = helper("innounp-unicode", "innounp.exe");
+    let innounp = if innounp == "''" {
+        helper("innounp", "innounp.exe")
+    } else {
+        innounp
+    };
+    let dark = helper("dark", "dark.exe");
+    let dark = if dark == "''" {
+        helper("wixtoolset", "wix.exe")
+    } else {
+        dark
+    };
+    let git = helper("git", "mingw64/bin/git.exe");
+    let git = if git == "''" {
+        helper("git", "mingw32/bin/git.exe")
+    } else {
+        git
+    };
+    out.push_str(&format!(
+        "$BaggerHelpers = @{{ 'Git' = {git}; '7zip' = {seven}; 'Lessmsi' = {less}; 'Innounp' = {innounp}; 'Dark' = {dark}; 'Aria2' = {aria} }}\n",
+        seven = helper("7zip", "7z.exe"),
+        less = helper("lessmsi", "lessmsi.exe"),
+        aria = helper("aria2", "aria2c.exe"),
+    ));
+    out.push_str(&format!(
+        "$BaggerConfig = @{{ 'use_external_7zip' = {ext}; 'use_lessmsi' = {less}; 'no_junction' = {noj} }}\n",
+        ext = if config.use_external_7zip() {
+            "$true"
+        } else {
+            "$false"
+        },
+        less = if config.use_lessmsi() {
+            "$true"
+        } else {
+            "$false"
+        },
+        noj = if config.no_junction() {
+            "$true"
+        } else {
+            "$false"
+        },
+    ));
+
+    out.push_str(HOOK_PRELUDE);
+    out
+}
 
 /// Build the Scoop PowerShell execution context variables.
 ///
@@ -25,34 +592,18 @@ fn build_context_variables(
         .to_string();
 
     let version = package.version().to_string();
-    let arch = package
-        .manifest()
-        .architecture()
-        .map(|a| {
-            if cfg!(target_arch = "x86_64") && a.amd64.is_some() {
-                "64bit"
-            } else if cfg!(target_arch = "aarch64") && a.aarch64.is_some() {
-                "arm64"
-            } else if cfg!(target_arch = "x86") && a.ia32.is_some() {
-                "32bit"
-            } else {
-                "64bit"
-            }
-        })
-        .unwrap_or("64bit")
-        .to_string();
+    let arch = crate::operation::resolved_arch(package);
 
     let dir = working_dir.to_string_lossy().to_string();
 
-    let global = if config.use_isolated_path().is_some() {
-        "1"
-    } else {
-        "0"
-    }
-    .to_string();
+    let global = if config.is_global_scope() { "1" } else { "0" }.to_string();
 
     vec![
         ("SCOOP", root_path),
+        (
+            "SCOOP_GLOBAL",
+            config.global_path().to_string_lossy().to_string(),
+        ),
         ("SCOOP_BUCKET", bucket.to_string()),
         ("SCOOP_BUCKET_DIR", bucket_path.clone()),
         ("SCOOP_PACKAGE", package.name().to_string()),
@@ -88,8 +639,13 @@ pub fn invoke_script(
     script: &[&str],
     working_dir: &Path,
 ) -> Fallible<()> {
-    // Build the PowerShell script from the lines
-    let ps_script = script.join("\n");
+    // Prepend the Scoop-compatibility prelude (hook variables + helpers)
+    // so manifest scripts observe the same scope as under upstream Scoop.
+    let ps_script = format!(
+        "{}{}",
+        build_prelude(session, package, working_dir),
+        script.join("\n")
+    );
 
     // Build environment variables for the PowerShell context
     let env_vars = build_context_variables(session, package, cmd, working_dir);
@@ -149,7 +705,13 @@ pub fn invoke_script_capture(
     script: &[&str],
     working_dir: &Path,
 ) -> Fallible<String> {
-    let ps_script = script.join("\n");
+    // Same prelude as `invoke_script`; definitions and assignments are
+    // silent, so captured stdout still carries only the script's output.
+    let ps_script = format!(
+        "{}{}",
+        build_prelude(session, package, working_dir),
+        script.join("\n")
+    );
     let env_vars = build_context_variables(session, package, cmd, working_dir);
 
     let mut command = std::process::Command::new("powershell.exe");
