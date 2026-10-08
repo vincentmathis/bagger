@@ -488,6 +488,18 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
     // what will actually be committed.
     let packages = filter_running(session, packages)?;
 
+    // Upstream aborts installs whose manifest version contains characters
+    // outside `[\w.\-+_]`.
+    for pkg in packages.iter() {
+        if !valid_manifest_version(pkg.version()) {
+            return Err(Error::Custom(format!(
+                "manifest version '{}' of '{}' has unsupported characters (allowed: letters, digits, '.', '-', '+', '_')",
+                pkg.version(),
+                pkg.name()
+            )));
+        }
+    }
+
     let (installed, installable): (Vec<_>, Vec<_>) =
         packages.into_iter().partition(|p| p.is_installed());
 
@@ -633,6 +645,30 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 
             let files = pkg.download_filenames();
             let hashes = pkg.download_hashes();
+            if hashes.is_empty() {
+                // Upstream prints the computed SHA256 for hash-less
+                // manifests so authors can fill it in.
+                for filename in files.iter() {
+                    let path = cache_root.join(filename);
+                    let mut hasher = ChecksumBuilder::new().sha256().build();
+                    let mut file = std::fs::File::open(&path)
+                        .map_err(|_| Error::InvalidCacheFile { path: path.clone() })?;
+                    loop {
+                        let len = file.read(&mut buf)?;
+                        if len == 0 {
+                            break;
+                        }
+                        hasher.consume(&buf[..len]);
+                    }
+                    eprintln!(
+                        "warning: no hash in manifest for '{}'. SHA256 for '{}' is:\n    {}",
+                        pkg.name(),
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        hasher.finalize()
+                    );
+                }
+                continue;
+            }
             let files_cnt = files.len();
 
             for (idx, (filename, hash)) in files.into_iter().zip(hashes).enumerate() {
@@ -708,6 +744,17 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             }
 
             let working_dir = apps_dir.join(pkg.name()).join(pkg.version());
+            // A previous failed attempt leaves a metadata-less directory
+            // behind; purge it before staging (upstream `ensure_none_failed`).
+            // Mutually exclusive with the force rotation below, which needs
+            // the markers to be present.
+            if purge_failed_dir(&apps_dir.join(pkg.name()), pkg.version())? {
+                info!(
+                    "purged previous failed install of '{}' ({})",
+                    pkg.name(),
+                    pkg.version()
+                );
+            }
             if force
                 && (working_dir.join("install.json").exists()
                     || working_dir.join("manifest.json").exists())
@@ -915,6 +962,42 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 ///
 /// Honors the `--arch` override when set, so `install.json` records the
 /// architecture that was actually resolved.
+/// Whether a manifest version only holds upstream-supported characters
+/// (`install_app` aborts otherwise).
+fn valid_manifest_version(version: &str) -> bool {
+    !version.is_empty()
+        && version
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+}
+
+/// Remove a previous failed install: a version directory without install
+/// metadata. Mirrors the purge half of upstream `ensure_none_failed`.
+/// Never touches the directory `current` points at (a pending upgrade is
+/// not garbage, it gets repaired in place). Returns whether anything was
+/// purged.
+fn purge_failed_dir(app_dir: &std::path::Path, version: &str) -> Fallible<bool> {
+    let working_dir = app_dir.join(version);
+    if !working_dir.is_dir()
+        || working_dir.join("install.json").exists()
+        || working_dir.join("manifest.json").exists()
+    {
+        return Ok(false);
+    }
+    // The live directory (behind `current`) is a pending upgrade, not a
+    // failed install — leave it alone.
+    let current = app_dir.join("current");
+    if current.exists() {
+        if let (Ok(link), Ok(dir)) = (current.canonicalize(), working_dir.canonicalize()) {
+            if link == dir {
+                return Ok(false);
+            }
+        }
+    }
+    internal::fs::remove_dir(&working_dir)?;
+    Ok(true)
+}
+
 /// Rotate an existing version directory aside to `_<version>.old`
 /// (`_<version>.old(N)` when taken), mirroring upstream `update -f`.
 /// Returns the backup path.
@@ -1670,6 +1753,56 @@ mod tests {
         std::fs::create_dir_all(app.join("1.0")).unwrap();
         let second = rotate_version_dir(&app, "1.0").unwrap();
         assert_eq!(second, app.join("_1.0.old(1)"));
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn manifest_versions_reject_upstream_unsupported_chars() {
+        for good in ["1.0", "2.7.0", "nightly", "1.0-beta+2", "2024.01_rc1"] {
+            assert!(valid_manifest_version(good), "{good}");
+        }
+        for bad in ["", "1.0 beta", "v1/0", "1.0?", "a:b", "x$y"] {
+            assert!(!valid_manifest_version(bad), "{bad}");
+        }
+    }
+
+    /// Stale version dirs (no install metadata) are purged, but healthy
+    /// installs and the `current`-live directory are never touched.
+    #[test]
+    fn purge_failed_dir_only_purges_stale_dirs() {
+        let base = std::env::temp_dir().join("bagger-test-purge");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("myapp");
+        // Stale: purged.
+        std::fs::create_dir_all(app.join("1.0")).unwrap();
+        std::fs::write(app.join("1.0/partial.bin"), b"x").unwrap();
+        assert!(purge_failed_dir(&app, "1.0").unwrap());
+        assert!(!app.join("1.0").exists());
+        // Missing: nothing to do.
+        assert!(!purge_failed_dir(&app, "9.9").unwrap());
+        // Healthy (markers present): kept.
+        std::fs::create_dir_all(app.join("2.0")).unwrap();
+        std::fs::write(app.join("2.0/install.json"), "{}").unwrap();
+        assert!(!purge_failed_dir(&app, "2.0").unwrap());
+        assert!(app.join("2.0/install.json").exists());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The `current`-live directory is a pending upgrade, not garbage —
+    /// even without markers it must survive the purge.
+    #[test]
+    #[cfg(windows)]
+    fn purge_failed_dir_spares_live_current() {
+        let base = std::env::temp_dir().join("bagger-test-purge-live");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("myapp");
+        std::fs::create_dir_all(app.join("3.0")).unwrap();
+        crate::internal::fs::symlink_dir(&app.join("3.0"), &app.join("current")).unwrap();
+
+        assert!(!purge_failed_dir(&app, "3.0").unwrap());
+        assert!(app.join("3.0").is_dir());
 
         std::fs::remove_dir_all(&base).ok();
     }

@@ -264,7 +264,7 @@ impl<'a> PackageSet<'a> {
         let aria2_opts = internal::aria2::DownloadOptions {
             user_agent,
             cookie: String::new(),
-            proxy,
+            proxy: proxy.clone(),
             split,
             max_connection_per_server,
             min_split_size,
@@ -310,7 +310,10 @@ impl<'a> PackageSet<'a> {
                     cookie: cookie.clone(),
                     ..aria2_opts.clone()
                 };
-                internal::aria2::download_file(dlinfo.url, &tmp, &opts)?;
+                // Special hosts (FossHub handshake, SourceForge reshape)
+                // resolve to the real file URL before fetching.
+                let fetch_url = crate::operation::resolve_special_url(dlinfo.url, proxy.as_deref());
+                internal::aria2::download_file(&fetch_url, &tmp, &opts)?;
 
                 filepaths.push((tmp, path));
             }
@@ -367,7 +370,11 @@ impl<'a> PackageSet<'a> {
 
                 let mut easy = Easy::new();
                 easy.get(true)?;
-                easy.url(dlinfo.url)?;
+                // Special hosts (FossHub handshake, SourceForge reshape)
+                // resolve to the real file URL before fetching. Cache keys
+                // and staged names intentionally keep the original URL.
+                let fetch_url = crate::operation::resolve_special_url(dlinfo.url, proxy);
+                easy.url(&fetch_url)?;
                 easy.follow_location(true)?;
                 easy.useragent(user_agent)?;
                 easy.fail_on_error(true)?;
@@ -379,6 +386,9 @@ impl<'a> PackageSet<'a> {
                     &cookie,
                     &crate::operation::headers_for_url(self.session, dlinfo.url),
                 )?;
+                if let Some(referer) = referer_for_url(dlinfo.url) {
+                    easy.referer(&referer)?;
+                }
 
                 if let Some(tx) = self.session.emitter() {
                     let ident = cache.package.ident();
@@ -569,6 +579,43 @@ impl<'a> PackageSet<'a> {
         }
 
         Ok(DownloadSize { total, estimated })
+    }
+}
+
+/// Upstream sets `Referer` to the file's directory, except for
+/// sourceforge/portableapps hosts. Non-HTTP(S) URLs get none.
+fn referer_for_url(url: &str) -> Option<String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return None;
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("sourceforge.net") || lower.contains("portableapps.com") {
+        return None;
+    }
+    let stripped = url.split('#').next().unwrap_or(url);
+    Some(stripped.rsplit_once('/')?.0.to_owned())
+}
+
+#[cfg(test)]
+mod referer_tests {
+    use super::referer_for_url;
+
+    #[test]
+    fn referer_points_at_file_directory() {
+        assert_eq!(
+            referer_for_url("https://example.com/dir/app-1.0.zip"),
+            Some("https://example.com/dir".to_owned())
+        );
+        assert_eq!(
+            referer_for_url("https://example.com/dir/app.zip?dl=1#/dl.7z"),
+            Some("https://example.com/dir".to_owned())
+        );
+        assert_eq!(referer_for_url("file:///C:/x/y.cmd"), None);
+        assert_eq!(
+            referer_for_url("https://downloads.sourceforge.net/project/a/b.exe"),
+            None
+        );
+        assert_eq!(referer_for_url("https://portableapps.com/apps/a.exe"), None);
     }
 }
 

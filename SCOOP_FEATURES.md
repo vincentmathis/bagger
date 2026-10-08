@@ -278,12 +278,8 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 ## Missing Features (Medium Priority)
 
 - **`app@version` install targets** - `scoop install gh@2.7.0` / `url@version` / `path@version` (upstream resolves via sqlite cache, git history, or generated user manifests); bagger accepts names, URLs, and local files but no `@version` pinning yet (`use_git_history` only matters with this)
-- **`ensure_none_failed`** - upstream repairs (reset) or purges previous failed installs before installing; bagger installs over the existing dir
 - **Nightly version stamping** - upstream renames `version: nightly` to `nightly-yyyyMMdd` (hash check skipped) with `update_nightly` config gating daily updates; bagger skips the hash check but installs under the literal `nightly` version
-- **Manifest version validation** - upstream aborts installs whose version contains characters outside `[\w.\-+_]`
-- **FossHub download handshake** - upstream resolves FossHub URLs via a POST to `api.fosshub.com` before downloading; bagger only scrapes FossHub hash pages, so FossHub-hosted files would download as HTML
-- **`Referer` header** - upstream sets `Referer` to the file's directory (except sourceforge/portableapps); bagger sends none
-- **No-hash SHA256 print** - upstream prints the computed SHA256 when a manifest has no hash (for manifest authors); bagger accepts silently
+- **GitHub private-release downloads** - upstream resolves private `releases/download` URLs via the API when a token is configured; bagger authenticates api.github.com metadata calls but does not rewrite private asset URLs (token + per-host headers are honored on plain downloads)
 - **Known divergences (deliberate)** - `aria2-enabled` defaults off (upstream: on); `bagger update` takes no app args (upstream `update <app>` upgrades; use `bagger upgrade`); `update -f` spelling is `upgrade --force`; missing shim targets warn instead of aborting the install
 
 ## Previously Missing - Now Implemented (this iteration)
@@ -336,6 +332,8 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 52. **Dead config keys wired** - `gh_token` (env-precedence resolution, `Bearer` auth on api.github.com with 401/rate-limit hints), `private_hosts` (regex match + `=`/`:` headers on curl downloads), `force_update` (implies `--force`), `show_update_log` (per-bucket commit logs via rev capture + `BucketUpdateLog` event), `last_update` (readable now), `debug` (log floor), `default_architecture` (lowest-precedence arch default; was parsed under a misspelled key), `aria2-fallback-enabled` (new, default on); `config set` accepts all of them with value validation
 53. **Force reinstall** - `upgrade --force` (long-only; `-f` stays `--ignore-failure`) reinstalls current versions, rotating the old dir to `_<version>.old` (`(N)` sequence); confirm UI no longer panics on same-version entries; proven live (rotation chain `_.old`→`.old(1)`→…, installer rerun verified by marker resurrection, `force_update` config path too)
 54. **aria2 failure fallback + misc upstream hints** - failed aria2c downloads warn with the exit-code meaning and retry via curl (structured `Error::Aria2`; stale `.aria2` control files cleaned); missing-binary warning is now visible instead of trace-only; SourceForge hash mismatches print upstream's retry hint; proven with a fake failing `aria2c.exe` (fallback success + disabled-abort unit tests)
+55. **Failed-install purge + version validation + no-hash print** - version dirs without install metadata are purged before staging (upstream `ensure_none_failed`'s purge half), except the `current`-live directory (a pending upgrade, repaired in place); manifest versions outside `[\w.\-+_]` abort with the allowed set; hash-less manifests print the computed SHA256 in upstream's exact format; all proven live (stale-dir replacement, clean abort message, byte-identical warning)
+56. **Download URL handling parity** - `Referer` set to the file's directory on downloads (never on size probes, never for sourceforge/portableapps — verified against a logging local server: probe had none, download had the directory); FossHub page URLs run the download-API handshake and `/download` SourceForge URLs reshape to the direct mirror form, with cache keys and staged names keeping the original URL; pure transforms unit-tested (live FossHub handshake unverifiable — the site is now JS-driven with no static `?dwl=` links left)
 
 ## Build & Distribution
 

@@ -51,6 +51,39 @@ pub fn fetch_url_with_headers(
     String::from_utf8(raw).ok().map(|body| (code, body))
 }
 
+/// POST a JSON body, returning the HTTP status code and response text.
+pub fn post_json(url: &str, proxy: Option<&str>, body: &str) -> Option<(u32, String)> {
+    use curl::easy::List;
+
+    let mut easy = Easy::new();
+    easy.url(url).ok()?;
+    if let Some(proxy) = proxy {
+        easy.proxy(proxy).ok()?;
+    }
+    easy.follow_location(true).ok()?;
+    easy.connect_timeout(Duration::from_secs(30)).ok()?;
+    easy.useragent(DEFAULT_USER_AGENT).ok()?;
+    let mut headers = List::new();
+    headers.append("Content-Type: application/json").ok()?;
+    easy.http_headers(headers).ok()?;
+    easy.post_fields_copy(body.as_bytes()).ok()?;
+
+    let mut content = Vec::new();
+    {
+        let mut transfer = easy.transfer();
+        transfer
+            .write_function(|data| {
+                content.extend_from_slice(data);
+                Ok(data.len())
+            })
+            .ok()?;
+        transfer.perform().ok()?;
+    }
+
+    let code = easy.response_code().unwrap_or(0);
+    String::from_utf8(content).ok().map(|body| (code, body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

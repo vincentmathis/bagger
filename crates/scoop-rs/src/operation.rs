@@ -1096,6 +1096,88 @@ pub fn headers_for_url(session: &Session, url: &str) -> Vec<(String, String)> {
     headers
 }
 
+/// Resolve special download URLs before fetching (upstream
+/// `handle_special_urls`):
+///
+/// - FossHub pages go through the download-API handshake (the page URL
+///   alone serves HTML, not the file).
+/// - `sourceforge.net/…/download` URLs are reshaped to the direct
+///   `downloads.sourceforge.net` form, avoiding mirror bounces.
+///
+/// Anything unrecognized (or any handshake failure) returns the URL
+/// unchanged.
+pub fn resolve_special_url(url: &str, proxy: Option<&str>) -> String {
+    if let Some(direct) = reshape_sourceforge_url(url) {
+        return direct;
+    }
+    if url.contains("fosshub.com/") {
+        if let Some(direct) = resolve_fosshub_url(url, proxy) {
+            return direct;
+        }
+    }
+    url.to_owned()
+}
+
+/// Split a FossHub page URL into `(projectUri, fileName)`, mirroring the
+/// upstream match groups.
+fn split_fosshub_url(url: &str) -> Option<(String, String)> {
+    let re =
+        regex::Regex::new(r"^(?:.*fosshub\.com/)(?P<name>.*)(?:/|\?dwl=)(?P<filename>.*)$").ok()?;
+    let caps = re.captures(url)?;
+    Some((
+        caps.name("name")?.as_str().to_owned(),
+        caps.name("filename")?.as_str().to_owned(),
+    ))
+}
+
+/// Reshape `…sourceforge.net/projects?/<project>/[files/]<file>[/download|?…]`
+/// to `https://downloads.sourceforge.net/project/<project>/<file>`.
+fn reshape_sourceforge_url(url: &str) -> Option<String> {
+    let re = regex::Regex::new(
+        r"(?:downloads\.)?sourceforge\.net/projects?/(?P<project>[^/]+)/(?:files/)?(?P<file>.*?)(?:$|/download|\?)",
+    )
+    .ok()?;
+    let caps = re.captures(url)?;
+    let file = caps.name("file")?.as_str();
+    if file.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "https://downloads.sourceforge.net/project/{}/{}",
+        caps.name("project")?.as_str(),
+        file
+    ))
+}
+
+/// Run the FossHub download handshake: fetch the page for the embedded
+/// `projectId`/`releaseId`, then POST to the download API for the file URL.
+fn resolve_fosshub_url(page_url: &str, proxy: Option<&str>) -> Option<String> {
+    let (name, filename) = split_fosshub_url(page_url)?;
+    let page = internal::network::fetch_url(page_url, proxy)?;
+    let ids =
+        regex::Regex::new(r#""p":"(?P<pid>[a-f0-9]{24}).*?"r":"(?P<rid>[a-f0-9]{24})"#).ok()?;
+    let caps = ids.captures(&page)?;
+    let body = serde_json::json!({
+        "projectUri": name,
+        "fileName": filename,
+        "source": "CF",
+        "isLatestVersion": true,
+        "projectId": &caps["pid"],
+        "releaseId": &caps["rid"],
+    })
+    .to_string();
+    let (code, response) =
+        internal::network::post_json("https://api.fosshub.com/download/", proxy, &body)?;
+    if code != 200 {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(&response).ok()?;
+    if !json.get("error").map(|e| e.is_null()).unwrap_or(false) {
+        return None;
+    }
+    json.get("data")?.get("url")?.as_str().map(str::to_owned)
+}
+
 /// Fetch a GitHub API URL, authenticating when a token is configured
 /// (upstream `Bearer` + API-version headers).
 ///
@@ -2153,6 +2235,45 @@ mod tests {
         assert!(super::headers_for_url(&session, "https://example.com/f.7z").is_empty());
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Special-URL handling (upstream `handle_special_urls`): FossHub page
+    /// URLs split into project/file groups, SourceForge `/download` URLs
+    /// reshape to the direct mirror form, everything else passes through
+    /// untouched (and without network).
+    #[test]
+    fn special_url_transforms() {
+        assert_eq!(
+            super::split_fosshub_url(
+                "https://www.fosshub.com/qBittorrent.html?dwl=qb_4.6.7_x64_setup.exe"
+            ),
+            Some((
+                "qBittorrent.html".to_owned(),
+                "qb_4.6.7_x64_setup.exe".to_owned()
+            ))
+        );
+        assert_eq!(
+            super::split_fosshub_url("https://www.fosshub.com/Foo/Bar/baz-2.0.zip"),
+            Some(("Foo/Bar".to_owned(), "baz-2.0.zip".to_owned()))
+        );
+        assert_eq!(super::split_fosshub_url("https://example.com/a.zip"), None);
+
+        assert_eq!(
+            super::reshape_sourceforge_url(
+                "https://sourceforge.net/projects/sevenzip/files/7-Zip/24.09/7z2409-x64.exe/download"
+            ),
+            Some("https://downloads.sourceforge.net/project/sevenzip/7-Zip/24.09/7z2409-x64.exe".to_owned())
+        );
+        assert_eq!(
+            super::reshape_sourceforge_url("https://example.com/a.zip"),
+            None
+        );
+
+        // Passthrough never touches the network.
+        assert_eq!(
+            super::resolve_special_url("https://example.com/a.zip", None),
+            "https://example.com/a.zip"
+        );
     }
 
     #[test]
