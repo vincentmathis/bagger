@@ -3,9 +3,9 @@
 ```raw
  ___                                                 .-.
 | _ ) __ _ __ _ __ _ ___ _ _                        /   \
-| _ \/ _` / _` / _` / -_) '_|         _____.....-----|(o) |
-|___/\__,_\__, \__, \___|_|      _..--'          _..--|  .''
-          |___/|___/          .'  o      _..--''     |  | |
+| _ \/ _` / _` / _` / -_) '_|        _____.....-----|(o) |
+|___/\__,_\__, \__, \___|_|    _..--'          _..--|  .''
+          |___/|___/         .'  o      _..--''     |  | |
                             /  _/_..--''            |  | |
                    ________/  / /                   |  | |
                   | _  ____\ / /                    |  | |
@@ -21,10 +21,7 @@
           bagger 0.1.0 - same buckets, heavy machinery
 ```
 
-*Bagger 288 (13,500 tonnes). The binary is 8.5 MB. Same energy.*
-
-Bagger is a Rust rewrite of Scoop for Windows, built like its namesake:
-enormous capacity, relentless throughput, no wasted motion. One native
+Bagger is a Rust rewrite of Scoop for Windows. While Scoop feels like a flimsy spoon, bagger is 100 ton highly efficient machine. One native
 binary, no PowerShell startup, working with the Scoop buckets you already use.
 
 Moves mountains. Installs apps.
@@ -32,7 +29,7 @@ Moves mountains. Installs apps.
 [![crate](https://img.shields.io/crates/v/bagger)](https://crates.io/crates/bagger)
 [![license][license-badge]](LICENSE)
 
-## Why a 13,500-tonne machine to install `jq`
+## Why an excavator to install `jq`
 
 - **Speed.** Native binary, no shell startup cost, parallel manifest parsing.
   Numbers below, measured — not projected.
