@@ -116,7 +116,7 @@ pub fn add(session: &Session, package: &Package) -> Fallible<()> {
             // Determine the target binary path
             let apps_dir = config.root_path().join("apps");
             let bin_dir = apps_dir.join(pkg_name).join(&version);
-            let target = bin_dir.join(shim.real_name);
+            let target = with_path_fallback(shim.real_name, bin_dir.join(shim.real_name));
 
             // Older bagger versions wrote batch content into `{name}.exe`,
             // which shadows the working `.cmd` and fails on execution.
@@ -361,6 +361,55 @@ fn resolve_target(parent: Option<&Path>, target: &str) -> PathBuf {
     }
 }
 
+/// Apply upstream's `(Get-Command $target).Source` fallback: a bare shim
+/// target missing from the app dir may still resolve through `PATH` (e.g. a
+/// system executable a manifest shims by name). Anything unresolvable is
+/// returned as-is so the caller can warn like before.
+fn with_path_fallback(real_name: &str, target: PathBuf) -> PathBuf {
+    if target.exists() || real_name.contains(['/', '\\']) {
+        return target;
+    }
+    search_path(real_name).unwrap_or(target)
+}
+
+/// Search process `PATH` for `file_name`, with `PATHEXT` probing on Windows
+/// for extensionless names (mirroring `Get-Command`).
+fn search_path(file_name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = dir.join(file_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        if Path::new(file_name).extension().is_none() {
+            if let Some(found) = probe_pathext(&dir, file_name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn probe_pathext(dir: &Path, file_name: &str) -> Option<PathBuf> {
+    let pathext = std::env::var_os("PATHEXT")?;
+    for ext in pathext.to_string_lossy().split(';') {
+        let ext = ext.trim().trim_start_matches('.');
+        if ext.is_empty() {
+            continue;
+        }
+        let candidate = dir.join(format!("{file_name}.{ext}"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Repair executable shims for all installed apps.
 ///
 /// Rewrites missing or outdated `{name}.cmd` wrappers for `Exe` bins and
@@ -384,7 +433,10 @@ pub fn refresh(session: &Session) -> Fallible<Vec<String>> {
                 let exe = shims_dir.join(format!("{}.exe", shim.name));
                 // Outdated content counts as broken: regenerate the expected
                 // wrapper in-memory and compare with what is on disk.
-                let target = shim_target_path(session, pkg.name(), shim.real_name);
+                let target = with_path_fallback(
+                    shim.real_name,
+                    shim_target_path(session, pkg.name(), shim.real_name),
+                );
                 let expected = create_shim_content(&target, &shim, ShimContent::Batch).ok();
                 let actual = std::fs::read_to_string(&cmd).ok();
                 if actual != expected || is_poisoned_exe(&exe) {
@@ -753,6 +805,48 @@ mod tests {
             Some(sub.join("..\\apps\\scoop\\current\\bin\\scoop.ps1"))
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Bare shim targets missing from the app dir resolve through `PATH`
+    /// (upstream `(Get-Command $target).Source`); anything else passes
+    /// through untouched for the missing-target warning.
+    #[test]
+    fn path_fallback_resolves_bare_names_only() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-shim-pathfind");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sys-tool.exe"), "dummy").unwrap();
+
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let original = std::env::var_os("PATH").unwrap_or_default();
+        let mut with_tmp = dir.to_string_lossy().into_owned();
+        with_tmp.push_str(sep);
+        with_tmp.push_str(&original.to_string_lossy());
+        std::env::set_var("PATH", &with_tmp);
+
+        // Bare name resolves; subdir-qualified names never hit PATH.
+        assert_eq!(
+            with_path_fallback("sys-tool.exe", PathBuf::from("sys-tool.exe")),
+            dir.join("sys-tool.exe")
+        );
+        assert_eq!(
+            with_path_fallback("bin/sys-tool.exe", PathBuf::from("bin/sys-tool.exe")),
+            PathBuf::from("bin/sys-tool.exe")
+        );
+        // An existing target wins over PATH.
+        assert_eq!(
+            with_path_fallback("sys-tool.exe", dir.join("sys-tool.exe")),
+            dir.join("sys-tool.exe")
+        );
+        // Unresolvable names pass through for the warning.
+        assert_eq!(
+            with_path_fallback("nope-missing.exe", PathBuf::from("nope-missing.exe")),
+            PathBuf::from("nope-missing.exe")
+        );
+
+        std::env::set_var("PATH", &original);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

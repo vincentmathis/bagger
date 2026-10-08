@@ -139,8 +139,8 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | `post_install` | [x] | PowerShell script after install |
 | `pre_uninstall` | [x] | PowerShell script before uninstall |
 | `post_uninstall` | [x] | PowerShell script after uninstall |
-| `installer` | [x] | Custom installer (file-based or script) |
-| `uninstaller` | [x] | Custom uninstaller (file-based or script) |
+| `installer` | [x] | Custom installer: `file` and/or `args` (args alone runs the download, upstream `coalesce`); `is_in_dir` containment abort; `.ps1` retained, binaries removed unless `keep` |
+| `uninstaller` | [x] | Custom uninstaller: same `file`/`args`/`keep`/`script` semantics as the installer side |
 
 ### Advanced Fields
 
@@ -271,7 +271,10 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 ## Missing Features (Medium Priority)
 
-- (none — all tracked features implemented; `--global` covered install/uninstall/upgrade/cleanup)
+- **`app@version` install targets** - `scoop install gh@2.7.0` / `url@version` / `path@version` (upstream resolves via sqlite cache, git history, or generated user manifests); bagger accepts names, URLs, and local files but no `@version` pinning yet
+- **`ensure_none_failed`** - upstream repairs (reset) or purges previous failed installs before installing; bagger installs over the existing dir
+- **Nightly version stamping** - upstream renames `version: nightly` to `nightly-yyyyMMdd` (hash check skipped); bagger skips the hash check but installs under the literal `nightly` version
+- **Manifest version validation** - upstream aborts installs whose version contains characters outside `[\w.\-+_]`
 
 ## Previously Missing - Now Implemented (this iteration)
 
@@ -315,6 +318,10 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 44. **Conservative cleanup + missing-target warnings** - `cleanup` never deletes a version dir lacking install metadata (a failed upgrade's manifest-less dir plus dangling `current` is a pending upgrade, not garbage); `shim add` warns loudly when a target was never materialized instead of succeeding silently
 45. **`current`-first active version + shim target parsing** - `cleanup` resolves the `current` link target as sacred before consulting manifests (the manifest fallback could anoint the wrong version and delete the live one); `target_of` resolves relative alias targets against the shims dir and prefers sh-style `#`/`@rem` comment targets over `"$(wslpath…)"` wrappers (killed a dozen false broken-shim reports); `checkup` only assesses recognized shim files instead of flagging stray `.txt` junk
 46. **Native Inno Setup extraction** - `.exe` files with `innosetup` go through innounp (`-x -d -c{app}`, mirroring `Expand-InnoArchive`) instead of being left raw with dangling shims; the dep was already auto-added but never executed; proven by reinstalling ollama-full live
+47. **Installer/uninstaller execution parity** - `args` without `file` now runs the staged download (upstream `coalesce $installer.file $Name[0]`); installer paths resolving outside the app dir abort (`is_in_dir`); `.ps1` installers are retained (upstream only removes binaries) and `uninstaller.keep` is parsed; proven offline with an args-only batch installer/uninstaller plus traversal/missing negative cases
+48. **Installer PATH scrub + scoped env backend** - `ensure_install_dir_not_in_path`: installer-added app dirs are removed from PATH after install (system PATH only earns a warning without admin, like upstream); env get/set honors global scope (HKLM) instead of always writing HKCU; every registry env change broadcasts `WM_SETTINGCHANGE` so new terminals see it; proven live (upstream's exact `Installer added '…' to path. Removing.` notice observed)
+49. **Full-scope `env_set` expansion + env hardening** - values expand the whole hook scope (`$dir`/`$version`/`$app`/`$architecture`/`$global`/`$bucket`/`$bucketsdir`/`$fname`/`$original_dir`/`$persist_dir`, `$name`/`${name}` forms, `$env:*` with unknown→empty like `ExpandString`); current-process env is set/cleared too; `%`-values stored as `REG_EXPAND_SZ`; `env_add_path` entries escaping the app dir are dropped; removal scrubs both the default and isolated PATH targets and tolerates missing variables; proven live (`ARGAPP_HOME` resolved to the `current` link, `..` entry dropped, all traces removed on uninstall)
+50. **Shim PATH fallback + global persist ACL** - bare `bin` targets missing from the app dir resolve through `PATH` (upstream `(Get-Command).Source`, incl. `PATHEXT` probing) instead of warning immediately; global installs with persist data grant `Users` write on the persist root (`persist_permission` via icacls, admin-gated); both unit-tested (SID-verified ACL, PATH-resolution cases)
 
 ## Build & Distribution
 

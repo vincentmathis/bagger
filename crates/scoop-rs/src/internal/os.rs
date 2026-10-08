@@ -32,6 +32,27 @@ pub fn is_program_available(exe: &str) -> bool {
     false
 }
 
+/// Whether the current process runs elevated (admin).
+///
+/// Backstop for operations upstream only attempts as admin (e.g. global
+/// persist ACLs); the CLI already requires admin for global scope.
+pub fn is_elevated() -> bool {
+    #[cfg(windows)]
+    {
+        // `net session` succeeds only for elevated processes; output is
+        // captured so nothing leaks to the console.
+        std::process::Command::new("net")
+            .arg("session")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 pub fn running_apps(path: &Path) -> Fallible<Vec<String>> {
     // static REGEX_APPS_PATH: Lazy<Regex> = Lazy::new(|| {
     //     RegexBuilder::new(r".*?apps[\\/]+(?P<app>[a-zA-Z0-9-_.]+)[\\/]+.*")

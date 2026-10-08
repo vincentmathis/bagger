@@ -109,6 +109,36 @@ fn link_item(persist_path_item: &std::path::Path, app_path_item: &std::path::Pat
     Ok(())
 }
 
+/// Grant the `Users` group write access to the persist root.
+///
+/// Mirrors upstream `persist_permission`, which global installs apply when
+/// running elevated: without it, non-admin users cannot write the data of
+/// globally installed apps. Only the root entry is stamped (`(OI)` object
+/// inherit, like upstream's `ObjectInherit` rule); existing content keeps
+/// its ACLs.
+#[cfg(windows)]
+pub fn grant_users_write(persist_root: &std::path::Path) -> Fallible<()> {
+    let output = std::process::Command::new("icacls")
+        .arg(persist_root)
+        .arg("/grant")
+        .arg("*S-1-5-32-545:(OI)W")
+        .output()
+        .map_err(|e| crate::Error::Custom(format!("failed to run icacls: {e}")))?;
+    if !output.status.success() {
+        return Err(crate::Error::Custom(format!(
+            "icacls failed to grant Users write on '{}': {}",
+            persist_root.display(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn grant_users_write(_persist_root: &std::path::Path) -> Fallible<()> {
+    Ok(())
+}
+
 /// Remove persist links inside an app version directory.
 ///
 /// Used when dropping old versions (`cleanup`): each entry is unlinked only
@@ -267,6 +297,41 @@ mod tests {
             std::fs::read_to_string(store.join("keep.txt")).unwrap(),
             "keep"
         );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `grant_users_write` stamps the Users SID with write rights (verified
+    /// through the SID, not the localized group name).
+    #[test]
+    #[cfg(windows)]
+    fn grant_users_write_stamps_users_sid() {
+        let base = std::env::temp_dir().join("bagger-test-persist-acl");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        grant_users_write(&base).expect("icacls should succeed");
+
+        // Verified through the SID (locale-proof) via .NET directly, since
+        // the `Get-Acl` cmdlet's module may not load in constrained hosts.
+        let script = format!(
+            "$rules = [System.IO.Directory]::GetAccessControl('{}').GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]); @($rules | Where-Object {{ $_.IdentityReference.Value -eq 'S-1-5-32-545' -and (($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Write) -ne 0) }}).Count",
+            base.display().to_string().replace('\'', "''")
+        );
+        let output = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .expect("powershell should run");
+        assert!(
+            output.status.success(),
+            "powershell failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let count: u32 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        assert!(count >= 1, "Users SID should hold write rights");
 
         std::fs::remove_dir_all(&base).ok();
     }

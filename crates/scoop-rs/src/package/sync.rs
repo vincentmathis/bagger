@@ -705,23 +705,29 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 internal::ps::invoke_script(session, pkg, "install", &pre_install, &working_dir)?;
             }
 
-            // Run installer file and/or script if present.
+            // Run installer file and/or script if present. Upstream runs
+            // the downloaded file (first URL basename) when `args` is
+            // given without `file`, so the call is unconditional: it
+            // no-ops when the section carries neither.
             if let Some(installer) = pkg.manifest().installer() {
-                if let Some(file) = installer.file() {
-                    run_installer_file(
-                        session,
-                        pkg,
-                        &working_dir,
-                        file,
-                        installer.args(),
-                        installer.keep(),
-                        false,
-                    )?;
-                }
+                run_installer_file(
+                    session,
+                    pkg,
+                    &working_dir,
+                    installer.file(),
+                    installer.args(),
+                    installer.keep(),
+                    false,
+                )?;
                 if let Some(script) = installer.script() {
                     internal::ps::invoke_script(session, pkg, "install", &script, &working_dir)?;
                 }
             }
+
+            // Installers may register the app dir on PATH themselves;
+            // upstream scrubs those entries so the manifest stays in
+            // control of the environment.
+            crate::env::scrub_install_dir_from_path(session, &working_dir)?;
 
             // Create the 'current' symlink if not using no_junction
             if !config.no_junction() {
@@ -758,6 +764,16 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 
             // Set up persist directories
             persist::link(session, pkg)?;
+
+            // Upstream `persist_permission`: global installs running
+            // elevated grant Users write access to the persist root so
+            // non-admin users can use the persisted data.
+            if session.config().is_global_scope()
+                && pkg.manifest().persist().is_some()
+                && internal::os::is_elevated()
+            {
+                persist::grant_users_write(&session.config().root_path().join("persist"))?;
+            }
 
             // Add shims
             shim::add(session, pkg)?;
@@ -848,16 +864,19 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 /// architecture that was actually resolved.
 /// Run a manifest `installer.file`/`uninstaller.file` program.
 ///
-/// Mirrors upstream `Invoke-Installer`: the file must live inside the app
-/// directory, `args` undergo `$dir`/`$global`/`$version` substitution, `.ps1`
-/// files run as hook scripts while anything else is executed directly, and
-/// the file is removed afterwards unless `keep` is set.
+/// Mirrors upstream `Invoke-Installer`: the file runs when `file` or `args`
+/// is present — `args` alone executes the downloaded file (first URL
+/// basename, i.e. the staged filename). The resolved file must live inside
+/// the app directory (`is_in_dir`), `args` undergo `$dir`/`$global`/`$version`
+/// substitution, `.ps1` files run as hook scripts (and are kept, like
+/// upstream) while anything else is executed directly and removed afterwards
+/// unless `keep` is set.
 #[allow(clippy::too_many_arguments)]
 fn run_installer_file(
     session: &Session,
     pkg: &Package,
     working_dir: &std::path::Path,
-    file: &str,
+    file: Option<&str>,
     args: Option<Vec<&str>>,
     keep: bool,
     is_uninstall: bool,
@@ -867,13 +886,51 @@ fn run_installer_file(
     } else {
         "installer"
     };
-    let prog = working_dir.join(file);
+    let file = file.filter(|f| !f.is_empty());
+    let args: Vec<&str> = args
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| !a.is_empty())
+        .collect();
+    if file.is_none() && args.is_empty() {
+        return Ok(());
+    }
+
+    // Upstream `coalesce $installer.file $Name[0]`: without an explicit
+    // file, the downloaded file (staged under its URL basename) runs.
+    let name = match file {
+        Some(f) => f.to_owned(),
+        None => match pkg.download_staged_filenames().into_iter().next() {
+            Some(staged) => staged,
+            None => {
+                return Err(crate::Error::Custom(format!(
+                    "{kind} args given for '{}' but no file to run",
+                    pkg.name(),
+                )));
+            }
+        },
+    };
+    let prog = working_dir.join(&name);
     if !prog.is_file() {
         return Err(crate::Error::Custom(format!(
             "{} file '{}' is missing for '{}'",
             kind,
             prog.display(),
             pkg.name(),
+        )));
+    }
+    // The installer file must resolve inside the app directory; a
+    // `../` traversal (or a symlink pointing out) aborts the install.
+    let canonical_dir = working_dir.canonicalize().map_err(|e| {
+        crate::Error::Custom(format!("cannot resolve '{}': {e}", working_dir.display()))
+    })?;
+    let canonical_prog = prog
+        .canonicalize()
+        .map_err(|e| crate::Error::Custom(format!("cannot resolve '{}': {e}", prog.display())))?;
+    if !canonical_prog.starts_with(&canonical_dir) {
+        return Err(crate::Error::Custom(format!(
+            "Error in manifest: {kind} {} is outside the app directory",
+            prog.display(),
         )));
     }
 
@@ -888,13 +945,13 @@ fn run_installer_file(
             .replace("$global", global_str)
             .replace("$version", pkg.version())
     };
-    let fn_args: Vec<String> = args
-        .unwrap_or_default()
-        .iter()
-        .map(|a| substitute(a))
-        .collect();
+    let fn_args: Vec<String> = args.iter().map(|a| substitute(a)).collect();
 
-    if prog.extension().map(|e| e.eq_ignore_ascii_case("ps1")) == Some(true) {
+    let is_ps1 = prog
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("ps1"))
+        .unwrap_or(false);
+    if is_ps1 {
         // PowerShell files run as hook scripts (with the prelude scope),
         // invoked with the substituted arguments (upstream `& $prog @args`).
         let cmd = if is_uninstall { "uninstall" } else { "install" };
@@ -932,11 +989,11 @@ fn run_installer_file(
         if let Some(tx) = session.emitter() {
             let _ = tx.send(Event::PackageCommitDone(pkg.name().to_owned()));
         }
-    }
-
-    // Don't remove the installer file if "keep" is set to true.
-    if !keep {
-        let _ = std::fs::remove_file(&prog);
+        // Upstream only removes installer binaries (`.ps1` files are kept);
+        // removal is skipped when `keep` is set.
+        if !is_ps1 && !keep {
+            let _ = std::fs::remove_file(&prog);
+        }
     }
     Ok(())
 }
@@ -1318,19 +1375,18 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
                 )?;
             }
 
-            // Run uninstaller file and/or script if present.
+            // Run uninstaller file and/or script if present (same
+            // `file`-or-`args` trigger as the installer side).
             if let Some(uninstaller) = package.manifest().uninstaller() {
-                if let Some(file) = uninstaller.file() {
-                    run_installer_file(
-                        session,
-                        package,
-                        &uninstall_dir,
-                        file,
-                        uninstaller.args(),
-                        false,
-                        true,
-                    )?;
-                }
+                run_installer_file(
+                    session,
+                    package,
+                    &uninstall_dir,
+                    uninstaller.file(),
+                    uninstaller.args(),
+                    uninstaller.keep(),
+                    true,
+                )?;
                 if let Some(script) = uninstaller.script() {
                     internal::ps::invoke_script(
                         session,
@@ -1518,5 +1574,162 @@ mod tests {
         assert_eq!(cached.len(), 2);
         assert!(cached[0].starts_with("staged#1.0#"));
         assert_ne!(cached[0], cached[1]);
+    }
+
+    /// Build a package whose manifest stages `setup.cmd` and declares an
+    /// `installer` section from JSON.
+    fn installer_package(installer_json: &str) -> Package {
+        let manifest_json = format!(
+            r#"{{"version": "1.0", "homepage": "https://example.com", "license": "MIT",
+                "architecture": {{"64bit": {{"url": "https://example.com/files/setup.cmd"}}}},
+                "installer": {installer_json}}}"#
+        );
+        let manifest = Manifest::parse_bytes(
+            manifest_json.as_bytes(),
+            std::path::Path::new("installer.json"),
+        )
+        .unwrap();
+        Package::from("instapp", "main", manifest)
+    }
+
+    fn installer_session(base: &std::path::Path) -> Session {
+        let _ = std::fs::remove_dir_all(base);
+        std::env::set_var("SCOOP", base.join("root"));
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        Session::new()
+    }
+
+    fn cleanup_installer_env(base: &std::path::Path) {
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// `args` without `file` runs the staged download (upstream `coalesce`
+    /// to the URL basename), with `$dir`/`$version` substituted.
+    #[test]
+    #[cfg(windows)]
+    fn installer_args_without_file_runs_staged_download() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-installer-args");
+        let _session = installer_session(&base);
+        let pkg = installer_package(r#"{"args": ["--root=$dir", "--ver=$version"]}"#);
+        let dir = base.join("root/apps/instapp/1.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A batch installer logging its argv (like NSIS `/D=$dir` flows).
+        std::fs::write(
+            dir.join("setup.cmd"),
+            "@echo off\r\nsetlocal\r\n(for %%A in (%*) do @echo/%%~A) > \"%~dp0argv.log\"\r\n",
+        )
+        .unwrap();
+
+        run_installer_file(
+            &_session,
+            &pkg,
+            &dir,
+            None,
+            pkg.manifest().installer().unwrap().args(),
+            false,
+            false,
+        )
+        .expect("args-only installer should run the staged file");
+
+        let logged = std::fs::read_to_string(dir.join("argv.log")).unwrap();
+        assert!(
+            logged.contains(&format!("--root={}", dir.display())),
+            "unexpected argv log: {logged}"
+        );
+        assert!(
+            logged.contains("--ver=1.0"),
+            "unexpected argv log: {logged}"
+        );
+        // Non-ps1 installers are removed afterwards unless `keep` is set.
+        assert!(!dir.join("setup.cmd").exists());
+
+        cleanup_installer_env(&base);
+    }
+
+    /// `keep: true` preserves installer binaries; `.ps1` installers are
+    /// always kept (upstream only removes binaries).
+    #[test]
+    #[cfg(windows)]
+    fn installer_keep_and_ps1_retention() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-installer-keep");
+        let _session = installer_session(&base);
+        let dir = base.join("root/apps/instapp/1.0");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Binary with keep=true survives.
+        let pkg = installer_package(r#"{"file": "setup.cmd", "keep": true}"#);
+        std::fs::write(dir.join("setup.cmd"), "@echo off\r\nexit /b 0\r\n").unwrap();
+        run_installer_file(
+            &_session,
+            &pkg,
+            &dir,
+            pkg.manifest().installer().unwrap().file(),
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+        assert!(dir.join("setup.cmd").exists());
+
+        // `.ps1` survives even without keep (executed via the hook scope).
+        let pkg = installer_package(r#"{"file": "setup.ps1"}"#);
+        std::fs::write(
+            dir.join("setup.ps1"),
+            "Set-Content -LiteralPath \"$dir/ps1-marker.txt\" -Value 'ran'",
+        )
+        .unwrap();
+        run_installer_file(
+            &_session,
+            &pkg,
+            &dir,
+            pkg.manifest().installer().unwrap().file(),
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(dir.join("setup.ps1").exists());
+        assert!(dir.join("ps1-marker.txt").exists());
+
+        cleanup_installer_env(&base);
+    }
+
+    /// Installer files escaping the app dir abort (`is_in_dir`), as do
+    /// missing files.
+    #[test]
+    #[cfg(windows)]
+    fn installer_outside_dir_and_missing_abort() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-installer-guard");
+        let _session = installer_session(&base);
+        let pkg = installer_package(r#"{"file": "setup.cmd"}"#);
+        let dir = base.join("root/apps/instapp/1.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A real file next to (not inside) the version dir.
+        std::fs::write(base.join("root/apps/instapp/evil.cmd"), "@echo off\r\n").unwrap();
+
+        let err = run_installer_file(
+            &_session,
+            &pkg,
+            &dir,
+            Some("../evil.cmd"),
+            None,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("outside the app directory"));
+
+        let err = run_installer_file(&_session, &pkg, &dir, Some("setup.cmd"), None, false, false)
+            .unwrap_err();
+        assert!(err.to_string().contains("missing"));
+
+        cleanup_installer_env(&base);
     }
 }
