@@ -107,9 +107,16 @@ pub enum Command {
 /// CLI entry point
 pub fn start() -> Result<()> {
     let args = Cli::parse();
-    setup_logger(args.verbose.tracing_level_filter())?;
 
     let session = Session::default();
+    // The `debug` config raises the log floor, mirroring upstream's
+    // "additional and detailed output" setting.
+    let mut level = args.verbose.tracing_level_filter();
+    if session.config().debug() {
+        level = level.max(LevelFilter::DEBUG);
+    }
+    setup_logger(level)?;
+
     let user_agent = format!("Scoop/1.0 (+https://scoop.sh/) bagger/{}", crate_version!());
     let _ = session.set_user_agent(&user_agent);
 

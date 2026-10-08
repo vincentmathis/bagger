@@ -104,10 +104,10 @@ pub(crate) fn apply_global_flag(global: bool, session: &scoop_rs::Session) -> Re
 }
 
 /// Apply the `--arch` selection, falling back to the `SCOOP_ARCH`
-/// environment variable.
+/// environment variable and then the `default_architecture` config.
 ///
 /// Must run before any package sync operation.
-pub(crate) fn apply_arch_flag(arch: Option<&str>) -> Result<()> {
+pub(crate) fn apply_arch_flag(arch: Option<&str>, session: &scoop_rs::Session) -> Result<()> {
     if let Some(name) = arch {
         return scoop_rs::arch::set_override(name).map_err(|e| anyhow::anyhow!(e.to_string()));
     }
@@ -115,6 +115,13 @@ pub(crate) fn apply_arch_flag(arch: Option<&str>) -> Result<()> {
     if let Ok(name) = std::env::var("SCOOP_ARCH") {
         if !name.trim().is_empty() {
             scoop_rs::arch::set_override(&name).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            return Ok(());
+        }
+    }
+
+    if let Some(name) = session.config().default_architecture() {
+        if !name.trim().is_empty() {
+            scoop_rs::arch::set_override(name).map_err(|e| anyhow::anyhow!(e.to_string()))?;
         }
     }
 

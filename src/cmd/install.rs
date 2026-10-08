@@ -83,7 +83,7 @@ impl Args {
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
     crate::util::apply_global_flag(args.global, session)?;
-    crate::util::apply_arch_flag(args.arch.as_deref())?;
+    crate::util::apply_arch_flag(args.arch.as_deref(), session)?;
 
     let mut options = vec![];
 
@@ -238,7 +238,11 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                                     "{}{}{}",
                                     p.ident(),
                                     "-".dark_grey(),
-                                    p.upgradable_version().unwrap().dark_grey(),
+                                    // Force reinstalls target the current
+                                    // version, which has no "upgradable" ref.
+                                    p.upgradable_version()
+                                        .unwrap_or_else(|| p.version())
+                                        .dark_grey(),
                                 )
                             })
                             .collect::<Vec<_>>()

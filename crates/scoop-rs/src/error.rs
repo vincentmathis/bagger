@@ -92,6 +92,15 @@ pub enum Error {
     #[error("{0}")]
     Custom(String),
 
+    /// An aria2c download failure, carrying the exit code so callers can
+    /// report it (upstream `aria_exit_code`) and fall back to curl.
+    #[error("aria2c failed to download '{url}' (Error {code}): {stderr}")]
+    Aria2 {
+        url: String,
+        code: i32,
+        stderr: String,
+    },
+
     /// Cycle dependency error
     #[error(transparent)]
     CyclicDependency(#[from] CyclicError),

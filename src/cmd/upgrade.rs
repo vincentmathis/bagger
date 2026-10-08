@@ -18,6 +18,10 @@ pub struct Args {
     /// Ignore failures to ensure a complete transaction
     #[arg(short = 'f', long, action = ArgAction::SetTrue)]
     ignore_failure: bool,
+    /// Force reinstall even when the installed version is current
+    /// (previous install rotated aside to `_<version>.old`)
+    #[arg(long, action = ArgAction::SetTrue)]
+    force: bool,
     /// Leverage cache and suppress network access
     #[arg(short = 'o', long, action = ArgAction::SetTrue)]
     offline: bool,
@@ -40,7 +44,7 @@ pub struct Args {
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
     crate::util::apply_global_flag(args.global, session)?;
-    crate::util::apply_arch_flag(args.arch.as_deref())?;
+    crate::util::apply_arch_flag(args.arch.as_deref(), session)?;
 
     let mut queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     if queries.is_empty() {
@@ -58,6 +62,10 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
 
     if args.ignore_failure {
         options.push(SyncOption::IgnoreFailure);
+    }
+
+    if args.force || session.config().force_update() {
+        options.push(SyncOption::Force);
     }
 
     if args.offline {
@@ -151,7 +159,11 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                                     "{}{}{}",
                                     p.ident(),
                                     "-".dark_grey(),
-                                    p.upgradable_version().unwrap().dark_grey(),
+                                    // Force reinstalls target the current
+                                    // version, which has no "upgradable" ref.
+                                    p.upgradable_version()
+                                        .unwrap_or_else(|| p.version())
+                                        .dark_grey(),
                                 )
                             })
                             .collect::<Vec<_>>()

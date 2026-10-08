@@ -123,5 +123,18 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
         }
     }
 
+    // System diagnostics (Defender exclusion, main bucket, long paths,
+    // developer mode), mirroring upstream's diagnostic checks.
+    let diagnostics = scoop_rs::diagnostic::system_diagnostics(session);
+    if !diagnostics.is_empty() {
+        println!("\n{}", "WARNING: System issues found:".yellow().bold());
+        for check in &diagnostics {
+            println!("  {}", check.title.clone().yellow());
+            for line in &check.fix {
+                println!("    {}", line.clone().dark_grey());
+            }
+        }
+    }
+
     Ok(())
 }

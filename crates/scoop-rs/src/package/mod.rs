@@ -496,7 +496,16 @@ impl fmt::Display for HashMismatchContext {
             self.url(),
             self.expected(),
             self.actual()
-        )
+        )?;
+        // Upstream prints this exact hint: SourceForge mirrors are known
+        // for causing transient hash failures.
+        if self.url().contains("sourceforge.net") {
+            write!(
+                f,
+                "\nSourceForge.net is known for causing hash validation fails. Please try again before opening a ticket."
+            )?;
+        }
+        Ok(())
     }
 }
 

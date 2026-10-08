@@ -36,6 +36,7 @@ mod bucket;
 mod cache;
 mod config;
 mod constant;
+pub mod diagnostic;
 mod env;
 mod error;
 mod event;

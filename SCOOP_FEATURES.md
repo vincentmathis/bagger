@@ -17,10 +17,10 @@ Legend:
 | :--- | :---: | :--- |
 | `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
 | `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal, `-g/--global` |
-| `bagger update` | [x] | Pull all subscribed buckets (no args) |
+| `bagger update` | [x] | Pull all subscribed buckets (no args); shows pulled commit logs unless `show_update_log` is false; stamps `last_update` |
 
 > **Note on `update *`:** In older Scoop, `scoop update *` meant "upgrade all apps". In modern Scoop (and in `bagger`), use `bagger upgrade` (with no arguments) to upgrade all installed apps. The `update` command only updates bucket manifests and does not accept app names or wildcards.
-| `bagger upgrade` | [x] | Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override |
+| `bagger upgrade` | [x] | Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override; `--force` reinstalls current versions (previous dir rotated to `_<version>.old`), also via `force_update` config |
 | `bagger search <query>` | [x] | Search across all buckets |
 | `bagger list` | [x] | List installed apps; supports `--upgradable` |
 | `bagger info <app>` | [x] | Show manifest info for any app |
@@ -30,7 +30,7 @@ Legend:
 | `bagger prefix <app>` | [x] | Show installation path for an app |
 | `bagger which <command>` | [x] | Find which app owns an executable |
 | `bagger status` | [x] | Show held, upgradable, and running apps |
-| `bagger checkup` | [x] | Check for updates, report held/running/upgradable apps |
+| `bagger checkup` | [x] | Check for updates, report held/running/upgradable apps; system diagnostics (Defender exclusion, main bucket, long paths, developer mode) |
 | `bagger reset <app>` | [x] | Reset an installed package to a specific version or re-extract |
 
 ### Bucket Commands
@@ -200,8 +200,14 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | `use_external_7zip` | [x] | Parsed; extraction always shells out to 7z (PATH or Scoop 7zip app) |
 | `scoop_branch` | [~] | Parsed (not actively used) |
 | `scoop_repo` | [~] | Parsed (not actively used) |
-| `gh_token` | [x] | Parsed for GitHub private repos |
-| `private_hosts` | [x] | Parsed for auth headers |
+| `gh_token` | [x] | GitHub API auth (`SCOOP_GH_TOKEN` env > config > `GH_TOKEN` > `GITHUB_TOKEN`), sent as `Bearer` with API-version pin; auth/rate-limit hints on failure |
+| `private_hosts` | [x] | Per-host regex `match` + `Name=Value`/`Name: Value` headers sent on curl downloads |
+| `force_update` | [x] | `upgrade` behaves as `--force` when true |
+| `show_update_log` | [x] | Bucket commit logs on update (default shown, like upstream) |
+| `last_update` | [x] | Stamped after every bucket update; readable via `config list` |
+| `debug` | [x] | Raises the log floor to `DEBUG` (unless `-v` already set higher) |
+| `default_architecture` | [x] | Persistent install-arch default (`--arch` > `SCOOP_ARCH` > config); previously parsed under a misspelled key and inert |
+| `aria2-fallback-enabled` | [x] | Failed aria2c downloads retry via curl (default on, like upstream); exit-code meanings reported |
 | `alias` | [x] | Managed via `bagger alias` (list/add/rm) + `config` |
 | `use_sqlite_cache` | [x] | **Implemented** - bucket manifests cached in `<cache>/manifests.db`, invalidated by mtime+size |
 | `show_manifest` | [x] | **Implemented** - Shows manifest JSON in install/upgrade confirmation |
@@ -271,10 +277,14 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 ## Missing Features (Medium Priority)
 
-- **`app@version` install targets** - `scoop install gh@2.7.0` / `url@version` / `path@version` (upstream resolves via sqlite cache, git history, or generated user manifests); bagger accepts names, URLs, and local files but no `@version` pinning yet
+- **`app@version` install targets** - `scoop install gh@2.7.0` / `url@version` / `path@version` (upstream resolves via sqlite cache, git history, or generated user manifests); bagger accepts names, URLs, and local files but no `@version` pinning yet (`use_git_history` only matters with this)
 - **`ensure_none_failed`** - upstream repairs (reset) or purges previous failed installs before installing; bagger installs over the existing dir
-- **Nightly version stamping** - upstream renames `version: nightly` to `nightly-yyyyMMdd` (hash check skipped); bagger skips the hash check but installs under the literal `nightly` version
+- **Nightly version stamping** - upstream renames `version: nightly` to `nightly-yyyyMMdd` (hash check skipped) with `update_nightly` config gating daily updates; bagger skips the hash check but installs under the literal `nightly` version
 - **Manifest version validation** - upstream aborts installs whose version contains characters outside `[\w.\-+_]`
+- **FossHub download handshake** - upstream resolves FossHub URLs via a POST to `api.fosshub.com` before downloading; bagger only scrapes FossHub hash pages, so FossHub-hosted files would download as HTML
+- **`Referer` header** - upstream sets `Referer` to the file's directory (except sourceforge/portableapps); bagger sends none
+- **No-hash SHA256 print** - upstream prints the computed SHA256 when a manifest has no hash (for manifest authors); bagger accepts silently
+- **Known divergences (deliberate)** - `aria2-enabled` defaults off (upstream: on); `bagger update` takes no app args (upstream `update <app>` upgrades; use `bagger upgrade`); `update -f` spelling is `upgrade --force`; missing shim targets warn instead of aborting the install
 
 ## Previously Missing - Now Implemented (this iteration)
 
@@ -322,6 +332,10 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 48. **Installer PATH scrub + scoped env backend** - `ensure_install_dir_not_in_path`: installer-added app dirs are removed from PATH after install (system PATH only earns a warning without admin, like upstream); env get/set honors global scope (HKLM) instead of always writing HKCU; every registry env change broadcasts `WM_SETTINGCHANGE` so new terminals see it; proven live (upstream's exact `Installer added '…' to path. Removing.` notice observed)
 49. **Full-scope `env_set` expansion + env hardening** - values expand the whole hook scope (`$dir`/`$version`/`$app`/`$architecture`/`$global`/`$bucket`/`$bucketsdir`/`$fname`/`$original_dir`/`$persist_dir`, `$name`/`${name}` forms, `$env:*` with unknown→empty like `ExpandString`); current-process env is set/cleared too; `%`-values stored as `REG_EXPAND_SZ`; `env_add_path` entries escaping the app dir are dropped; removal scrubs both the default and isolated PATH targets and tolerates missing variables; proven live (`ARGAPP_HOME` resolved to the `current` link, `..` entry dropped, all traces removed on uninstall)
 50. **Shim PATH fallback + global persist ACL** - bare `bin` targets missing from the app dir resolve through `PATH` (upstream `(Get-Command).Source`, incl. `PATHEXT` probing) instead of warning immediately; global installs with persist data grant `Users` write on the persist root (`persist_permission` via icacls, admin-gated); both unit-tested (SID-verified ACL, PATH-resolution cases)
+51. **checkup system diagnostics** - Defender exclusion (service state + realtime flag + exclusion list, skipped when unreadable instead of false-alarming), `main` bucket presence, `LongPathsEnabled`, Developer Mode; each failure prints upstream's remediation; pure matchers unit-tested, live-verified (warned on missing exclusion, silent on healthy keys)
+52. **Dead config keys wired** - `gh_token` (env-precedence resolution, `Bearer` auth on api.github.com with 401/rate-limit hints), `private_hosts` (regex match + `=`/`:` headers on curl downloads), `force_update` (implies `--force`), `show_update_log` (per-bucket commit logs via rev capture + `BucketUpdateLog` event), `last_update` (readable now), `debug` (log floor), `default_architecture` (lowest-precedence arch default; was parsed under a misspelled key), `aria2-fallback-enabled` (new, default on); `config set` accepts all of them with value validation
+53. **Force reinstall** - `upgrade --force` (long-only; `-f` stays `--ignore-failure`) reinstalls current versions, rotating the old dir to `_<version>.old` (`(N)` sequence); confirm UI no longer panics on same-version entries; proven live (rotation chain `_.old`→`.old(1)`→…, installer rerun verified by marker resurrection, `force_update` config path too)
+54. **aria2 failure fallback + misc upstream hints** - failed aria2c downloads warn with the exit-code meaning and retry via curl (structured `Error::Aria2`; stale `.aria2` control files cleaned); missing-binary warning is now visible instead of trace-only; SourceForge hash mismatches print upstream's retry hint; proven with a fake failing `aria2c.exe` (fallback success + disabled-abort unit tests)
 
 ## Build & Distribution
 

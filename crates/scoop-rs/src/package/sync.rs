@@ -146,6 +146,13 @@ pub enum SyncOption {
     /// [1]: SyncOption::NoUpgrade
     OnlyUpgrade,
 
+    /// Force reinstall even when the installed version is current.
+    ///
+    /// Mirrors upstream `update -f`: packages whose bucket version matches
+    /// the installed one are reinstalled, with the previous version
+    /// directory rotated aside to `_<version>.old`.
+    Force,
+
     /// Uninstall packages.
     ///
     /// Use this option to specify a sync operation of only uninstalling packages.
@@ -391,6 +398,7 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 
     let only_upgrade = options.contains(&SyncOption::OnlyUpgrade);
     let escape_hold = options.contains(&SyncOption::EscapeHold);
+    let force = options.contains(&SyncOption::Force);
 
     if only_upgrade {
         packages = query::query_installed(session, queries, &[QueryOption::Upgradable])?;
@@ -460,7 +468,10 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         }
     };
 
-    if packages.is_empty() {
+    // A force reinstall may proceed with an empty resolve set (the
+    // reinstall candidates are collected below); anything still empty is
+    // caught by the post-transaction early return instead.
+    if packages.is_empty() && !force {
         return Ok(());
     }
 
@@ -488,10 +499,39 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         transaction.set_install(installable);
     }
 
-    let upgradable = upgradable
+    let mut upgradable: Vec<_> = upgradable
         .into_iter()
         .filter(|p| p.upgradable_version().is_some())
-        .collect::<Vec<_>>();
+        .collect();
+
+    if force {
+        // Upstream `update -f`: reinstall the requested apps even when the
+        // bucket version is not newer. The reinstall entries are bucket
+        // packages (no install state needed past this point); holds are
+        // still respected.
+        let current = query::query_installed(session, queries, &[])?;
+        let synced = query::query_synced(session, &["*"], &[])?;
+        for inst in current {
+            if inst.is_held() && !escape_hold {
+                continue;
+            }
+            if upgradable.iter().any(|p| p.name() == inst.name()) {
+                continue;
+            }
+            if !inst.is_strictly_installed() {
+                continue;
+            }
+            let bucket = inst.installed_bucket().unwrap_or_default();
+            let reinstall = synced.iter().find(|s| {
+                s.name() == inst.name()
+                    && s.bucket() == bucket
+                    && Some(s.version()) == inst.installed_version()
+            });
+            if let Some(pkg) = reinstall {
+                upgradable.push(pkg.clone());
+            }
+        }
+    }
 
     let no_upgrade = options.contains(&SyncOption::NoUpgrade);
     if !no_upgrade && !upgradable.is_empty() {
@@ -668,6 +708,19 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             }
 
             let working_dir = apps_dir.join(pkg.name()).join(pkg.version());
+            if force
+                && (working_dir.join("install.json").exists()
+                    || working_dir.join("manifest.json").exists())
+            {
+                // Upstream `update -f`: rotate the previous install aside
+                // instead of merging the reinstall into it.
+                let backup = rotate_version_dir(&apps_dir.join(pkg.name()), pkg.version())?;
+                info!(
+                    "moved previous install of '{}' aside to '{}'",
+                    pkg.name(),
+                    backup.display()
+                );
+            }
             internal::fs::ensure_dir(&working_dir)?;
 
             let filenames = pkg.download_filenames();
@@ -862,6 +915,26 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 ///
 /// Honors the `--arch` override when set, so `install.json` records the
 /// architecture that was actually resolved.
+/// Rotate an existing version directory aside to `_<version>.old`
+/// (`_<version>.old(N)` when taken), mirroring upstream `update -f`.
+/// Returns the backup path.
+fn rotate_version_dir(app_dir: &std::path::Path, version: &str) -> Fallible<std::path::PathBuf> {
+    let mut backup = app_dir.join(format!("_{version}.old"));
+    if backup.exists() {
+        let mut n = 1;
+        loop {
+            let candidate = app_dir.join(format!("_{version}.old({n})"));
+            if !candidate.exists() {
+                backup = candidate;
+                break;
+            }
+            n += 1;
+        }
+    }
+    std::fs::rename(app_dir.join(version), &backup)?;
+    Ok(backup)
+}
+
 /// Run a manifest `installer.file`/`uninstaller.file` program.
 ///
 /// Mirrors upstream `Invoke-Installer`: the file runs when `file` or `args`
@@ -1574,6 +1647,31 @@ mod tests {
         assert_eq!(cached.len(), 2);
         assert!(cached[0].starts_with("staged#1.0#"));
         assert_ne!(cached[0], cached[1]);
+    }
+
+    /// Force reinstalls rotate the previous version aside (`_<v>.old`,
+    /// then `_<v>.old(N)`), mirroring upstream `update -f`.
+    #[test]
+    fn rotate_version_dir_keeps_history() {
+        let base = std::env::temp_dir().join("bagger-test-rotate");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("myapp");
+        std::fs::create_dir_all(app.join("1.0")).unwrap();
+        std::fs::write(app.join("1.0/marker.txt"), "old").unwrap();
+
+        let first = rotate_version_dir(&app, "1.0").unwrap();
+        assert_eq!(first, app.join("_1.0.old"));
+        assert_eq!(
+            std::fs::read_to_string(first.join("marker.txt")).unwrap(),
+            "old"
+        );
+        assert!(!app.join("1.0").exists());
+
+        std::fs::create_dir_all(app.join("1.0")).unwrap();
+        let second = rotate_version_dir(&app, "1.0").unwrap();
+        assert_eq!(second, app.join("_1.0.old(1)"));
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// Build a package whose manifest stages `setup.cmd` and declares an

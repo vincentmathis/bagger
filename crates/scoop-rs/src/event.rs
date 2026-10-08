@@ -1,7 +1,7 @@
 use flume::{bounded, Receiver, Sender};
 
 use crate::{
-    bucket::BucketUpdateProgressContext,
+    bucket::{BucketUpdateLogContext, BucketUpdateProgressContext},
     constant::EVENT_BUS_CAPACITY,
     package::{download::PackageDownloadProgressContext, sync::Transaction},
 };
@@ -71,6 +71,9 @@ pub enum Event {
 
     /// Bucket update has finished.
     BucketUpdateDone,
+
+    /// Bucket update pulled new commits.
+    BucketUpdateLog(BucketUpdateLogContext),
 
     /// Package has started to be committed.
     PackageCommitStart(String),

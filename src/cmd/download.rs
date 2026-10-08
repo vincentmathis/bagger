@@ -29,7 +29,7 @@ pub struct Args {
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
-    crate::util::apply_arch_flag(args.arch.as_deref())?;
+    crate::util::apply_arch_flag(args.arch.as_deref(), session)?;
 
     let queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     let mut options = vec![SyncOption::DownloadOnly];

@@ -201,15 +201,44 @@ impl<'a> PackageSet<'a> {
         // Delegate to aria2c when enabled and available.
         if self.session.config().aria2_enabled() {
             if internal::aria2::is_available() {
-                return self.download_via_aria2();
+                match self.download_via_aria2() {
+                    Ok(()) => return Ok(()),
+                    Err(crate::Error::Aria2 { code, .. })
+                        if self.session.config().aria2_fallback_enabled() =>
+                    {
+                        // Upstream `ARIA2-FALLBACK-ENABLED` (default on):
+                        // retry through the default downloader instead of
+                        // aborting the whole transaction.
+                        eprintln!(
+                            "warning: download failed! (Error {code}) {}",
+                            internal::aria2::exit_code_message(code)
+                        );
+                        eprintln!("warning: fallback to default downloader...");
+                        self.remove_aria2_control_files();
+                    }
+                    Err(e) => return Err(e),
+                }
             } else if self.session.config().aria2_warning_enabled() {
-                tracing::warn!(
-                    "aria2 is enabled but no 'aria2c' binary was found on PATH; falling back to curl"
+                eprintln!(
+                    "warning: aria2 is enabled but no 'aria2c' binary was found on PATH; falling back to curl"
                 );
             }
         }
 
         self.download_via_curl()
+    }
+
+    /// Remove stale aria2c control (`.aria2`) files from the cache dir so a
+    /// curl retry starts clean (upstream removes `$source.aria2*`).
+    fn remove_aria2_control_files(&self) {
+        let cache_root = self.session.config().cache_path().to_owned();
+        let entries = std::fs::read_dir(&cache_root);
+        for entry in entries.into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "aria2") {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 
     /// Download pending files with the aria2c external downloader.
@@ -345,7 +374,11 @@ impl<'a> PackageSet<'a> {
                 if let Some(proxy) = proxy {
                     easy.proxy(proxy)?;
                 }
-                set_cookie(&mut easy, &cookie)?;
+                set_cookie(
+                    &mut easy,
+                    &cookie,
+                    &crate::operation::headers_for_url(self.session, dlinfo.url),
+                )?;
 
                 if let Some(tx) = self.session.emitter() {
                     let ident = cache.package.ident();
@@ -462,7 +495,9 @@ impl<'a> PackageSet<'a> {
                 if let Some(proxy) = proxy {
                     easy.proxy(proxy)?;
                 }
-                set_cookie(&mut easy, &cookie)?;
+                // Size probes go without auth headers (upstream only sends
+                // them on the actual download).
+                set_cookie(&mut easy, &cookie, &[])?;
 
                 let mut easyhandle = self.multi.add(easy)?;
                 let token = pidx * 100 + uidx;
@@ -537,7 +572,15 @@ impl<'a> PackageSet<'a> {
     }
 }
 
-fn set_cookie(easy: &mut Easy, cookie: &[(&str, &str)]) -> Fallible<()> {
+fn set_cookie(
+    easy: &mut Easy,
+    cookie: &[(&str, &str)],
+    extra_headers: &[(String, String)],
+) -> Fallible<()> {
+    if cookie.is_empty() && extra_headers.is_empty() {
+        return Ok(());
+    }
+    let mut list = List::new();
     if !cookie.is_empty() {
         let mut header_cookie = String::from("Cookie: ");
         header_cookie.push_str(
@@ -547,10 +590,14 @@ fn set_cookie(easy: &mut Easy, cookie: &[(&str, &str)]) -> Fallible<()> {
                 .collect::<Vec<_>>()
                 .join("; "),
         );
-        let mut list = List::new();
         list.append(&header_cookie)?;
-        easy.http_headers(list)?;
     }
+    // `private_hosts` entries whose `match` regex hits the URL contribute
+    // extra headers (upstream `Invoke-Download` semantics).
+    for (name, value) in extra_headers {
+        list.append(&format!("{name}: {value}"))?;
+    }
+    easy.http_headers(list)?;
 
     Ok(())
 }
@@ -945,6 +992,118 @@ mod tests {
         assert_eq!(entries.len(), 1, "cache should contain the download");
         assert_eq!(std::fs::read(&entries[0]).unwrap(), b"0123456789");
 
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Build a session whose `PATH` starts with a fake `aria2c.exe` that
+    /// always fails (a copy of powershell.exe choking on aria2 arguments),
+    /// with aria2 enabled. Returns the session plus the original `PATH`.
+    #[cfg(windows)]
+    fn failing_aria2_session(dir: &std::path::Path) -> (Session, std::ffi::OsString) {
+        let bindir = dir.join("fakebin");
+        std::fs::create_dir_all(&bindir).unwrap();
+        let system_ps = std::path::PathBuf::from(
+            std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string()),
+        )
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        std::fs::copy(&system_ps, bindir.join("aria2c.exe"))
+            .expect("powershell.exe should be copyable");
+
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut with_fake = bindir.to_string_lossy().into_owned();
+        with_fake.push(';');
+        with_fake.push_str(&original_path.to_string_lossy());
+        std::env::set_var("PATH", &with_fake);
+
+        // Isolated temp config so `set()` never touches the real config.
+        std::env::set_var("SCOOP", dir.join("root"));
+        std::env::set_var("SCOOP_GLOBAL", dir.join("global"));
+        std::env::set_var("SCOOP_CACHE", dir.join("cache"));
+        std::fs::write(dir.join("config.json"), "{}").unwrap();
+        let session = Session::new_with(dir.join("config.json")).unwrap();
+        assert!(session.config().aria2_fallback_enabled());
+        session
+            .config_mut()
+            .unwrap()
+            .set("aria2-enabled", "true")
+            .unwrap();
+        (session, original_path)
+    }
+
+    #[cfg(windows)]
+    fn aria2_probe_package(dir: &std::path::Path) -> Package {
+        std::fs::create_dir_all(dir.join("cache")).unwrap();
+        std::fs::write(dir.join("payload.bin"), b"0123456789").unwrap();
+        let url = format!(
+            "file:///{}/payload.bin",
+            dir.to_string_lossy().replace('\\', "/")
+        );
+        let json = format!(
+            r#"{{"version": "1.0", "homepage": "https://example.com",
+                "license": "MIT", "url": "{url}"}}"#
+        );
+        let manifest = Manifest::parse_bytes(json.as_bytes(), &dir.join("probe.json")).unwrap();
+        Package::from("probe", "main", manifest)
+    }
+
+    /// A failing aria2c falls back to curl (upstream
+    /// `ARIA2-FALLBACK-ENABLED`, default on) instead of aborting.
+    #[test]
+    #[cfg(windows)]
+    fn aria2_failure_falls_back_to_curl() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-probe-aria2-fallback");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (session, original_path) = failing_aria2_session(&dir);
+        let pkg = aria2_probe_package(&dir);
+        let pkgs = [&pkg];
+
+        let mut set = PackageSet::new(&session, &pkgs, true).unwrap();
+        set.download().expect("curl fallback should succeed");
+
+        let entries: Vec<_> = std::fs::read_dir(dir.join("cache"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(entries.len(), 1, "cache should contain the download");
+        assert_eq!(std::fs::read(&entries[0]).unwrap(), b"0123456789");
+
+        std::env::set_var("PATH", &original_path);
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// With the fallback disabled, an aria2c failure surfaces the exit
+    /// code instead of retrying.
+    #[test]
+    #[cfg(windows)]
+    fn aria2_failure_aborts_when_fallback_disabled() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-probe-aria2-nofallback");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (session, original_path) = failing_aria2_session(&dir);
+        session
+            .config_mut()
+            .unwrap()
+            .set("aria2-fallback-enabled", "false")
+            .unwrap();
+        assert!(!session.config().aria2_fallback_enabled());
+        let pkg = aria2_probe_package(&dir);
+        let pkgs = [&pkg];
+
+        let mut set = PackageSet::new(&session, &pkgs, true).unwrap();
+        let err = set.download().unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Aria2 { .. }),
+            "expected structured aria2 error, got: {err}"
+        );
+
+        std::env::set_var("PATH", &original_path);
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
         std::env::remove_var("SCOOP_CACHE");
         std::fs::remove_dir_all(&dir).ok();
     }

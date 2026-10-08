@@ -122,6 +122,7 @@ pub fn bucket_update(session: &Session) -> Fallible<()> {
     let mut tasks = Vec::new();
     let pool = ThreadPool::builder().create()?;
     let proxy = config.proxy().map(|s| s.to_owned());
+    let show_log = config.show_update_log();
     let emitter = session.emitter();
 
     for bucket in buckets.iter() {
@@ -137,6 +138,7 @@ pub fn bucket_update(session: &Session) -> Fallible<()> {
         let flag = Arc::clone(&any_bucket_updated);
         let proxy = proxy.clone();
         let emitter = emitter.clone();
+        let before = internal::git::head_rev(&repo).ok().flatten();
 
         let task = pool
             .spawn_with_handle(async move {
@@ -146,13 +148,32 @@ pub fn bucket_update(session: &Session) -> Fallible<()> {
                     let _ = tx.send(Event::BucketUpdateProgress(ctx.clone()));
                 }
 
-                match internal::git::reset_head(repo, proxy) {
+                match internal::git::reset_head(&repo, proxy) {
                     Ok(_) => {
                         *flag.lock().unwrap() = true;
 
                         if let Some(tx) = emitter {
                             ctx.set_succeeded();
                             let _ = tx.send(Event::BucketUpdateProgress(ctx));
+                            // Upstream `show_update_log`: report pulled
+                            // commits (capped) when the HEAD moved.
+                            if show_log {
+                                let after = internal::git::head_rev(&repo).ok().flatten();
+                                if let (Some(old), Some(new)) = (before, after) {
+                                    if let Ok(commits) =
+                                        internal::git::log_range(&repo, &old, &new, 25)
+                                    {
+                                        if !commits.is_empty() {
+                                            let _ = tx.send(Event::BucketUpdateLog(
+                                                crate::bucket::BucketUpdateLogContext::new(
+                                                    name.as_str(),
+                                                    commits,
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(err) => {
@@ -1025,9 +1046,94 @@ fn detect_site_mode(asset_url: &str) -> Option<SiteMode> {
     None
 }
 
+/// Resolve the GitHub API token, mirroring upstream `Get-GitHubToken`
+/// precedence: `SCOOP_GH_TOKEN` env, `gh_token` config, `GH_TOKEN` env,
+/// `GITHUB_TOKEN` env.
+pub fn github_token(session: &Session) -> Option<String> {
+    std::env::var("SCOOP_GH_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            session
+                .config()
+                .gh_token()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| std::env::var("GH_TOKEN").ok().filter(|s| !s.is_empty()))
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()))
+}
+
+/// Extra request headers for `url` from `private_hosts` entries whose
+/// `match` regex hits, mirroring upstream `Invoke-Download` (headers in
+/// `Name=Value` StringData lines; `Name: Value` is accepted too, as used by
+/// manifests in the wild).
+pub fn headers_for_url(session: &Session, url: &str) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    let config = session.config();
+    let Some(hosts) = config.private_hosts() else {
+        return headers;
+    };
+    for host in hosts {
+        let matched = regex::Regex::new(host.matcher())
+            .map(|re| re.is_match(url))
+            .unwrap_or(false);
+        if !matched {
+            continue;
+        }
+        for line in host.headers().lines() {
+            let line = line.trim().trim_end_matches(';').trim();
+            let pair = line.split_once('=').or_else(|| line.split_once(':'));
+            let Some((name, value)) = pair else {
+                continue;
+            };
+            let (name, value) = (name.trim(), value.trim());
+            if !name.is_empty() {
+                headers.push((name.to_owned(), value.to_owned()));
+            }
+        }
+    }
+    headers
+}
+
+/// Fetch a GitHub API URL, authenticating when a token is configured
+/// (upstream `Bearer` + API-version headers).
+///
+/// Returns `None` on transport failure and non-200 responses, with
+/// upstream's hints on auth (`Token might be misconfigured`) and
+/// rate-limit failures.
+fn github_api_get(session: &Session, url: &str, proxy: Option<&str>) -> Option<String> {
+    let token = github_token(session);
+    let bearer;
+    let mut headers = vec![
+        ("Accept", "application/vnd.github+json"),
+        ("X-GitHub-Api-Version", "2022-11-28"),
+    ];
+    if let Some(token) = token.as_deref() {
+        bearer = format!("Bearer {token}");
+        headers.push(("Authorization", bearer.as_str()));
+    }
+    let (code, body) = internal::network::fetch_url_with_headers(url, proxy, &headers)?;
+    if code == 401 {
+        eprintln!("warning: GitHub request was unauthorized; token might be misconfigured.");
+        return None;
+    }
+    if code == 403 && body.contains("rate limit") {
+        eprintln!(
+            "warning: GitHub API rate limit reached. Configure a token via 'bagger config set gh_token <token>'."
+        );
+        return None;
+    }
+    if code != 200 {
+        return None;
+    }
+    Some(body)
+}
+
 /// Resolve a site-specific hash, returning `None` when the lookup fails
 /// (the caller then falls back to downloading the asset).
 fn resolve_site_hash(
+    session: &Session,
     mode: &SiteMode,
     asset_url: &str,
     basename: &str,
@@ -1048,7 +1154,7 @@ fn resolve_site_hash(
         }
         SiteMode::Github { owner, repo } => {
             let api = format!("https://api.github.com/repos/{owner}/{repo}/releases");
-            let body = internal::network::fetch_url(&api, proxy)?;
+            let body = github_api_get(session, &api, proxy)?;
             github_asset_digest(&body, asset_url)
         }
     }
@@ -1139,6 +1245,7 @@ fn rdf_sha256(doc_xml: &str, basename: &str) -> Option<String> {
 /// any lookup failure fall back to [`AssetHash::Download`], exactly like
 /// upstream's compute-hashes fallback.
 fn resolve_asset_hash(
+    session: &Session,
     asset_url: &str,
     spec: Option<&crate::package::manifest::HashExtraction>,
     subs: &AutoupdateSubstitutions,
@@ -1152,7 +1259,7 @@ fn resolve_asset_hash(
         return Ok(match detect_site_mode(asset_url) {
             Some(site) => {
                 let basename = subs.expand("$basename");
-                match resolve_site_hash(&site, asset_url, &basename, proxy) {
+                match resolve_site_hash(session, &site, asset_url, &basename, proxy) {
                     Some(hash) => AssetHash::Found(hash),
                     None => AssetHash::Download,
                 }
@@ -1204,7 +1311,7 @@ fn resolve_asset_hash(
         Mode::Site => match detect_site_mode(asset_url) {
             Some(site) => {
                 let basename = subs.expand("$basename");
-                match resolve_site_hash(&site, asset_url, &basename, proxy) {
+                match resolve_site_hash(session, &site, asset_url, &basename, proxy) {
                     Some(hash) => Ok(AssetHash::Found(hash)),
                     None => Ok(AssetHash::Download),
                 }
@@ -1449,7 +1556,7 @@ pub fn autoupdate_apply(
                 asset_url: url,
                 captures,
             };
-            match resolve_asset_hash(url, spec, &subs, proxy.as_deref())? {
+            match resolve_asset_hash(session, url, spec, &subs, proxy.as_deref())? {
                 AssetHash::Found(hash) => hashes.push(hash),
                 AssetHash::Download => {
                     let bytes =
@@ -1977,6 +2084,77 @@ mod tests {
         );
     }
 
+    /// Upstream `Get-GitHubToken` precedence: `SCOOP_GH_TOKEN`, config
+    /// `gh_token`, `GH_TOKEN`, `GITHUB_TOKEN`; empty values are ignored.
+    #[test]
+    fn github_token_precedence() {
+        let _guard = crate::test_support::env_guard();
+        for var in ["SCOOP_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+            std::env::remove_var(var);
+        }
+        let base = std::env::temp_dir().join("bagger-test-ghtoken");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("config.json"), "{}").unwrap();
+        let session = crate::Session::new_with(base.join("config.json")).unwrap();
+
+        assert_eq!(super::github_token(&session), None);
+        std::env::set_var("GITHUB_TOKEN", "tok-github");
+        assert_eq!(super::github_token(&session), Some("tok-github".to_owned()));
+        std::env::set_var("GH_TOKEN", "tok-gh");
+        assert_eq!(super::github_token(&session), Some("tok-gh".to_owned()));
+        session
+            .config_mut()
+            .unwrap()
+            .set("gh_token", "tok-cfg")
+            .unwrap();
+        assert_eq!(super::github_token(&session), Some("tok-cfg".to_owned()));
+        std::env::set_var("SCOOP_GH_TOKEN", "tok-scoop");
+        assert_eq!(super::github_token(&session), Some("tok-scoop".to_owned()));
+        std::env::set_var("SCOOP_GH_TOKEN", "");
+        assert_eq!(super::github_token(&session), Some("tok-cfg".to_owned()));
+
+        for var in ["SCOOP_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+            std::env::remove_var(var);
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `private_hosts` entries contribute headers only to matching URLs;
+    /// both `=` and `:` separators work, and bad regexes never match.
+    #[test]
+    fn private_host_headers_match_urls() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-privhosts");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("config.json"), "{}").unwrap();
+        let session = crate::Session::new_with(base.join("config.json")).unwrap();
+        session
+            .config_mut()
+            .unwrap()
+            .set(
+                "private_hosts",
+                r#"[{"match": "example\\.com", "headers": "Authorization=Bearer abc\nX-Custom: 1;"}]"#,
+            )
+            .unwrap();
+
+        let headers = super::headers_for_url(&session, "https://example.com/f.7z");
+        assert!(headers.contains(&("Authorization".to_owned(), "Bearer abc".to_owned())));
+        assert!(headers.contains(&("X-Custom".to_owned(), "1".to_owned())));
+        assert!(super::headers_for_url(&session, "https://other.org/f.7z").is_empty());
+
+        // An invalid regex is ignored rather than fatal.
+        session
+            .config_mut()
+            .unwrap()
+            .set("private_hosts", r#"[{"match": "([", "headers": "A=B"}]"#)
+            .unwrap();
+        assert!(super::headers_for_url(&session, "https://example.com/f.7z").is_empty());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn github_mode_falls_back_to_download() {
         use crate::package::manifest::{HashExtraction, HashExtractionMode};
@@ -1996,7 +2174,9 @@ mod tests {
         };
         // Site-specific hash modes fall back to downloading the asset
         // (no network happens on this path).
-        match super::resolve_asset_hash(subs.asset_url, Some(&spec), &subs, None).unwrap() {
+        let session = crate::Session::new();
+        match super::resolve_asset_hash(&session, subs.asset_url, Some(&spec), &subs, None).unwrap()
+        {
             super::AssetHash::Download => {}
             super::AssetHash::Found(hash) => panic!("unexpected resolved hash {hash}"),
         }

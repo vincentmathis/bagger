@@ -39,6 +39,59 @@ pub fn is_available() -> bool {
     super::os::is_program_available("aria2c") || super::os::is_program_available("aria2c.exe")
 }
 
+/// Human-readable meaning of an aria2c exit code (upstream `aria_exit_code`).
+pub fn exit_code_message(code: i32) -> &'static str {
+    match code {
+        0 => "All downloads were successful",
+        1 => "An unknown error occurred",
+        2 => "Timeout",
+        3 => "Resource was not found",
+        4 => "Aria2 saw the specified number of \"resource not found\" error",
+        5 => "Download aborted because download speed was too slow",
+        6 => "Network problem occurred",
+        7 => "There were unfinished downloads",
+        8 => "Remote server did not support resume when resume was required",
+        9 => "There was not enough disk space available",
+        10 => "Piece length was different from one in .aria2 control file",
+        11 => "Aria2 was downloading same file at that moment",
+        12 => "Aria2 was downloading same info hash torrent at that moment",
+        13 => "File already existed",
+        14 => "Renaming file failed",
+        15 => "Aria2 could not open existing file",
+        16 => "Aria2 could not create new file or truncate existing file",
+        17 => "File I/O error occurred",
+        18 => "Aria2 could not create directory",
+        19 => "Name resolution failed",
+        20 => "Aria2 could not parse Metalink document",
+        21 => "FTP command failed",
+        22 => "HTTP response header was bad or unexpected",
+        23 => "Too many redirects occurred",
+        24 => "HTTP authorization failed",
+        25 => "Aria2 could not parse bencoded file",
+        26 => "\".torrent\" file was corrupted or missing information",
+        27 => "Magnet URI was bad",
+        28 => "Bad/unrecognized option was given",
+        29 => "The remote server was unable to handle the request",
+        30 => "Aria2 could not parse JSON-RPC request",
+        32 => "Checksum validation failed",
+        _ => "An unknown error occurred",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_codes_have_meanings() {
+        assert_eq!(exit_code_message(0), "All downloads were successful");
+        assert_eq!(exit_code_message(3), "Resource was not found");
+        assert_eq!(exit_code_message(19), "Name resolution failed");
+        assert_eq!(exit_code_message(32), "Checksum validation failed");
+        assert_eq!(exit_code_message(99), "An unknown error occurred");
+    }
+}
+
 /// Download a single file with aria2c.
 ///
 /// The file is written to `dest` (a temporary `.download` path in the cache
@@ -91,10 +144,11 @@ pub fn download_file(url: &str, dest: &Path, opts: &DownloadOptions) -> Fallible
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::Custom(format!(
-            "aria2c failed to download '{url}' ({})",
-            stderr.trim()
-        )));
+        return Err(Error::Aria2 {
+            url: url.to_owned(),
+            code: output.status.code().unwrap_or(-1),
+            stderr: stderr.trim().to_owned(),
+        });
     }
 
     if !dest.exists() {

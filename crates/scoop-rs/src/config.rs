@@ -105,6 +105,11 @@ pub struct ConfigInner {
     #[serde(skip_serializing_if = "Option::is_none")]
     aria2_warning_enabled: Option<bool>,
 
+    #[serde(alias = "aria2_fallback_enabled")]
+    #[serde(rename = "aria2-fallback-enabled")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aria2_fallback_enabled: Option<bool>,
+
     #[serde(alias = "cachePath")]
     #[serde(default = "default::cache_path")]
     #[serde(skip_serializing_if = "default::is_default_cache_path")]
@@ -113,8 +118,9 @@ pub struct ConfigInner {
     #[serde(skip_serializing_if = "Option::is_none")]
     cat_style: Option<String>,
 
+    #[serde(alias = "deafult_architecture")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    deafult_architecture: Option<String>,
+    default_architecture: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     debug: Option<bool>,
@@ -214,6 +220,21 @@ pub struct PrivateHosts {
 
     /// A string defining HTTP headers.
     headers: String,
+}
+
+impl PrivateHosts {
+    /// The URL pattern (upstream `$url -match`, i.e. regex) selecting
+    /// requests that carry these headers.
+    #[inline]
+    pub fn matcher(&self) -> &str {
+        &self.match_
+    }
+
+    /// Extra headers in PowerShell `StringData` form (`Name=Value` lines).
+    #[inline]
+    pub fn headers(&self) -> &str {
+        &self.headers
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -414,6 +435,59 @@ impl Config {
         self.use_sqlite_cache.unwrap_or_default()
     }
 
+    /// Get the `gh_token` config (GitHub API token for authenticated
+    /// requests, easing rate limits and private-repo access).
+    #[inline]
+    pub fn gh_token(&self) -> Option<&str> {
+        self.gh_token.as_deref()
+    }
+
+    /// Get the `private_hosts` config (per-host match/headers for
+    /// additional download authentication).
+    #[inline]
+    pub fn private_hosts(&self) -> Option<&[PrivateHosts]> {
+        self.private_hosts.as_deref()
+    }
+
+    /// Get the `force_update` config (upgrade behaves as `--force`).
+    #[inline]
+    pub fn force_update(&self) -> bool {
+        self.force_update.unwrap_or_default()
+    }
+
+    /// Get the `show_update_log` config (display bucket commit logs on
+    /// update; upstream default is shown).
+    #[inline]
+    pub fn show_update_log(&self) -> bool {
+        self.show_update_log.unwrap_or(true)
+    }
+
+    /// Get the `last_update` config (timestamp of the last bucket update).
+    #[inline]
+    pub fn last_update(&self) -> Option<&str> {
+        self.last_update.as_deref()
+    }
+
+    /// Get the `debug` config (additional detailed output).
+    #[inline]
+    pub fn debug(&self) -> bool {
+        self.debug.unwrap_or_default()
+    }
+
+    /// Get the `default_architecture` config (preferred install
+    /// architecture when no `--arch`/`SCOOP_ARCH` override is given).
+    #[inline]
+    pub fn default_architecture(&self) -> Option<&str> {
+        self.default_architecture.as_deref()
+    }
+
+    /// Get the `aria2-fallback-enabled` config (fall back to the default
+    /// downloader when an aria2c download fails; upstream default is on).
+    #[inline]
+    pub fn aria2_fallback_enabled(&self) -> bool {
+        self.aria2_fallback_enabled.unwrap_or(true)
+    }
+
     /// Update config key with new value.
     pub(crate) fn set(&mut self, key: &str, value: &str) -> Fallible<()> {
         let is_unset = value.is_empty();
@@ -503,6 +577,47 @@ impl Config {
                 "" | "none" => self.inner.proxy = None,
                 _ => self.inner.proxy = Some(value.to_string()),
             },
+            "debug" => match is_unset {
+                true => self.inner.debug = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.debug = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "force_update" => match is_unset {
+                true => self.inner.force_update = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.force_update = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "show_update_log" => match is_unset {
+                true => self.inner.show_update_log = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.show_update_log = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "private_hosts" => match is_unset {
+                true => self.inner.private_hosts = None,
+                false => match serde_json::from_str::<Vec<PrivateHosts>>(value) {
+                    Ok(value) => self.inner.private_hosts = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "default_architecture" => {
+                self.inner.default_architecture = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            "aria2_fallback_enabled" | "aria2-fallback-enabled" => match is_unset {
+                true => self.inner.aria2_fallback_enabled = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.aria2_fallback_enabled = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
             key => return Err(Error::ConfigKeyInvalid(key.to_owned())),
         }
 
@@ -531,10 +646,11 @@ impl Default for Config {
             aria2_retry_wait: Default::default(),
             aria2_split: Default::default(),
             aria2_warning_enabled: Default::default(),
+            aria2_fallback_enabled: Default::default(),
             // default_cache_path: default::cache_path(),
             cache_path: default::cache_path(),
             cat_style: Default::default(),
-            deafult_architecture: Default::default(),
+            default_architecture: Default::default(),
             debug: Default::default(),
             force_update: Default::default(),
             gh_token: Default::default(),

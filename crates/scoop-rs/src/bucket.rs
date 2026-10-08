@@ -323,3 +323,32 @@ impl BucketUpdateState {
         }
     }
 }
+
+/// New commits pulled by a bucket update (shown when `show_update_log`).
+#[derive(Clone)]
+pub struct BucketUpdateLogContext {
+    /// The name of the bucket.
+    name: String,
+
+    /// One-line commit entries (`<short-id> <summary>`), newest first.
+    commits: Vec<String>,
+}
+
+impl BucketUpdateLogContext {
+    pub fn new(name: &str, commits: Vec<String>) -> BucketUpdateLogContext {
+        BucketUpdateLogContext {
+            name: name.to_owned(),
+            commits,
+        }
+    }
+
+    /// Get the name of the bucket associated with this log.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the pulled commit entries.
+    pub fn commits(&self) -> &[String] {
+        &self.commits
+    }
+}
