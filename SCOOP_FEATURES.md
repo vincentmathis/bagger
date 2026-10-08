@@ -17,7 +17,7 @@ Legend:
 | :--- | :---: | :--- |
 | `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated); `app@version` / `bucket/app@version` / `url@version` / `path.json@version` pins (history → autoupdate generation); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
 | `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal, `-g/--global` |
-| `bagger update` | [x] | Pull all subscribed buckets (no args); shows pulled commit logs unless `show_update_log` is false; stamps `last_update` |
+| `bagger update` | [x] | Pull all subscribed buckets (no args); shows pulled commit logs unless `show_update_log` is false; stamps `last_update`; named apps forward to `upgrade` (like upstream) |
 
 > **Note on `update *`:** In older Scoop, `scoop update *` meant "upgrade all apps". In modern Scoop (and in `bagger`), use `bagger upgrade` (with no arguments) to upgrade all installed apps. The `update` command only updates bucket manifests and does not accept app names or wildcards.
 | `bagger upgrade` | [x] | Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override; `--force` reinstalls current versions (previous dir rotated to `_<version>.old`), also via `force_update` config |
@@ -196,7 +196,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | `no_junction` | [x] | Disable symlink/junction for `current` |
 | `use_isolated_path` | [x] | Isolated PATH management |
 | `last_update` | [x] | Bucket update timestamp |
-| `aria2-*` settings | [x] | Parsed with full config getters |
+| `aria2-*` settings | [x] | Parsed with full config getters; `aria2-enabled` defaults on like upstream (curl fallback on missing binary or failed download) |
 | `use_external_7zip` | [x] | Parsed; extraction always shells out to 7z (PATH or Scoop 7zip app) |
 | `scoop_branch` | [~] | Parsed (not actively used) |
 | `scoop_repo` | [~] | Parsed (not actively used) |
@@ -280,7 +280,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 ## Missing Features (Medium Priority)
 
 - (none — all tracked features implemented)
-- **Known divergences (deliberate)** - `aria2-enabled` defaults off (upstream: on); `bagger update` takes no app args (upstream `update <app>` upgrades; use `bagger upgrade`); `update -f` spelling is `upgrade --force`; missing shim targets warn instead of aborting the install
+- **Known divergences (deliberate)** - `update -f` spelling is `upgrade --force`; missing shim targets warn instead of aborting the install
 
 ## Previously Missing - Now Implemented (this iteration)
 
@@ -338,6 +338,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 58. **Nightly version stamping** - manifests with `version: nightly` install under `nightly-yyyyMMdd` (local date), saved self-describing; hash checks skipped for literal and dated forms; `upgrade` redates on a new day only with `update_nightly` (default off, like upstream), `--force` reinstalls any time with `_.old` rotation; same-day upgrade is a no-op; `cleanup` spares `_<v>.old*` backups (previously would have deleted them — found via upstream `Get-InstalledVersion`); proven live end to end
 59. **GitHub private-release downloads** - `releases/download` URLs resolve to API asset URLs for private repos when a token is configured (repo check + tag asset pick, `token` scheme like upstream); `api.github.com` asset downloads carry `Accept: application/octet-stream` + `Bearer` (curl backend; aria2 failures fall back to curl); proven live against a public 93-byte asset (binary bytes, not JSON metadata); the private-repo branch is unit-tested (URL split, asset pick, header selection) but has no private repo to verify against
 60. **Nightly status display** - `stale_nightlies()` (bucket manifest still `nightly`, installed stamp dated but not today, `update_nightly` set, holds excluded) feeds `status`, `list --upgradable`, and `checkup`, which show today's stamp as the target; proven live with a fabricated yesterday install (flagged in all three, silent by default, healed by `upgrade`); pins need no `update -f` equivalent — bucket attribution lets them upgrade normally (proven: `1.0` pin → plain `upgrade` → `2.0`)
+61. **Upstream re-verification corrections** - reading `scoop-cleanup.ps1` showed `cleanup` deletes `_<version>.old*` backups (no exclusion like `Get-InstalledVersion`'s list filter), so the earlier exclusion was reverted — backups clean like any old version; `cleanup -k` now also drops `*.download` partials and stale `.aria2` control files (upstream drops the former); `aria2-enabled` flipped to default-on like upstream (safe under the curl fallback); `bagger update <app>` forwards to `upgrade` with a notice (upstream semantics) instead of erroring
 
 ## Build & Distribution
 

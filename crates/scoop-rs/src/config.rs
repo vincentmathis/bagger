@@ -382,10 +382,11 @@ impl Config {
         self.show_manifest.unwrap_or_default()
     }
 
-    /// Get the `aria2_enabled` config.
+    /// Get the `aria2_enabled` config (upstream default is on; the curl
+    /// backend remains as the missing-binary and failure fallback).
     #[inline]
     pub fn aria2_enabled(&self) -> bool {
-        self.aria2_enabled.unwrap_or_default()
+        self.aria2_enabled.unwrap_or(true)
     }
 
     /// Get the `aria2_warning_enabled` config.

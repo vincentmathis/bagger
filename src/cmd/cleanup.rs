@@ -238,6 +238,19 @@ fn cleanup(
                 fs::remove_file(file.path())?;
             }
         }
+        // Upstream drops partial transfers with `-k`; stale aria2 control
+        // files go with them (a killed run's litter, never resumed).
+        if let Ok(entries) = fs::read_dir(session.config().cache_path()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .extension()
+                    .is_some_and(|e| e == "download" || e == "aria2")
+                {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -248,12 +261,11 @@ struct ActiveVersion {
     manifest_version: Option<String>,
 }
 
-/// Whether a version directory is cleanup-eligible: not `current`, not the
-/// active version, and not a `_<version>.old*` force-reinstall backup
-/// (upstream `Get-InstalledVersion` excludes those too — they are user
-/// evidence, not old versions).
+/// Whether a version directory is cleanup-eligible: everything except
+/// `current` and the active version — including `_<version>.old*`
+/// force-reinstall backups, which upstream removes like any old version.
 fn is_cleanable_version(name: &str, active: &str) -> bool {
-    name != "current" && name != active && !(name.starts_with('_') && name.contains(".old"))
+    name != "current" && name != active
 }
 
 fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
@@ -475,17 +487,14 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// Force-reinstall backups (`_<version>.old*`) are user evidence, not
-    /// old versions: cleanup must leave them alone, like upstream's
-    /// `Get-InstalledVersion` exclusion.
+    /// Force-reinstall backups (`_<version>.old*`) clean up like any
+    /// other non-active version (upstream removes them too).
     #[test]
-    fn cleanable_version_skips_current_active_and_backups() {
+    fn cleanable_version_removes_backups() {
         assert!(!is_cleanable_version("current", "1.0"));
         assert!(!is_cleanable_version("1.0", "1.0"));
         assert!(is_cleanable_version("0.9", "1.0"));
-        assert!(!is_cleanable_version("_1.0.old", "1.0"));
-        assert!(!is_cleanable_version("_1.0.old(1)", "1.0"));
-        // Other underscore names are still eligible.
-        assert!(is_cleanable_version("_tmp", "1.0"));
+        assert!(is_cleanable_version("_1.0.old", "1.0"));
+        assert!(is_cleanable_version("_1.0.old(1)", "1.0"));
     }
 }

@@ -158,7 +158,7 @@ Commands:
   shim         Manage shims
   unhold       Unhold package(s) to enable changes
   uninstall    Uninstall package(s)
-  update       Fetch and update subscribed buckets
+  update       Fetch and update subscribed buckets (or upgrade named apps)
   upgrade      Upgrade installed package(s)
   virustotal   Scan downloaded app archives with VirusTotal (requires API key)
   which        Find which application owns a given executable (shim)
@@ -173,13 +173,14 @@ Options:
 
 Notable extras beyond stock Scoop parity:
 
-- `bagger install <manifest-url|path.json>` installs isolated packages without a bucket
+- `bagger install <manifest-url|path.json>` installs isolated packages without a bucket; `app@version` (also `bucket/app@`, URL, or file pins) installs that version via bucket history or autoupdate generation
 - `bagger install/upgrade/uninstall -g/--global` targets `%ProgramData%\scoop` (admin)
-- `bagger install/upgrade/download --arch <32bit|64bit|arm64>` (or `SCOOP_ARCH`) overrides architecture resolution
+- `bagger upgrade --force` reinstalls even when current (previous version kept as `_<version>.old`); `bagger update <app>` forwards to `upgrade`
+- `bagger install/upgrade/download --arch <32bit|64bit|arm64>` (or `SCOOP_ARCH`, or `default_architecture` config) overrides architecture resolution
 - `bagger autofetch <app>|all [-w]` previews (and writes) autoupdate URL/hash refreshes
 - `bagger checkver` supports `regex` (+`reverse`/`replace`), `jsonpath`, `xpath`, `script`, arch-specific specs and the `github` shorthand
 - `bagger virustotal` looks up cached downloads against the VirusTotal v3 API
-- Downloads use `aria2c` when `aria2-enabled` is set (curl fallback); manifests can be SQLite-cached via `use_sqlite_cache`
+- Downloads use `aria2c` when available (curl fallback on missing binary or failed download; opt out with `aria2-enabled false`); manifests can be SQLite-cached via `use_sqlite_cache`
 - `BAGGER_FLAVOR=heavy` swaps progress lines for industrial ones
   (`Surveying the pit...`, `Hauling...`, `Assaying the ore...`,
   `Nothing to haul — already stockpiled.`). Off by default so scripts
@@ -194,8 +195,8 @@ configuration is picked up automatically. Run `bagger config` to list current va
 `bagger config set <key> <value>` to change one.
 
 ```sh
-# Example: enable aria2 for faster downloads
-bagger config set aria2-enabled true
+# Example: redated nightly builds on every upgrade
+bagger config set update_nightly true
 ```
 
 Notable keys (full list in [SCOOP_FEATURES.md](SCOOP_FEATURES.md)):

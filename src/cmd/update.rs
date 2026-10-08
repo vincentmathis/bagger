@@ -1,14 +1,31 @@
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use crossterm::{cursor, ExecutableCommand};
 use scoop_rs::{operation, Event, Session};
 
 use crate::{cui, flavor, Result};
 
-/// Fetch and update subscribed buckets
+/// Fetch and update subscribed buckets (or upgrade named apps)
 #[derive(Debug, Parser)]
-pub struct Args {}
+pub struct Args {
+    /// The app(s) to upgrade (forwards to `upgrade`, like upstream
+    /// `scoop update <app>`); empty updates buckets
+    #[arg(action = ArgAction::Append)]
+    package: Vec<String>,
+    /// Assume yes to all prompts and run non-interactively
+    #[arg(short = 'y', long, action = ArgAction::SetTrue)]
+    assume_yes: bool,
+}
 
-pub fn execute(_: Args, session: &Session) -> Result<()> {
+pub fn execute(args: Args, session: &Session) -> Result<()> {
+    if !args.package.is_empty() {
+        println!(
+            "Forwarding to 'bagger upgrade {}' (upstream 'scoop update <app>' upgrades apps).",
+            args.package.join(" ")
+        );
+        let upgrade_args = super::upgrade::Args::from_packages(args.package, args.assume_yes);
+        return super::upgrade::execute(upgrade_args, session);
+    }
+
     let rx = session.event_bus().receiver();
     let show_log = session.config().show_update_log();
 

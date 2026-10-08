@@ -42,6 +42,23 @@ pub struct Args {
     arch: Option<String>,
 }
 
+impl Args {
+    /// Build args for programmatic upgrades (e.g. `update <app>` forwarding).
+    pub(crate) fn from_packages(package: Vec<String>, assume_yes: bool) -> Self {
+        Self {
+            package,
+            ignore_failure: false,
+            offline: false,
+            assume_yes,
+            escape_hold: false,
+            no_hash_check: false,
+            global: false,
+            arch: None,
+            force: false,
+        }
+    }
+}
+
 pub fn execute(args: Args, session: &Session) -> Result<()> {
     crate::util::apply_global_flag(args.global, session)?;
     crate::util::apply_arch_flag(args.arch.as_deref(), session)?;
