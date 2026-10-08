@@ -257,9 +257,13 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         }
     });
 
-    operation::package_sync(session, queries, options)?;
+    let did_work = operation::package_sync(session, queries, options)?;
 
     handle.join().unwrap();
+
+    if !did_work {
+        println!("Latest versions for all apps are installed.");
+    }
 
     let _ = stdout.execute(cursor::Show);
 

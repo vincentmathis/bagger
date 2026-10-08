@@ -15,12 +15,12 @@ Legend:
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
-| `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated); `app@version` / `bucket/app@version` / `url@version` / `path.json@version` pins (history → autoupdate generation); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
+| `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars (upgrades outdated apps unless `-U`; skips with a warning when already current); also accepts manifest URLs and local `.json` files (isolated); `app@version` / `bucket/app@version` / `url@version` / `path.json@version` pins (history → autoupdate generation); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
 | `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal, `-g/--global` |
 | `bagger update` | [x] | Pull all subscribed buckets (no args); shows pulled commit logs unless `show_update_log` is false; stamps `last_update`; named apps forward to `upgrade` (like upstream) |
 
 > **Note on `update *`:** In older Scoop, `scoop update *` meant "upgrade all apps". In modern Scoop (and in `bagger`), use `bagger upgrade` (with no arguments) to upgrade all installed apps. The `update` command only updates bucket manifests and does not accept app names or wildcards.
-| `bagger upgrade` | [x] | Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override; `--force` reinstalls current versions (previous dir rotated to `_<version>.old`), also via `force_update` config |
+| `bagger upgrade` | [x] | Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override; `--force` reinstalls current versions (previous dir rotated to `_<version>.old`), also via `force_update` config; reports when everything is already current |
 | `bagger search <query>` | [x] | Search across all buckets |
 | `bagger list` | [x] | List installed apps; supports `--upgradable` (incl. stale nightlies) |
 | `bagger info <app>` | [x] | Show manifest info for any app |
@@ -280,7 +280,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 ## Missing Features (Medium Priority)
 
 - (none — all tracked features implemented)
-- **Known divergences (deliberate)** - `update -f` spelling is `upgrade --force`; missing shim targets warn instead of aborting the install
+- **Known divergences (deliberate)** - `update -f` spelling is `upgrade --force`; missing shim targets warn instead of aborting the install; `install` upgrades outdated apps unless `-U/--no-upgrade` (upstream warns and skips; bagger reports skips only when already current)
 
 ## Previously Missing - Now Implemented (this iteration)
 

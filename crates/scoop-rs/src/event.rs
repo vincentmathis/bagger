@@ -81,6 +81,14 @@ pub enum Event {
     /// Package has been committed.
     PackageCommitDone(String),
 
+    /// An explicitly requested package was skipped: already installed.
+    PackageAlreadyInstalled {
+        /// Package name.
+        name: String,
+        /// Installed version.
+        version: String,
+    },
+
     /// A committed package carries install notes and/or suggestions.
     PackageInstalledNotes {
         /// Package identifier (`bucket/name`).

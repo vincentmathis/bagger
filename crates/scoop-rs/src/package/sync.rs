@@ -394,7 +394,11 @@ fn running_blocked(session: &Session, package: &Package) -> Option<String> {
 }
 
 /// Sync operation: install and/or upgrade packages.
-pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fallible<()> {
+///
+/// Returns whether any package was committed (an empty transaction —
+/// already installed, nothing outdated — returns `false` so frontends
+/// can report it instead of going silent).
+pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fallible<bool> {
     let mut packages = vec![];
 
     let only_upgrade = options.contains(&SyncOption::OnlyUpgrade);
@@ -488,7 +492,7 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
     // anything still empty is caught by the post-transaction early return
     // instead.
     if packages.is_empty() && !force && !update_nightly {
-        return Ok(());
+        return Ok(false);
     }
 
     let transaction = Transaction::default();
@@ -528,6 +532,18 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             }
         })
         .partition(|p| p.is_installed());
+
+    // Snapshot installed names/versions for the already-installed
+    // warnings below (the partition consumes the packages).
+    let installed_snapshot: Vec<(String, String)> = installed
+        .iter()
+        .map(|p| {
+            (
+                p.name().to_owned(),
+                p.installed_version().unwrap_or(p.version()).to_owned(),
+            )
+        })
+        .collect();
 
     let (upgradable, replaceable): (Vec<_>, Vec<_>) = installed
         .into_iter()
@@ -601,11 +617,33 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         transaction.set_replace(replaceable);
     }
 
+    // Upstream prune warnings: explicitly requested apps that are already
+    // installed are skipped, not reinstalled.
+    if !only_upgrade {
+        if let Some(tx) = session.emitter() {
+            let acted: std::collections::HashSet<&str> =
+                transaction.add_view().iter().map(|p| p.name()).collect();
+            for (name, version) in &installed_snapshot {
+                if acted.contains(name.as_str()) {
+                    continue;
+                }
+                // Only explicitly requested apps warn (wildcards, buckets,
+                // and dependencies never do), mirroring upstream exactly.
+                if queries.contains(&name.as_str()) {
+                    let _ = tx.send(Event::PackageAlreadyInstalled {
+                        name: name.clone(),
+                        version: version.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     let reuse_cache = !options.contains(&SyncOption::IgnoreCache);
 
     let packages = transaction.add_view();
     if packages.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let mut set = download::PackageSet::new(session, &packages, reuse_cache)?;
@@ -645,7 +683,7 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 }
 
                 if !confirmed {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
@@ -1007,7 +1045,7 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         }
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Get the architecture string for the current platform.
@@ -1434,7 +1472,7 @@ fn handle_extract_location(
 }
 
 /// Sync operation: remove packages.
-pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fallible<()> {
+pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fallible<bool> {
     let mut packages = vec![];
 
     let installed = query::query_installed(session, &["*"], &[])?;
@@ -1538,11 +1576,15 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
                 }
 
                 if !confirmed {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
     }
+
+    let did_work = transaction
+        .remove_view()
+        .is_some_and(|packages| !packages.is_empty());
 
     if let Some(packages) = transaction.remove_view() {
         let purge = options.contains(&SyncOption::Purge);
@@ -1648,7 +1690,7 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
         }
     }
 
-    Ok(())
+    Ok(did_work)
 }
 
 #[cfg(test)]

@@ -144,6 +144,12 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                 Event::PackageRunningSkipped { name, processes } => {
                     println!("Skipping '{name}' (running: {processes}). Quit it and retry to include it.");
                 }
+                Event::PackageAlreadyInstalled { name, version } => {
+                    println!(
+                        "{}",
+                        format!("'{name}' ({version}) is already installed. Skipping.").yellow()
+                    );
+                }
                 Event::PackageDownloadSizingStart => println!("{}", flavor::progress("sizing")),
                 Event::PackageDownloadStart => println!("{}", flavor::progress("download")),
                 Event::PackageDownloadProgress(ctx) => {

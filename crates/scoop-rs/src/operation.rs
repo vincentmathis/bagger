@@ -3134,7 +3134,7 @@ pub fn package_sync(
     session: &Session,
     queries: Vec<&str>,
     options: Vec<SyncOption>,
-) -> Fallible<()> {
+) -> Fallible<bool> {
     // remove possible duplicates
     let queries = HashSet::<&str>::from_iter(queries)
         .into_iter()
@@ -3145,17 +3145,17 @@ pub fn package_sync(
     }
 
     let is_op_remove = options.contains(&SyncOption::Remove);
-    if is_op_remove {
-        package::sync::remove(session, &queries, &options)?;
+    let did_work = if is_op_remove {
+        package::sync::remove(session, &queries, &options)?
     } else {
-        package::sync::install(session, &queries, &options)?;
-    }
+        package::sync::install(session, &queries, &options)?
+    };
 
     if let Some(tx) = session.emitter() {
         let _ = tx.send(Event::PackageSyncDone);
     }
 
-    Ok(())
+    Ok(did_work)
 }
 
 /// Result of a VirusTotal file lookup.
