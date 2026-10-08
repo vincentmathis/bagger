@@ -459,6 +459,183 @@ mod tests {
     }
 
     #[test]
+    fn version_query_splits_only_version_shaped_suffixes() {
+        // Plain and bucket-qualified pins.
+        assert_eq!(
+            split_version_query("gh@2.7.0"),
+            ("gh".to_owned(), Some("2.7.0".to_owned()))
+        );
+        assert_eq!(
+            split_version_query("main/gh@2.7.0"),
+            ("main/gh".to_owned(), Some("2.7.0".to_owned()))
+        );
+        // URL and file pins.
+        assert_eq!(
+            split_version_query("https://example.com/app.json@1.0"),
+            (
+                "https://example.com/app.json".to_owned(),
+                Some("1.0".to_owned())
+            )
+        );
+        assert_eq!(
+            split_version_query("C:\\bucket\\app.json@1.0"),
+            ("C:\\bucket\\app.json".to_owned(), Some("1.0".to_owned()))
+        );
+        // Userinfo `@` never splits (the suffix holds slashes).
+        assert_eq!(
+            split_version_query("https://user@host/app.json"),
+            ("https://user@host/app.json".to_owned(), None)
+        );
+        // Degenerate shapes never split.
+        for plain in ["gh", "gh@", "@2.0", "gh@1.0 beta", "C:\\app.json"] {
+            assert_eq!(split_version_query(plain), (plain.to_owned(), None));
+        }
+    }
+
+    /// Commit a manifest version into a scratch bucket repo.
+    fn commit_manifest(repo: &git2::Repository, app: &str, version: &str) {
+        let workdir = repo.workdir().unwrap();
+        let dir = workdir.join("bucket");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{app}.json")),
+            format!(
+                r#"{{"version": "{version}", "homepage": "https://example.com", "license": "MIT"}}"#
+            ),
+        )
+        .unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_path(std::path::Path::new(&format!("bucket/{app}.json")))
+            .unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        let head = repo.head().ok().and_then(|h| h.target());
+        let parents: Vec<git2::Commit> = head
+            .and_then(|id| repo.find_commit(id).ok())
+            .into_iter()
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            &format!("{app} {version}"),
+            &tree,
+            &parent_refs,
+        )
+        .unwrap();
+    }
+
+    /// Git history yields the manifest that carried the pinned version.
+    #[test]
+    fn history_finds_pinned_manifest() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-pinhistory");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("buckets/pinbucket")).unwrap();
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        let session = Session::new();
+
+        let repo = git2::Repository::init(root.join("buckets/pinbucket")).unwrap();
+        commit_manifest(&repo, "pinapp", "1.0");
+        commit_manifest(&repo, "pinapp", "2.0");
+
+        let found = find_version_in_history(&session, "pinbucket", "pinapp", "1.0")
+            .unwrap()
+            .expect("history should hold 1.0");
+        assert_eq!(found.version(), "1.0");
+        assert_eq!(found.bucket(), "pinbucket");
+
+        assert!(
+            find_version_in_history(&session, "pinbucket", "pinapp", "3.0")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_version_in_history(&session, "nobucket", "pinapp", "1.0")
+                .unwrap()
+                .is_none()
+        );
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Autoupdate generation expands templates for the pinned version and
+    /// resolves its hashes offline.
+    #[test]
+    fn generate_expands_pinned_version() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-pingen");
+        let _ = std::fs::remove_dir_all(&base);
+        let files = base.join("files");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(files.join("tool-1.5.bin"), b"v1.5-bytes").unwrap();
+
+        // Hash doc for the pinned version only (HEAD is 2.0).
+        let hash = {
+            use bagger_hash::ChecksumBuilder;
+            let mut hasher = ChecksumBuilder::new().sha256().build();
+            hasher.consume(b"v1.5-bytes");
+            format!("sha256:{}", hasher.finalize())
+        };
+        std::fs::write(
+            files.join("hashes-1.5.txt"),
+            format!("{hash}  tool-1.5.bin\n"),
+        )
+        .unwrap();
+        let f = |n: &str| {
+            format!(
+                "file:///{}/{}",
+                files.to_string_lossy().replace('\\', "/"),
+                n
+            )
+        };
+
+        std::env::set_var("SCOOP", base.join("root"));
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        let session = Session::new();
+
+        let template = format!(
+            r#"{{"version": "2.0", "homepage": "https://example.com", "license": "MIT",
+                "url": "{u}",
+                "autoupdate": {{"url": "{t}", "hash": {{"url": "{h}"}}}}}}"#,
+            u = f("tool-2.0.bin"),
+            t = f("tool-$version.bin").replace("$version", "$version"),
+            h = f("hashes-$version.txt").replace("$version", "$version"),
+        );
+        let manifest =
+            Manifest::parse_bytes(template.as_bytes(), std::path::Path::new("gen.json")).unwrap();
+
+        let pkg =
+            generate_version_manifest(&session, "genapp", "genbucket", &manifest, "1.5").unwrap();
+        assert_eq!(pkg.version(), "1.5");
+        assert_eq!(pkg.bucket(), "genbucket");
+        let urls = pkg.download_urls();
+        assert_eq!(urls, vec![f("tool-1.5.bin").as_str()]);
+        let hashes: Vec<String> = pkg
+            .download_hashes()
+            .into_iter()
+            .map(|h| h.to_string())
+            .collect();
+        assert_eq!(hashes, vec![hash]);
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn isolated_loader_parses_local_manifest() {
         let dir = std::env::temp_dir().join("bagger-test-isolated");
         std::fs::create_dir_all(&dir).unwrap();
@@ -766,4 +943,225 @@ pub(crate) fn load_isolated_package(session: &Session, query: &str) -> Fallible<
     }
 
     Ok(Some(package))
+}
+
+/// Split `app@version` / `bucket/app@version` / `url@version` /
+/// `path.json@version` into base + pinned version.
+///
+/// The `@` split only applies when the suffix is version-shaped (no
+/// slashes), so userinfo URLs (`https://user@host/…`) and mails never
+/// split.
+pub(crate) fn split_version_query(query: &str) -> (String, Option<String>) {
+    let Some((base, version)) = query.rsplit_once('@') else {
+        return (query.to_owned(), None);
+    };
+    if base.is_empty()
+        || version.is_empty()
+        || !version
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+    {
+        return (query.to_owned(), None);
+    }
+    (base.to_owned(), Some(version.to_owned()))
+}
+
+/// Search bucket git history for a manifest with `version`, newest first.
+///
+/// Best-effort history lookup (mirrors the `use_git_history` step of
+/// upstream `generate_user_manifest`): non-git buckets, missing refs, and
+/// unparsable blobs yield `None` so callers fall back to autoupdate
+/// generation. The walk is capped; the newest matching commit wins.
+pub(crate) fn find_version_in_history(
+    session: &Session,
+    bucket: &str,
+    app: &str,
+    version: &str,
+) -> Fallible<Option<Package>> {
+    const MAX_COMMITS: usize = 2000;
+
+    let bucket_dir = session.config().root_path().join("buckets").join(bucket);
+    let repo = match git2::Repository::open(&bucket_dir) {
+        Ok(repo) => repo,
+        Err(_) => return Ok(None),
+    };
+    let mut walk = match repo.revwalk() {
+        Ok(walk) => walk,
+        Err(_) => return Ok(None),
+    };
+    if walk.push_head().is_err() {
+        return Ok(None);
+    }
+    walk.set_sorting(git2::Sort::TIME).ok();
+
+    let rel = format!("bucket/{app}.json");
+    let rel_path = std::path::Path::new(&rel);
+    for id in walk.take(MAX_COMMITS).flatten() {
+        let Ok(commit) = repo.find_commit(id) else {
+            continue;
+        };
+        let Ok(tree) = commit.tree() else {
+            continue;
+        };
+        let Ok(entry) = tree.get_path(rel_path) else {
+            continue;
+        };
+        let Ok(obj) = entry.to_object(&repo) else {
+            continue;
+        };
+        let Some(blob) = obj.as_blob() else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(blob.content()) else {
+            continue;
+        };
+        if json.get("version").and_then(|v| v.as_str()) != Some(version) {
+            continue;
+        }
+        let Ok(manifest) = Manifest::parse_bytes(blob.content(), &bucket_dir.join(&rel)) else {
+            continue;
+        };
+        return Ok(Some(Package::from(app, bucket, manifest)));
+    }
+    Ok(None)
+}
+
+/// Generate a manifest for a pinned `@version` from a template manifest's
+/// `autoupdate` section, writing it to the cache `usermanifests` dir.
+///
+/// The generated package keeps the origin bucket attribution so later
+/// upgrades work.
+pub(crate) fn generate_version_manifest(
+    session: &Session,
+    name: &str,
+    bucket: &str,
+    template: &Manifest,
+    version: &str,
+) -> Fallible<Package> {
+    let scopes = crate::operation::autoupdate_expand(
+        session,
+        &Package::from(name, bucket, template.clone()),
+        version,
+    )?;
+    if scopes.is_empty() {
+        return Err(Error::Custom(format!(
+            "cannot install '{name}@{version}': manifest has no autoupdate section to generate it from"
+        )));
+    }
+    let mut manifest_json = serde_json::to_value(template.inner())?;
+    for scope in &scopes {
+        let url_path: Vec<&str> = scope.url_path.iter().map(String::as_str).collect();
+        let hash_path: Vec<&str> = scope.hash_path.iter().map(String::as_str).collect();
+        crate::operation::set_json_path(
+            &mut manifest_json,
+            &url_path,
+            crate::operation::string_or_array(&scope.urls),
+        );
+        crate::operation::set_json_path(
+            &mut manifest_json,
+            &hash_path,
+            crate::operation::string_or_array(&scope.hashes),
+        );
+    }
+    manifest_json["version"] = serde_json::Value::String(version.to_owned());
+
+    let dir = session.config().cache_path().join("usermanifests");
+    crate::internal::fs::ensure_dir(&dir)?;
+    let path = dir.join(format!("{name}@{version}.json"));
+    std::fs::write(&path, serde_json::to_string_pretty(&manifest_json)?)?;
+    let manifest = Manifest::parse_bytes(&std::fs::read(&path)?, &path)?;
+    Ok(Package::from(name, bucket, manifest))
+}
+
+/// Resolve an `app@version` pin to an installable package.
+///
+/// Returns the bucket manifest itself when versions match, a historical
+/// manifest from bucket git history, or an autoupdate-generated manifest.
+/// `Ok(None)` means "skip" (a held pin without hold escape, like the other
+/// resolve flows); anything unresolvable is an error naming what was tried.
+pub(crate) fn resolve_version_pin(
+    session: &Session,
+    base: &str,
+    version: &str,
+    escape_hold: bool,
+) -> Fallible<Option<Package>> {
+    // URL / local-file manifests pin against their own content.
+    if let Some(pkg) = load_isolated_package(session, base)? {
+        if pkg.is_held() && !escape_hold {
+            return Ok(None);
+        }
+        if pkg.version() == version {
+            return Ok(Some(pkg));
+        }
+        if pkg.manifest().autoupdate().is_some() {
+            return generate_version_manifest(
+                session,
+                pkg.name(),
+                ISOLATED_PACKAGE_BUCKET,
+                pkg.manifest(),
+                version,
+            )
+            .map(Some);
+        }
+        return Err(Error::Custom(format!(
+            "cannot install '{base}@{version}': manifest version is '{}' with no autoupdate section",
+            pkg.version()
+        )));
+    }
+
+    // Bucket lookup, with optional `bucket/` prefix.
+    let (bucket_prefix, name) = base
+        .split_once('/')
+        .map(|(b, n)| (Some(b), n))
+        .unwrap_or((None, base));
+    let synced = query_synced(session, &["*"], &[])?;
+    let matches: Vec<&Package> = synced
+        .iter()
+        .filter(|p| {
+            p.name().eq_ignore_ascii_case(name)
+                && bucket_prefix.map(|b| p.bucket() == b).unwrap_or(true)
+        })
+        .collect();
+    if matches.is_empty() {
+        return Err(Error::Custom(format!(
+            "cannot install '{base}@{version}': no such package"
+        )));
+    }
+    if matches.len() > 1 {
+        let candidates = matches
+            .iter()
+            .map(|p| p.ident())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(Error::Custom(format!(
+            "'{base}' matches multiple buckets ({candidates}); qualify as bucket/app@{version}"
+        )));
+    }
+    let origin = matches[0];
+
+    // Installed + held pins stay held.
+    if let Ok(installed) = query_installed(session, &[base], &[]) {
+        if installed.iter().any(|p| p.is_held()) && !escape_hold {
+            return Ok(None);
+        }
+    }
+
+    if origin.version() == version {
+        return Ok(Some(origin.clone()));
+    }
+    if session.config().use_git_history() {
+        if let Some(pkg) =
+            find_version_in_history(session, origin.bucket(), origin.name(), version)?
+        {
+            return Ok(Some(pkg));
+        }
+    }
+    generate_version_manifest(
+        session,
+        origin.name(),
+        origin.bucket(),
+        origin.manifest(),
+        version,
+    )
+    .map(Some)
 }

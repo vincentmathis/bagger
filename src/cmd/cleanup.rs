@@ -173,6 +173,12 @@ fn cleanup(
         if version_name == "current" || version_name == active_version.directory_name {
             continue;
         }
+        // Upstream `Get-InstalledVersion` excludes `current` and backup
+        // directories (`_<version>.old*`, left by force reinstalls): those
+        // are user evidence, not old versions.
+        if version_name.starts_with('_') && version_name.contains(".old") {
+            continue;
+        }
         old_versions.push((version_name, entry.path()));
     }
 

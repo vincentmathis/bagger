@@ -15,7 +15,7 @@ Legend:
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
-| `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
+| `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars; also accepts manifest URLs and local `.json` files (isolated); `app@version` / `bucket/app@version` / `url@version` / `path.json@version` pins (history → autoupdate generation); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
 | `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal, `-g/--global` |
 | `bagger update` | [x] | Pull all subscribed buckets (no args); shows pulled commit logs unless `show_update_log` is false; stamps `last_update` |
 
@@ -208,6 +208,8 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | `debug` | [x] | Raises the log floor to `DEBUG` (unless `-v` already set higher) |
 | `default_architecture` | [x] | Persistent install-arch default (`--arch` > `SCOOP_ARCH` > config); previously parsed under a misspelled key and inert |
 | `aria2-fallback-enabled` | [x] | Failed aria2c downloads retry via curl (default on, like upstream); exit-code meanings reported |
+| `use_git_history` | [x] | Pinned `@version` manifests are searched in bucket git history first (default on, like upstream) |
+| `update_nightly` | [x] | Nightly apps redated on `upgrade` when a new day dawned (otherwise only `--force`); nightly installs stamp `nightly-yyyyMMdd` |
 | `alias` | [x] | Managed via `bagger alias` (list/add/rm) + `config` |
 | `use_sqlite_cache` | [x] | **Implemented** - bucket manifests cached in `<cache>/manifests.db`, invalidated by mtime+size |
 | `show_manifest` | [x] | **Implemented** - Shows manifest JSON in install/upgrade confirmation |
@@ -277,9 +279,8 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 ## Missing Features (Medium Priority)
 
-- **`app@version` install targets** - `scoop install gh@2.7.0` / `url@version` / `path@version` (upstream resolves via sqlite cache, git history, or generated user manifests); bagger accepts names, URLs, and local files but no `@version` pinning yet (`use_git_history` only matters with this)
-- **Nightly version stamping** - upstream renames `version: nightly` to `nightly-yyyyMMdd` (hash check skipped) with `update_nightly` config gating daily updates; bagger skips the hash check but installs under the literal `nightly` version
-- **GitHub private-release downloads** - upstream resolves private `releases/download` URLs via the API when a token is configured; bagger authenticates api.github.com metadata calls but does not rewrite private asset URLs (token + per-host headers are honored on plain downloads)
+- **`update -f` on pins** - upstream re-resolves a `@version`-pinned install against the bucket HEAD when forced; bagger treats pins as one-shot installs (re-pin or reinstall to move)
+- **Nightly status display** - `status`/`list --upgradable` do not flag stale nightly builds (upgrade resolution handles them); upstream `app_status` reports them when `update_nightly` is set
 - **Known divergences (deliberate)** - `aria2-enabled` defaults off (upstream: on); `bagger update` takes no app args (upstream `update <app>` upgrades; use `bagger upgrade`); `update -f` spelling is `upgrade --force`; missing shim targets warn instead of aborting the install
 
 ## Previously Missing - Now Implemented (this iteration)
@@ -334,6 +335,9 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 54. **aria2 failure fallback + misc upstream hints** - failed aria2c downloads warn with the exit-code meaning and retry via curl (structured `Error::Aria2`; stale `.aria2` control files cleaned); missing-binary warning is now visible instead of trace-only; SourceForge hash mismatches print upstream's retry hint; proven with a fake failing `aria2c.exe` (fallback success + disabled-abort unit tests)
 55. **Failed-install purge + version validation + no-hash print** - version dirs without install metadata are purged before staging (upstream `ensure_none_failed`'s purge half), except the `current`-live directory (a pending upgrade, repaired in place); manifest versions outside `[\w.\-+_]` abort with the allowed set; hash-less manifests print the computed SHA256 in upstream's exact format; all proven live (stale-dir replacement, clean abort message, byte-identical warning)
 56. **Download URL handling parity** - `Referer` set to the file's directory on downloads (never on size probes, never for sourceforge/portableapps — verified against a logging local server: probe had none, download had the directory); FossHub page URLs run the download-API handshake and `/download` SourceForge URLs reshape to the direct mirror form, with cache keys and staged names keeping the original URL; pure transforms unit-tested (live FossHub handshake unverifiable — the site is now JS-driven with no static `?dwl=` links left)
+57. **`app@version` pins** - `split_version_query` only splits version-shaped suffixes (userinfo URLs safe); resolution order is current-manifest match → bucket git-history search (newest-first walk, capped, best-effort) → autoupdate expansion at the pinned version with hash resolution; generated manifests keep bucket attribution in `usermanifests/` so upgrades work; proven live (history 1.0 + generated 1.5 + HEAD 2.0 + qualified + ambiguous-bucket error + missing-version error, all with passing integrity)
+58. **Nightly version stamping** - manifests with `version: nightly` install under `nightly-yyyyMMdd` (local date), saved self-describing; hash checks skipped for literal and dated forms; `upgrade` redates on a new day only with `update_nightly` (default off, like upstream), `--force` reinstalls any time with `_.old` rotation; same-day upgrade is a no-op; `cleanup` spares `_<v>.old*` backups (previously would have deleted them — found via upstream `Get-InstalledVersion`); proven live end to end
+59. **GitHub private-release downloads** - `releases/download` URLs resolve to API asset URLs for private repos when a token is configured (repo check + tag asset pick, `token` scheme like upstream); `api.github.com` asset downloads carry `Accept: application/octet-stream` + `Bearer` (curl backend; aria2 failures fall back to curl); proven live against a public 93-byte asset (binary bytes, not JSON metadata); the private-repo branch is unit-tested (URL split, asset pick, header selection) but has no private repo to verify against
 
 ## Build & Distribution
 

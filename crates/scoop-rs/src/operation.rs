@@ -1103,10 +1103,12 @@ pub fn headers_for_url(session: &Session, url: &str) -> Vec<(String, String)> {
 ///   alone serves HTML, not the file).
 /// - `sourceforge.net/…/download` URLs are reshaped to the direct
 ///   `downloads.sourceforge.net` form, avoiding mirror bounces.
+/// - Private GitHub release URLs resolve to authenticated API asset URLs
+///   when a token is configured.
 ///
 /// Anything unrecognized (or any handshake failure) returns the URL
 /// unchanged.
-pub fn resolve_special_url(url: &str, proxy: Option<&str>) -> String {
+pub fn resolve_special_url(session: &Session, url: &str, proxy: Option<&str>) -> String {
     if let Some(direct) = reshape_sourceforge_url(url) {
         return direct;
     }
@@ -1115,7 +1117,79 @@ pub fn resolve_special_url(url: &str, proxy: Option<&str>) -> String {
             return direct;
         }
     }
+    if let Some(direct) = resolve_github_private_url(session, url, proxy) {
+        return direct;
+    }
     url.to_owned()
+}
+
+/// Split a GitHub `releases/download` URL into
+/// `(owner, repo, tag, file, filename-suffix)`.
+fn split_github_release_url(url: &str) -> Option<(String, String, String, String, String)> {
+    let re = regex::Regex::new(
+        r"github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/releases/download/(?P<tag>[^/]+)/(?P<file>[^/#]+)(?P<filename>.*)$",
+    )
+    .ok()?;
+    let caps = re.captures(url)?;
+    Some((
+        caps.name("owner")?.as_str().to_owned(),
+        caps.name("repo")?.as_str().to_owned(),
+        caps.name("tag")?.as_str().to_owned(),
+        caps.name("file")?.as_str().to_owned(),
+        caps.name("filename")?.as_str().to_owned(),
+    ))
+}
+
+/// Pick the API URL of the asset named `file` from a `releases/tags`
+/// response (plus the `#/…` filename suffix upstream preserves).
+fn pick_github_asset(releases_json: &str, file: &str, suffix: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(releases_json).ok()?;
+    let assets = json.get("assets")?.as_array()?;
+    let asset = assets
+        .iter()
+        .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(file))?;
+    let url = asset.get("url")?.as_str()?;
+    Some(format!("{url}{suffix}"))
+}
+
+/// Resolve a private GitHub release download through the API (upstream
+/// `handle_special_urls` GitHub branch): with a token configured and the
+/// repo private, the file downloads from its API asset URL instead.
+fn resolve_github_private_url(session: &Session, url: &str, proxy: Option<&str>) -> Option<String> {
+    let (owner, repo, tag, file, suffix) = split_github_release_url(url)?;
+    let token = github_token(session)?;
+    let auth = format!("token {token}");
+    let headers = [("Authorization", auth.as_str())];
+    let repo_api = format!("https://api.github.com/repos/{owner}/{repo}");
+    let (code, body) = internal::network::fetch_url_with_headers(&repo_api, proxy, &headers)?;
+    if code != 200 {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    if json.get("private").and_then(|p| p.as_bool()) != Some(true) {
+        return None;
+    }
+    let tag_api = format!("https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}");
+    let (code, body) = internal::network::fetch_url_with_headers(&tag_api, proxy, &headers)?;
+    if code != 200 {
+        return None;
+    }
+    pick_github_asset(&body, &file, &suffix)
+}
+
+/// Auth headers for `api.github.com` asset downloads: upstream
+/// `Invoke-Download` sets `Accept: application/octet-stream` and the
+/// `Bearer` token there (the API returns JSON metadata otherwise).
+pub fn github_download_headers(session: &Session, url: &str) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if !url.starts_with("https://api.github.com/repos") {
+        return headers;
+    }
+    headers.push(("Accept".to_owned(), "application/octet-stream".to_owned()));
+    if let Some(token) = github_token(session) {
+        headers.push(("Authorization".to_owned(), format!("Bearer {token}")));
+    }
+    headers
 }
 
 /// Split a FossHub page URL into `(projectUri, fileName)`, mirroring the
@@ -1505,6 +1579,133 @@ pub struct AutoupdateResult {
 /// # Errors
 ///
 /// Network errors will be returned if an expanded URL cannot be fetched.
+/// One autoupdate URL/hash section with templates expanded for a version.
+#[derive(Clone, Debug)]
+pub(crate) struct ExpandedScope {
+    /// JSON path of the URL field (e.g. `["url"]`).
+    pub url_path: Vec<String>,
+    /// JSON path of the hash field.
+    pub hash_path: Vec<String>,
+    /// Expanded asset URLs.
+    pub urls: Vec<String>,
+    /// Resolved hashes (`algo:value` strings, parallel to `urls`).
+    pub hashes: Vec<String>,
+}
+
+/// Expand all autoupdate URL templates for `version` and resolve their
+/// hashes, without checkver captures.
+///
+/// Templates still holding `$variables` afterwards (e.g. `$match*`
+/// without checkver data) fail: a pinned version cannot be generated from
+/// them. Used for `@version` manifest generation.
+pub(crate) fn autoupdate_expand(
+    session: &Session,
+    package: &Package,
+    version: &str,
+) -> Fallible<Vec<ExpandedScope>> {
+    use crate::package::manifest::{HashExtraction, Vectorized};
+
+    struct Scope<'a> {
+        url_path: Vec<&'static str>,
+        hash_path: Vec<&'static str>,
+        templates: Vec<String>,
+        hash_specs: Option<&'a Vectorized<HashExtraction>>,
+    }
+    let manifest = package.manifest();
+    let Some(autoupdate) = manifest.autoupdate() else {
+        return Ok(vec![]);
+    };
+    let proxy = session.config().proxy().map(|s| s.to_owned());
+
+    let mut scopes: Vec<Scope<'_>> = vec![];
+    if let Some(urls) = autoupdate.url.as_ref() {
+        scopes.push(Scope {
+            url_path: vec!["url"],
+            hash_path: vec!["hash"],
+            templates: urls
+                .devectorize()
+                .into_iter()
+                .map(|s| s.to_owned())
+                .collect(),
+            hash_specs: autoupdate.hash.as_ref(),
+        });
+    }
+    if let Some(arch) = autoupdate.architecture.as_ref() {
+        for (_, url_key, spec) in [
+            ("32bit", "32bit", arch.ia32.as_ref()),
+            ("64bit", "64bit", arch.amd64.as_ref()),
+            ("arm64", "arm64", arch.aarch64.as_ref()),
+        ] {
+            if let Some(spec) = spec {
+                if let Some(urls) = spec.url.as_ref() {
+                    scopes.push(Scope {
+                        url_path: vec!["architecture", url_key, "url"],
+                        hash_path: vec!["architecture", url_key, "hash"],
+                        templates: urls
+                            .devectorize()
+                            .into_iter()
+                            .map(|s| s.to_owned())
+                            .collect(),
+                        hash_specs: spec.hash.as_ref().or(autoupdate.hash.as_ref()),
+                    });
+                }
+            }
+        }
+    }
+    if scopes.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut out = vec![];
+    for scope in &scopes {
+        let expanded: Vec<String> = scope
+            .templates
+            .iter()
+            .map(|t| expand_autoupdate_template(t, version, &[]))
+            .collect();
+        if expanded.iter().any(|u| u.contains('$')) {
+            return Err(Error::Custom(format!(
+                "cannot generate version '{version}': autoupdate URLs need checkver match captures"
+            )));
+        }
+        let specs: Vec<&HashExtraction> = scope
+            .hash_specs
+            .as_ref()
+            .map(|s| s.devectorize())
+            .unwrap_or_default();
+        let mut hashes = vec![];
+        for (idx, url) in expanded.iter().enumerate() {
+            // Fewer extraction templates than URLs: reuse the last one,
+            // mirroring upstream HashHelper.
+            let spec = specs.get(idx).copied().or(specs.last().copied());
+            let subs = AutoupdateSubstitutions {
+                version,
+                asset_url: url,
+                captures: &[],
+            };
+            match resolve_asset_hash(session, url, spec, &subs, proxy.as_deref())? {
+                AssetHash::Found(hash) => hashes.push(hash),
+                AssetHash::Download => {
+                    let bytes =
+                        internal::network::fetch_bytes(url, proxy.as_deref()).ok_or_else(|| {
+                            Error::Custom(format!("failed to download autoupdate URL '{url}'"))
+                        })?;
+                    let mut hasher = bagger_hash::ChecksumBuilder::new().sha256().build();
+                    hasher.consume(&bytes);
+                    hashes.push(format!("sha256:{}", hasher.finalize()));
+                }
+            }
+        }
+        out.push(ExpandedScope {
+            url_path: scope.url_path.iter().map(|s| s.to_string()).collect(),
+            hash_path: scope.hash_path.iter().map(|s| s.to_string()).collect(),
+            urls: expanded,
+            hashes,
+        });
+    }
+    Ok(out)
+}
+
 pub fn autoupdate_apply(
     session: &Session,
     package: &Package,
@@ -1674,7 +1875,7 @@ pub fn autoupdate_apply(
 }
 
 /// Build a JSON string or array of strings, mirroring manifest shape.
-fn string_or_array(values: &[String]) -> serde_json::Value {
+pub(crate) fn string_or_array(values: &[String]) -> serde_json::Value {
     if values.len() == 1 {
         serde_json::Value::String(values[0].clone())
     } else {
@@ -1688,7 +1889,7 @@ fn string_or_array(values: &[String]) -> serde_json::Value {
 }
 
 /// Set a nested value in manifest JSON, creating intermediate objects.
-fn set_json_path(root: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
+pub(crate) fn set_json_path(root: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
     let mut current = root;
     for (idx, key) in path.iter().enumerate() {
         if idx + 1 == path.len() {
@@ -2269,11 +2470,110 @@ mod tests {
             None
         );
 
-        // Passthrough never touches the network.
+        // Passthrough never touches the network (hermetic session: no
+        // token anywhere, so the GitHub arm bails before any fetch).
+        let _guard = crate::test_support::env_guard();
+        for var in ["SCOOP_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+            std::env::remove_var(var);
+        }
+        let base = std::env::temp_dir().join("bagger-test-special-url");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("config.json"), "{}").unwrap();
+        let session = crate::Session::new_with(base.join("config.json")).unwrap();
         assert_eq!(
-            super::resolve_special_url("https://example.com/a.zip", None),
+            super::resolve_special_url(&session, "https://example.com/a.zip", None),
             "https://example.com/a.zip"
         );
+        // Without a token, GitHub release URLs pass through untouched.
+        assert_eq!(
+            super::resolve_special_url(
+                &session,
+                "https://github.com/o/r/releases/download/v1/a.zip",
+                None
+            ),
+            "https://github.com/o/r/releases/download/v1/a.zip"
+        );
+
+        for var in ["SCOOP_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+            std::env::remove_var(var);
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// GitHub release URL splitting and asset picking (pure parts of the
+    /// private-release flow; the API calls need a token and a network).
+    #[test]
+    fn github_private_url_parts() {
+        assert_eq!(
+            super::split_github_release_url(
+                "https://github.com/owner/repo/releases/download/v2.0/app.zip"
+            ),
+            Some((
+                "owner".to_owned(),
+                "repo".to_owned(),
+                "v2.0".to_owned(),
+                "app.zip".to_owned(),
+                String::new()
+            ))
+        );
+        assert_eq!(
+            super::split_github_release_url(
+                "https://github.com/o/r/releases/download/v1/a.zip#/dl.7z"
+            ),
+            Some((
+                "o".to_owned(),
+                "r".to_owned(),
+                "v1".to_owned(),
+                "a.zip".to_owned(),
+                "#/dl.7z".to_owned()
+            ))
+        );
+        assert_eq!(
+            super::split_github_release_url("https://example.com/a.zip"),
+            None
+        );
+
+        let releases = r#"{"assets": [
+            {"name": "other.zip", "url": "https://api.github.com/repos/o/r/releases/assets/1"},
+            {"name": "a.zip", "url": "https://api.github.com/repos/o/r/releases/assets/2"}
+        ]}"#;
+        assert_eq!(
+            super::pick_github_asset(releases, "a.zip", ""),
+            Some("https://api.github.com/repos/o/r/releases/assets/2".to_owned())
+        );
+        assert_eq!(super::pick_github_asset(releases, "missing.zip", ""), None);
+        assert_eq!(super::pick_github_asset("not json", "a.zip", ""), None);
+    }
+
+    /// `api.github.com` asset downloads carry the octet-stream Accept
+    /// header, plus `Bearer` auth when a token is configured.
+    #[test]
+    fn github_download_headers_cover_api_assets() {
+        let _guard = crate::test_support::env_guard();
+        for var in ["SCOOP_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+            std::env::remove_var(var);
+        }
+        let base = std::env::temp_dir().join("bagger-test-ghheaders");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("config.json"), "{}").unwrap();
+        let session = crate::Session::new_with(base.join("config.json")).unwrap();
+
+        let api = "https://api.github.com/repos/o/r/releases/assets/2";
+        let headers = super::github_download_headers(&session, api);
+        assert!(headers.contains(&("Accept".to_owned(), "application/octet-stream".to_owned())));
+        assert!(!headers.iter().any(|(k, _)| k == "Authorization"));
+
+        std::env::set_var("GITHUB_TOKEN", "tok-test");
+        let headers = super::github_download_headers(&session, api);
+        assert!(headers.contains(&("Authorization".to_owned(), "Bearer tok-test".to_owned())));
+
+        // Plain URLs get nothing.
+        assert!(super::github_download_headers(&session, "https://example.com/a.zip").is_empty());
+
+        std::env::remove_var("GITHUB_TOKEN");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

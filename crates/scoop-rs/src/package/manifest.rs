@@ -811,6 +811,12 @@ impl Manifest {
         self.inner.version.as_str()
     }
 
+    /// Clone this manifest with a different `version` (nightly stamping).
+    pub fn with_version(&self, version: &str) -> Manifest {
+        let mut stamped = self.clone();
+        stamped.inner.version = version.to_owned();
+        stamped
+    }
     /// Return the `description` of this manifest.
     #[inline]
     pub fn description(&self) -> Option<&str> {

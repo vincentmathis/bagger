@@ -412,6 +412,19 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         let synced = query::query_synced(session, &["*"], &[])?;
 
         for &query in queries {
+            // `app@version` pins resolve to generated/historical manifests
+            // before the normal flows run.
+            let (base, pinned) = query::split_version_query(query);
+            if let Some(version) = pinned {
+                // Held pins without hold escape resolve to `None` and are
+                // skipped like the other flows.
+                let resolved = query::resolve_version_pin(session, &base, &version, escape_hold)?;
+                if resolved.as_ref().is_some_and(|pkg| !packages.contains(pkg)) {
+                    packages.push(resolved.unwrap());
+                }
+                continue;
+            }
+
             // Manifest URLs and local manifest files install as isolated
             // packages without requiring a bucket.
             if let Some(p) = query::load_isolated_package(session, query)? {
@@ -500,8 +513,18 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         }
     }
 
-    let (installed, installable): (Vec<_>, Vec<_>) =
-        packages.into_iter().partition(|p| p.is_installed());
+    let (installed, installable): (Vec<_>, Vec<_>) = packages
+        .into_iter()
+        // Stamp nightly manifests first, so downloads, cache names,
+        // staging, and directories all agree on the dated version.
+        .map(|p| {
+            if p.manifest().version() == "nightly" {
+                p.with_version(&nightly_version())
+            } else {
+                p
+            }
+        })
+        .partition(|p| p.is_installed());
 
     let (upgradable, replaceable): (Vec<_>, Vec<_>) = installed
         .into_iter()
@@ -513,14 +536,20 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 
     let mut upgradable: Vec<_> = upgradable
         .into_iter()
-        .filter(|p| p.upgradable_version().is_some())
+        .filter(|p| {
+            // Dated nightly builds never upgrade through the version
+            // comparison; the gated block below owns them.
+            p.upgradable_version().is_some() && !is_dated_nightly(p.version())
+        })
         .collect();
 
-    if force {
-        // Upstream `update -f`: reinstall the requested apps even when the
-        // bucket version is not newer. The reinstall entries are bucket
-        // packages (no install state needed past this point); holds are
-        // still respected.
+    let update_nightly = session.config().update_nightly();
+    if (force || update_nightly) && only_upgrade {
+        // Upstream `update -f` reinstalls the requested apps even when the
+        // bucket version is not newer, and nightly apps are redated when a
+        // new day dawned (gated by `update_nightly`, like upstream's
+        // `Compare-Version`). Holds are still respected.
+        let today = nightly_version();
         let current = query::query_installed(session, queries, &[])?;
         let synced = query::query_synced(session, &["*"], &[])?;
         for inst in current {
@@ -534,13 +563,19 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 continue;
             }
             let bucket = inst.installed_bucket().unwrap_or_default();
-            let reinstall = synced.iter().find(|s| {
-                s.name() == inst.name()
-                    && s.bucket() == bucket
-                    && Some(s.version()) == inst.installed_version()
-            });
-            if let Some(pkg) = reinstall {
-                upgradable.push(pkg.clone());
+            let origin = synced
+                .iter()
+                .find(|s| s.name() == inst.name() && s.bucket() == bucket);
+            let Some(origin) = origin else {
+                continue;
+            };
+            let wanted = if origin.version() == "nightly" {
+                force || (update_nightly && inst.installed_version() != Some(today.as_str()))
+            } else {
+                force && Some(origin.version()) == inst.installed_version()
+            };
+            if wanted {
+                upgradable.push(origin.clone());
             }
         }
     }
@@ -638,7 +673,9 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         let mut buf = [0; 1024 * 64];
 
         for &pkg in packages.iter() {
-            if pkg.version() == "nightly" {
+            // Nightly builds skip hash checks (the dated stamp is
+            // covered too, since stamping happens before this phase).
+            if pkg.version() == "nightly" || is_dated_nightly(pkg.version()) {
                 info!("skip hash check for nightly package '{}'", pkg.name());
                 continue;
             }
@@ -727,6 +764,19 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         }
 
         for pkg in packages.iter() {
+            // Nightly manifests install under a dated version (upstream
+            // `nightly_version`), so each day gets a fresh directory. The
+            // stamped manifest is saved as-is, making the installed version
+            // self-describing like upstream's link-target convention.
+            let stamped;
+            let pkg = match pkg.manifest().version() == "nightly" {
+                true => {
+                    stamped = pkg.with_version(&nightly_version());
+                    &stamped
+                }
+                false => pkg,
+            };
+
             // Re-check at commit time: a process may have started while
             // downloading. Skip it rather than failing the transaction.
             if let Some(processes) = running_blocked(session, pkg) {
@@ -969,6 +1019,21 @@ fn valid_manifest_version(version: &str) -> bool {
         && version
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+}
+
+/// Today's dated nightly version (`nightly-yyyyMMdd`, local date like
+/// upstream `nightly_version`).
+fn nightly_version() -> String {
+    format!("nightly-{}", chrono::Local::now().format("%Y%m%d"))
+}
+
+/// Whether a version is a dated nightly stamp (`nightly-yyyyMMdd`).
+/// Together with the literal, these versions skip hash checks and only
+/// upgrade on a new day with `update_nightly` (or forced).
+fn is_dated_nightly(version: &str) -> bool {
+    version.len() == "nightly-YYYYMMDD".len()
+        && version.starts_with("nightly-")
+        && version[8..].bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Remove a previous failed install: a version directory without install
@@ -1805,6 +1870,29 @@ mod tests {
         assert!(app.join("3.0").is_dir());
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Nightly stamps are dated (`nightly-yyyyMMdd`) and `with_version`
+    /// patches only the version, preserving the rest of the manifest.
+    #[test]
+    fn nightly_stamp_format_and_surgery() {
+        let stamp = nightly_version();
+        assert!(stamp.starts_with("nightly-"), "{stamp}");
+        assert_eq!(stamp.len(), "nightly-YYYYMMDD".len());
+        assert!(stamp[8..].bytes().all(|b| b.is_ascii_digit()));
+
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "nightly", "homepage": "https://example.com", "license": "MIT",
+                "url": "https://example.com/nightly.zip"}"#,
+            std::path::Path::new("nightly.json"),
+        )
+        .unwrap();
+        let pkg = Package::from("nightapp", "main", manifest);
+        let stamped = pkg.with_version(&stamp);
+        assert_eq!(stamped.version(), stamp);
+        assert_eq!(stamped.name(), "nightapp");
+        assert_eq!(stamped.bucket(), "main");
+        assert_eq!(pkg.version(), "nightly");
     }
 
     /// Build a package whose manifest stages `setup.cmd` and declares an

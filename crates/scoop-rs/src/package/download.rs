@@ -312,9 +312,12 @@ impl<'a> PackageSet<'a> {
                 };
                 // Special hosts (FossHub handshake, SourceForge reshape)
                 // resolve to the real file URL before fetching.
-                let fetch_url = crate::operation::resolve_special_url(dlinfo.url, proxy.as_deref());
+                let fetch_url = crate::operation::resolve_special_url(
+                    self.session,
+                    dlinfo.url,
+                    proxy.as_deref(),
+                );
                 internal::aria2::download_file(&fetch_url, &tmp, &opts)?;
-
                 filepaths.push((tmp, path));
             }
         }
@@ -370,10 +373,12 @@ impl<'a> PackageSet<'a> {
 
                 let mut easy = Easy::new();
                 easy.get(true)?;
-                // Special hosts (FossHub handshake, SourceForge reshape)
-                // resolve to the real file URL before fetching. Cache keys
-                // and staged names intentionally keep the original URL.
-                let fetch_url = crate::operation::resolve_special_url(dlinfo.url, proxy);
+                // Special hosts (FossHub handshake, SourceForge reshape,
+                // private GitHub releases) resolve to the real file URL
+                // before fetching. Cache keys and staged names
+                // intentionally keep the original URL.
+                let fetch_url =
+                    crate::operation::resolve_special_url(self.session, dlinfo.url, proxy);
                 easy.url(&fetch_url)?;
                 easy.follow_location(true)?;
                 easy.useragent(user_agent)?;
@@ -381,12 +386,13 @@ impl<'a> PackageSet<'a> {
                 if let Some(proxy) = proxy {
                     easy.proxy(proxy)?;
                 }
-                set_cookie(
-                    &mut easy,
-                    &cookie,
-                    &crate::operation::headers_for_url(self.session, dlinfo.url),
-                )?;
-                if let Some(referer) = referer_for_url(dlinfo.url) {
+                let mut extra = crate::operation::headers_for_url(self.session, &fetch_url);
+                extra.extend(crate::operation::github_download_headers(
+                    self.session,
+                    &fetch_url,
+                ));
+                set_cookie(&mut easy, &cookie, &extra)?;
+                if let Some(referer) = referer_for_url(&fetch_url) {
                     easy.referer(&referer)?;
                 }
 

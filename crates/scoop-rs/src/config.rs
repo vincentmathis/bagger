@@ -160,6 +160,12 @@ pub struct ConfigInner {
     #[serde(skip_serializing_if = "Option::is_none")]
     use_sqlite_cache: Option<bool>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    use_git_history: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_nightly: Option<bool>,
+
     /// Disable `current` version junction creation.
     ///
     /// The 'current' version alias will not be used. Shims and shortcuts will
@@ -435,6 +441,20 @@ impl Config {
         self.use_sqlite_cache.unwrap_or_default()
     }
 
+    /// Get the `update_nightly` config (nightly apps update when a new day
+    /// dawned; otherwise only `--force` reinstalls them).
+    #[inline]
+    pub fn update_nightly(&self) -> bool {
+        self.update_nightly.unwrap_or_default()
+    }
+
+    /// Get the `use_git_history` config (search bucket git history for
+    /// pinned `@version` manifests; upstream default is on).
+    #[inline]
+    pub fn use_git_history(&self) -> bool {
+        self.use_git_history.unwrap_or(true)
+    }
+
     /// Get the `gh_token` config (GitHub API token for authenticated
     /// requests, easing rate limits and private-repo access).
     #[inline]
@@ -573,6 +593,20 @@ impl Config {
                     Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
                 },
             },
+            "update_nightly" => match is_unset {
+                true => self.inner.update_nightly = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.update_nightly = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "use_git_history" => match is_unset {
+                true => self.inner.use_git_history = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.use_git_history = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
             "proxy" => match value {
                 "" | "none" => self.inner.proxy = None,
                 _ => self.inner.proxy = Some(value.to_string()),
@@ -662,6 +696,8 @@ impl Default for Config {
             use_isolated_path: Default::default(),
             use_lessmsi: Default::default(),
             use_sqlite_cache: Default::default(),
+            use_git_history: Default::default(),
+            update_nightly: Default::default(),
             no_junction: Default::default(),
             private_hosts: Default::default(),
             proxy: Default::default(),

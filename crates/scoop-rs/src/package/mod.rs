@@ -94,6 +94,14 @@ impl Package {
         }
     }
 
+    /// Clone this package with a stamped manifest version, preserving
+    /// install state (nightly installs).
+    pub(crate) fn with_version(&self, version: &str) -> Package {
+        let mut stamped = self.clone();
+        stamped.manifest = self.manifest.with_version(version);
+        stamped
+    }
+
     /// The identity of this package.
     ///
     /// # Returns
