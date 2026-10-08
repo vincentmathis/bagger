@@ -17,13 +17,17 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
     let mut held: Vec<_> = Vec::new();
     let mut running: Vec<_> = Vec::new();
 
+    // Stale nightly builds compare Equal, so the version check below
+    // misses them; they count as upgradable explicitly.
+    let stale = operation::stale_nightlies(session).unwrap_or_default();
+
     for pkg in &installed {
         if pkg.is_held() {
             held.push(pkg.name().to_owned());
             continue;
         }
 
-        if pkg.upgradable_version().is_some() {
+        if pkg.upgradable_version().is_some() || stale.iter().any(|n| n == pkg.name()) {
             upgradable.push(pkg);
         }
 
@@ -63,7 +67,15 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
     if !upgradable.is_empty() {
         println!("{}", "Apps with updates:".green().bold());
         for pkg in &upgradable {
-            let new_ver = pkg.upgradable_version().unwrap_or("");
+            // Stale nightlies have no upgradable ref; show today's stamp.
+            let nightly;
+            let new_ver = match pkg.upgradable_version() {
+                Some(v) => v,
+                None => {
+                    nightly = operation::nightly_stamp();
+                    &nightly
+                }
+            };
             println!(
                 "  {} {} -> {}",
                 pkg.name().green(),

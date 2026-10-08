@@ -20,11 +20,16 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
     let mut any_upgradable = false;
     let mut any_running = false;
 
+    // Stale nightly builds compare Equal, so the version check below
+    // misses them; they count as upgradable explicitly.
+    let stale = operation::stale_nightlies(session).unwrap_or_default();
+    let is_stale = |pkg: &scoop_rs::Package| stale.iter().any(|n| n == pkg.name());
+
     for pkg in &packages {
         if pkg.is_held() {
             any_held = true;
         }
-        if pkg.upgradable_version().is_some() {
+        if pkg.upgradable_version().is_some() || is_stale(pkg) {
             any_upgradable = true;
         }
     }
@@ -54,6 +59,11 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
 
         if let Some(upgrade_ver) = pkg.upgradable_version() {
             line.push_str(&format!(" -> {} (upgradable)", upgrade_ver.blue()));
+        } else if is_stale(pkg) {
+            line.push_str(&format!(
+                " -> {} (upgradable)",
+                operation::nightly_stamp().blue()
+            ));
         }
 
         println!("{}", line);
@@ -90,7 +100,7 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
     if any_upgradable {
         let upgradable: Vec<_> = packages
             .iter()
-            .filter(|p| p.upgradable_version().is_some())
+            .filter(|p| p.upgradable_version().is_some() || is_stale(p))
             .collect();
         print!("Upgradable apps ({}): ", upgradable.len());
         for (i, p) in upgradable.iter().enumerate() {

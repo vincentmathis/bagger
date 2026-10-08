@@ -10,8 +10,9 @@ use crate::{
 
 use super::{
     download::{self, DownloadSize},
+    is_dated_nightly,
     manifest::InstallInfo,
-    query, resolve, Package,
+    nightly_version, query, resolve, Package,
 };
 
 /// Options that may be used to tweak behavior of package sync operation.
@@ -399,6 +400,7 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
     let only_upgrade = options.contains(&SyncOption::OnlyUpgrade);
     let escape_hold = options.contains(&SyncOption::EscapeHold);
     let force = options.contains(&SyncOption::Force);
+    let update_nightly = session.config().update_nightly();
 
     if only_upgrade {
         packages = query::query_installed(session, queries, &[QueryOption::Upgradable])?;
@@ -481,10 +483,11 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         }
     };
 
-    // A force reinstall may proceed with an empty resolve set (the
-    // reinstall candidates are collected below); anything still empty is
-    // caught by the post-transaction early return instead.
-    if packages.is_empty() && !force {
+    // A force reinstall (or nightly redating) may proceed with an empty
+    // resolve set (the reinstall candidates are collected below);
+    // anything still empty is caught by the post-transaction early return
+    // instead.
+    if packages.is_empty() && !force && !update_nightly {
         return Ok(());
     }
 
@@ -543,7 +546,6 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         })
         .collect();
 
-    let update_nightly = session.config().update_nightly();
     if (force || update_nightly) && only_upgrade {
         // Upstream `update -f` reinstalls the requested apps even when the
         // bucket version is not newer, and nightly apps are redated when a
@@ -1019,21 +1021,6 @@ fn valid_manifest_version(version: &str) -> bool {
         && version
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
-}
-
-/// Today's dated nightly version (`nightly-yyyyMMdd`, local date like
-/// upstream `nightly_version`).
-fn nightly_version() -> String {
-    format!("nightly-{}", chrono::Local::now().format("%Y%m%d"))
-}
-
-/// Whether a version is a dated nightly stamp (`nightly-yyyyMMdd`).
-/// Together with the literal, these versions skip hash checks and only
-/// upgrade on a new day with `update_nightly` (or forced).
-fn is_dated_nightly(version: &str) -> bool {
-    version.len() == "nightly-YYYYMMDD".len()
-        && version.starts_with("nightly-")
-        && version[8..].bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Remove a previous failed install: a version directory without install

@@ -39,6 +39,21 @@ pub struct Package {
     upgradable: OnceCell<Option<Box<Package>>>,
 }
 
+/// Today's dated nightly version (`nightly-yyyyMMdd`, local date like
+/// upstream `nightly_version`).
+pub(crate) fn nightly_version() -> String {
+    format!("nightly-{}", chrono::Local::now().format("%Y%m%d"))
+}
+
+/// Whether a version is a dated nightly stamp (`nightly-yyyyMMdd`).
+/// Together with the literal, these versions skip hash checks and only
+/// upgrade on a new day with `update_nightly` (or forced).
+pub(crate) fn is_dated_nightly(version: &str) -> bool {
+    version.len() == "nightly-YYYYMMDD".len()
+        && version.starts_with("nightly-")
+        && version[8..].bytes().all(|b| b.is_ascii_digit())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OriginateFrom {
     Bucket(String),

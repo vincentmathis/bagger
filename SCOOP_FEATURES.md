@@ -22,14 +22,14 @@ Legend:
 > **Note on `update *`:** In older Scoop, `scoop update *` meant "upgrade all apps". In modern Scoop (and in `bagger`), use `bagger upgrade` (with no arguments) to upgrade all installed apps. The `update` command only updates bucket manifests and does not accept app names or wildcards.
 | `bagger upgrade` | [x] | Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override; `--force` reinstalls current versions (previous dir rotated to `_<version>.old`), also via `force_update` config |
 | `bagger search <query>` | [x] | Search across all buckets |
-| `bagger list` | [x] | List installed apps; supports `--upgradable` |
+| `bagger list` | [x] | List installed apps; supports `--upgradable` (incl. stale nightlies) |
 | `bagger info <app>` | [x] | Show manifest info for any app |
 | `bagger cat <app>` | [x] | Show manifest JSON |
 | `bagger hold <app>` | [x] | Mark apps as held |
 | `bagger unhold <app>` | [x] | Remove hold from apps |
 | `bagger prefix <app>` | [x] | Show installation path for an app |
 | `bagger which <command>` | [x] | Find which app owns an executable |
-| `bagger status` | [x] | Show held, upgradable, and running apps |
+| `bagger status` | [x] | Show held, upgradable (incl. stale nightlies), and running apps |
 | `bagger checkup` | [x] | Check for updates, report held/running/upgradable apps; system diagnostics (Defender exclusion, main bucket, long paths, developer mode) |
 | `bagger reset <app>` | [x] | Reset an installed package to a specific version or re-extract |
 
@@ -279,8 +279,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 ## Missing Features (Medium Priority)
 
-- **`update -f` on pins** - upstream re-resolves a `@version`-pinned install against the bucket HEAD when forced; bagger treats pins as one-shot installs (re-pin or reinstall to move)
-- **Nightly status display** - `status`/`list --upgradable` do not flag stale nightly builds (upgrade resolution handles them); upstream `app_status` reports them when `update_nightly` is set
+- (none — all tracked features implemented)
 - **Known divergences (deliberate)** - `aria2-enabled` defaults off (upstream: on); `bagger update` takes no app args (upstream `update <app>` upgrades; use `bagger upgrade`); `update -f` spelling is `upgrade --force`; missing shim targets warn instead of aborting the install
 
 ## Previously Missing - Now Implemented (this iteration)
@@ -338,6 +337,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 57. **`app@version` pins** - `split_version_query` only splits version-shaped suffixes (userinfo URLs safe); resolution order is current-manifest match → bucket git-history search (newest-first walk, capped, best-effort) → autoupdate expansion at the pinned version with hash resolution; generated manifests keep bucket attribution in `usermanifests/` so upgrades work; proven live (history 1.0 + generated 1.5 + HEAD 2.0 + qualified + ambiguous-bucket error + missing-version error, all with passing integrity)
 58. **Nightly version stamping** - manifests with `version: nightly` install under `nightly-yyyyMMdd` (local date), saved self-describing; hash checks skipped for literal and dated forms; `upgrade` redates on a new day only with `update_nightly` (default off, like upstream), `--force` reinstalls any time with `_.old` rotation; same-day upgrade is a no-op; `cleanup` spares `_<v>.old*` backups (previously would have deleted them — found via upstream `Get-InstalledVersion`); proven live end to end
 59. **GitHub private-release downloads** - `releases/download` URLs resolve to API asset URLs for private repos when a token is configured (repo check + tag asset pick, `token` scheme like upstream); `api.github.com` asset downloads carry `Accept: application/octet-stream` + `Bearer` (curl backend; aria2 failures fall back to curl); proven live against a public 93-byte asset (binary bytes, not JSON metadata); the private-repo branch is unit-tested (URL split, asset pick, header selection) but has no private repo to verify against
+60. **Nightly status display** - `stale_nightlies()` (bucket manifest still `nightly`, installed stamp dated but not today, `update_nightly` set, holds excluded) feeds `status`, `list --upgradable`, and `checkup`, which show today's stamp as the target; proven live with a fabricated yesterday install (flagged in all three, silent by default, healed by `upgrade`); pins need no `update -f` equivalent — bucket attribution lets them upgrade normally (proven: `1.0` pin → plain `upgrade` → `2.0`)
 
 ## Build & Distribution
 

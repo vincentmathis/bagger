@@ -36,6 +36,25 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     match operation::package_query(session, queries, options, true) {
         Err(e) => Err(e.into()),
         Ok(packages) => {
+            // Stale nightly builds are filtered out by the Upgradable
+            // query (they compare Equal); union them back in explicitly.
+            let mut packages = packages;
+            let stale = if args.upgradable {
+                operation::stale_nightlies(session).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if !stale.is_empty() {
+                let names: Vec<&str> = stale.iter().map(String::as_str).collect();
+                if let Ok(extra) = operation::package_query(session, names, vec![], true) {
+                    for pkg in extra {
+                        if !packages.iter().any(|p| p.name() == pkg.name()) {
+                            packages.push(pkg);
+                        }
+                    }
+                    packages.sort_by_key(|p| p.name().to_owned());
+                }
+            }
             for pkg in packages {
                 let mut output = String::new();
                 output.push_str(
@@ -51,6 +70,10 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                 if args.upgradable {
                     if let Some(version) = upgradable {
                         output.push_str(format!(" -> {}", version.blue()).as_str());
+                    } else if stale.iter().any(|n| n == pkg.name()) {
+                        output.push_str(
+                            format!(" -> {}", operation::nightly_stamp().blue()).as_str(),
+                        );
                     }
                 }
 

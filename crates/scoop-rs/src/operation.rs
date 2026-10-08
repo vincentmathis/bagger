@@ -3073,6 +3073,45 @@ pub fn package_query(
     Ok(packages)
 }
 
+/// Today's dated nightly version (`nightly-yyyyMMdd`).
+pub fn nightly_stamp() -> String {
+    crate::package::nightly_version()
+}
+
+/// Names of installed apps whose nightly build is stale: the bucket
+/// manifest still says `nightly`, the installed stamp is a different date,
+/// and `update_nightly` is set. Mirrors the nightly arm of upstream
+/// `Compare-Version` used by `app_status`.
+pub fn stale_nightlies(session: &Session) -> Fallible<Vec<String>> {
+    if !session.config().update_nightly() {
+        return Ok(vec![]);
+    }
+    let today = nightly_stamp();
+    let installed = package::query::query_installed(session, &["*"], &[])?;
+    let synced = package::query::query_synced(session, &["*"], &[])?;
+    let mut out = vec![];
+    for inst in &installed {
+        let Some(iv) = inst.installed_version() else {
+            continue;
+        };
+        if !crate::package::is_dated_nightly(iv) || iv == today {
+            continue;
+        }
+        if inst.is_held() {
+            continue;
+        }
+        let bucket = inst.installed_bucket().unwrap_or_default();
+        let nightly_origin = synced
+            .iter()
+            .any(|s| s.name() == inst.name() && s.bucket() == bucket && s.version() == "nightly");
+        if nightly_origin {
+            out.push(inst.name().to_owned());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// Sync packages.
 ///
 /// # Note

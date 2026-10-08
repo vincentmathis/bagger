@@ -170,13 +170,7 @@ fn cleanup(
             continue;
         }
         let version_name = entry.file_name().to_string_lossy().into_owned();
-        if version_name == "current" || version_name == active_version.directory_name {
-            continue;
-        }
-        // Upstream `Get-InstalledVersion` excludes `current` and backup
-        // directories (`_<version>.old*`, left by force reinstalls): those
-        // are user evidence, not old versions.
-        if version_name.starts_with('_') && version_name.contains(".old") {
+        if !is_cleanable_version(&version_name, &active_version.directory_name) {
             continue;
         }
         old_versions.push((version_name, entry.path()));
@@ -252,6 +246,14 @@ fn cleanup(
 struct ActiveVersion {
     directory_name: String,
     manifest_version: Option<String>,
+}
+
+/// Whether a version directory is cleanup-eligible: not `current`, not the
+/// active version, and not a `_<version>.old*` force-reinstall backup
+/// (upstream `Get-InstalledVersion` excludes those too — they are user
+/// evidence, not old versions).
+fn is_cleanable_version(name: &str, active: &str) -> bool {
+    name != "current" && name != active && !(name.starts_with('_') && name.contains(".old"))
 }
 
 fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
@@ -471,5 +473,19 @@ mod tests {
         assert_eq!(active.manifest_version.as_deref(), Some("2.0"));
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Force-reinstall backups (`_<version>.old*`) are user evidence, not
+    /// old versions: cleanup must leave them alone, like upstream's
+    /// `Get-InstalledVersion` exclusion.
+    #[test]
+    fn cleanable_version_skips_current_active_and_backups() {
+        assert!(!is_cleanable_version("current", "1.0"));
+        assert!(!is_cleanable_version("1.0", "1.0"));
+        assert!(is_cleanable_version("0.9", "1.0"));
+        assert!(!is_cleanable_version("_1.0.old", "1.0"));
+        assert!(!is_cleanable_version("_1.0.old(1)", "1.0"));
+        // Other underscore names are still eligible.
+        assert!(is_cleanable_version("_tmp", "1.0"));
     }
 }
