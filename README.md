@@ -94,6 +94,13 @@ System-wide instead (requires admin):
 iex (iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/main/scripts/install.ps1).Content -args -System
 ```
 
+### From Scoop
+
+```ps1
+scoop bucket add bagger https://github.com/vincentmathis/bagger-bucket
+scoop install bagger
+```
+
 ### From crates.io
 
 ```sh
