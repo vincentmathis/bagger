@@ -28,7 +28,7 @@ pub fn progress(key: &str) -> &str {
             "integrity" => "Assaying the ore...",
             "verifying" => "Assaying the ore...",
             "verified" => "Assayed.",
-            "cached" => "Nothing to haul — already stockpiled.",
+            "cached" => "Nothing to haul - already stockpiled.",
             "buckets" => "Rotating the wheel...",
             _ => key,
         }
@@ -84,7 +84,7 @@ mod tests {
         assert_eq!(progress("integrity"), "Assaying the ore...");
         assert_eq!(progress("verifying"), "Assaying the ore...");
         assert_eq!(progress("verified"), "Assayed.");
-        assert_eq!(progress("cached"), "Nothing to haul — already stockpiled.");
+        assert_eq!(progress("cached"), "Nothing to haul - already stockpiled.");
         assert_eq!(progress("buckets"), "Rotating the wheel...");
         std::env::remove_var("BAGGER_FLAVOR");
     }

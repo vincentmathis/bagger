@@ -66,7 +66,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                     Ok(buckets) => {
                         for bucket in buckets {
                             println!(
-                                "{}\n ├─manifests: {}\n └─source: {}",
+                                "{}\n |-manifests: {}\n `-source: {}",
                                 bucket.name().green(),
                                 bucket.manifest_count(),
                                 bucket.source(),
