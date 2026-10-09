@@ -1,7 +1,9 @@
 use crate::util::is_admin;
 use crate::Result;
 use clap::{ArgAction, Parser};
-use scoop_rs::{operation, Session};
+use scoop_rs::{
+    has_install_metadata, install_info_path, installed_manifest_path, operation, Session,
+};
 use std::{
     collections::HashSet,
     fs,
@@ -200,18 +202,20 @@ fn cleanup(
             println!("{} is already clean", app);
         }
     } else {
+        // Report metadata-less directories first (stderr): they survive no
+        // matter what, so the `Removing` header below only names versions
+        // that actually go away.
+        let (removable, skipped): (Vec<_>, Vec<_>) = old_versions
+            .into_iter()
+            .partition(|(_, path)| has_install_metadata(path));
+        for (version, _) in &skipped {
+            eprintln!("\nSkipping {app} {version}: no install metadata (leaving it alone).");
+        }
+        if removable.is_empty() {
+            return Ok(());
+        }
         print!("Removing {}{}:", app, if global { " (global)" } else { "" });
-        for (version, version_path) in old_versions {
-            // Never delete a version directory that lacks bagger install
-            // metadata: it may be a failed/partial upgrade whose `current`
-            // link already points at it. Deleting those destroys the
-            // pending upgrade instead of the old version.
-            if !version_path.join("manifest.json").is_file()
-                || !version_path.join("install.json").is_file()
-            {
-                eprintln!("\nSkipping {app} {version}: no install metadata (leaving it alone).");
-                continue;
-            }
+        for (version, version_path) in removable {
             let removal = unlink_persist_links(&version_path)
                 .map_err(|error| {
                     anyhow::anyhow!("failed to unlink persist paths for {app} {version}: {error}")
@@ -298,7 +302,7 @@ fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
     if let Ok(target) = fs::read_link(&current_path) {
         let directory_name = target.file_name().map(|n| n.to_string_lossy().into_owned());
         if let Some(directory_name) = directory_name {
-            let current_manifest = current_path.join("manifest.json");
+            let current_manifest = installed_manifest_path(&current_path);
             let manifest_version = read_manifest_version(&current_manifest).ok();
             return Ok(Some(ActiveVersion {
                 directory_name,
@@ -307,7 +311,7 @@ fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
         }
     }
 
-    let current_manifest = current_path.join("manifest.json");
+    let current_manifest = installed_manifest_path(&current_path);
     if current_manifest.is_file() {
         let active_path = fs::canonicalize(&current_path)?;
         for entry in fs::read_dir(app_path)? {
@@ -339,8 +343,8 @@ fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
             continue;
         }
         let version_path = entry.path();
-        let manifest = version_path.join("manifest.json");
-        let install_info = version_path.join("install.json");
+        let manifest = installed_manifest_path(&version_path);
+        let install_info = install_info_path(&version_path);
         if manifest.is_file() && install_info.is_file() {
             candidates.push(ActiveVersion {
                 directory_name: entry.file_name().to_string_lossy().into_owned(),
@@ -372,7 +376,7 @@ fn read_manifest_version(manifest_path: &Path) -> Result<String> {
 }
 
 fn unlink_persist_links(version_path: &Path) -> Result<()> {
-    let manifest_path = version_path.join("manifest.json");
+    let manifest_path = installed_manifest_path(version_path);
     if !manifest_path.is_file() {
         return Ok(());
     }
@@ -515,5 +519,34 @@ mod tests {
         assert!(is_cleanable_version("0.9", "1.0"));
         assert!(is_cleanable_version("_1.0.old", "1.0"));
         assert!(is_cleanable_version("_1.0.old(1)", "1.0"));
+    }
+
+    /// Old versions with metadata clean up; metadata-less directories and
+    /// the live version survive (the FanControl case: app-managed dirs
+    /// without any install metadata must never be touched).
+    #[test]
+    #[cfg(windows)]
+    fn cleanup_spares_metadata_less_dirs() {
+        let base = std::env::temp_dir().join("bagger-test-cleanup-mixed");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("mixapp");
+        let live = app.join("2.0");
+        let old = app.join("1.0");
+        let stray = app.join("0.9");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&stray).unwrap();
+        write_manifest(&old, "1.0");
+        write_manifest(&live, "2.0");
+        junction::create(&live, app.join("current")).unwrap();
+
+        let session = Session::new();
+        cleanup("mixapp", &app, false, false, false, &session).unwrap();
+
+        assert!(!app.join("1.0").exists());
+        assert!(app.join("0.9").is_dir());
+        assert!(app.join("2.0").is_dir());
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

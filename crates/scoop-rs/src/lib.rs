@@ -58,6 +58,7 @@ pub use error::Error;
 pub use event::Event;
 pub use internal::os::running_apps as running_apps_under;
 pub use package::{Package, QueryOption, SyncOption, Transaction};
+pub use package::{has_install_metadata, install_info_path, installed_manifest_path};
 pub use persist::unlink_links as persist_unlink_links;
 pub use session::Session;
 pub use shim::refresh as shim_refresh;

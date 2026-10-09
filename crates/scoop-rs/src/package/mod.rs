@@ -56,7 +56,7 @@ pub(crate) fn is_dated_nightly(version: &str) -> bool {
 
 /// Installed manifest path inside a version directory, preferring
 /// upstream's `scoop-manifest.json` with fallback to the legacy name.
-pub(crate) fn installed_manifest_path(dir: &std::path::Path) -> std::path::PathBuf {
+pub fn installed_manifest_path(dir: &std::path::Path) -> std::path::PathBuf {
     let scoped = dir.join("scoop-manifest.json");
     if scoped.is_file() {
         scoped
@@ -67,7 +67,7 @@ pub(crate) fn installed_manifest_path(dir: &std::path::Path) -> std::path::PathB
 
 /// Install info path inside a version directory, preferring upstream's
 /// `scoop-install.json` with fallback to the legacy name.
-pub(crate) fn install_info_path(dir: &std::path::Path) -> std::path::PathBuf {
+pub fn install_info_path(dir: &std::path::Path) -> std::path::PathBuf {
     let scoped = dir.join("scoop-install.json");
     if scoped.is_file() {
         scoped
@@ -78,7 +78,7 @@ pub(crate) fn install_info_path(dir: &std::path::Path) -> std::path::PathBuf {
 
 /// Whether a version directory carries install metadata under either
 /// naming scheme.
-pub(crate) fn has_install_metadata(dir: &std::path::Path) -> bool {
+pub fn has_install_metadata(dir: &std::path::Path) -> bool {
     installed_manifest_path(dir).is_file() && install_info_path(dir).is_file()
 }
 
@@ -589,5 +589,42 @@ impl HashMismatchContext {
     /// Actual hash.
     pub fn actual(&self) -> &str {
         self.actual.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Install metadata resolves under both naming schemes (upstream
+    /// `scoop-*.json` preferred, legacy fallback); a lone install info
+    /// file is not a healthy install.
+    #[test]
+    fn install_metadata_covers_both_namings() {
+        let base = std::env::temp_dir().join("bagger-test-metadata-names");
+        let _ = std::fs::remove_dir_all(&base);
+        let legacy = base.join("legacy");
+        let scoped = base.join("scoped");
+        let mixed = base.join("mixed");
+        let empty = base.join("empty");
+        let partial = base.join("partial");
+        for dir in [&legacy, &scoped, &mixed, &empty, &partial] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(legacy.join("manifest.json"), "{}").unwrap();
+        std::fs::write(legacy.join("install.json"), "{}").unwrap();
+        std::fs::write(scoped.join("scoop-manifest.json"), "{}").unwrap();
+        std::fs::write(scoped.join("scoop-install.json"), "{}").unwrap();
+        std::fs::write(mixed.join("manifest.json"), "{}").unwrap();
+        std::fs::write(mixed.join("scoop-install.json"), "{}").unwrap();
+        std::fs::write(partial.join("install.json"), "{}").unwrap();
+
+        assert!(has_install_metadata(&legacy));
+        assert!(has_install_metadata(&scoped));
+        assert!(has_install_metadata(&mixed));
+        assert!(!has_install_metadata(&empty));
+        assert!(!has_install_metadata(&partial));
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }
