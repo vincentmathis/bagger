@@ -1,6 +1,6 @@
 # I rewrote Scoop in Rust: bagger 1.0 is out
 
-Every Scoop command pays a ~1 second tax before doing anything. That's PowerShell starting up, and you feel it on every `scoop list`, every `scoop search`, every `--version`. I got tired of paying it, so I rewrote Scoop in Rust. It's called [bagger](https://github.com/vincentmathis/bagger), it's at 1.0 today, and this is the story of getting there.
+Every Scoop command pays a ~1 second tax before doing anything. That's PowerShell starting up, and you feel it on every `scoop list`, every `scoop search`, every `--version`. I got tired of paying it, so I rewrote Scoop in Rust. It's called [bagger](https://github.com/vincentmathis/bagger), it's at 1.0 today, and there's no migration: it runs your existing Scoop setup in place.
 
 ## The pitch in one table
 
@@ -13,7 +13,7 @@ Median of 5 runs, same machine, 114 installed apps:
 | `search python` | 1515 ms | 30 ms | ~51x |
 | `info 7zip` | 810 ms | 26 ms | ~31x |
 
-Speed is the hook, but speed alone doesn't make people switch package managers. Compatibility does. So that became the actual project: not a rewrite, a re-implementation verified behavior-by-behavior against upstream.
+Speed is the hook, but speed alone doesn't make people switch package managers. Drop-in compatibility does — same `~\scoop` root, same buckets, same apps. `bagger list` sees everything Scoop installed; upgrades and uninstalls operate on the same directories. I proved it by transplanting a Scoop install and managing it end to end, and both tools read each other's metadata on a shared root.
 
 ## Compatibility as a method, not a claim
 
@@ -24,23 +24,18 @@ The verification loop that built it: read the upstream PowerShell source for a f
 - **Installer execution** has more cases than you'd think: `args` without `file` runs the download, `.ps1` installers are kept while binaries are removed, and installer-added `PATH` entries get scrubbed so the manifest stays in control. Each of those was a real behavioral difference I found by reading `Invoke-Installer`, not by guessing.
 - **Nightly builds** stamp dated directories (`nightly-20261008`), gated by the same `update_nightly` config key upstream uses.
 - **`app@version` pins** resolve through bucket git history first, then autoupdate generation — the same two-step upstream does.
-- The loop also caught real bugs in the opposite direction, including one where an upstream quirk (installer-added `PATH` entries, `install.json` conventions) broke cross-tool installs on shared roots.
+- The loop also caught real interop bugs, including one where an `install.json` convention mismatch broke upstream `scoop update` on a shared root — fixed on bagger's side and proven live in both directions.
 
-## Migration is two commands
+One honest edge: each tool only manages its own shim flavor (Scoop writes `.exe`, bagger writes `.cmd`), so a shared root can accumulate the other's droppings when you switch managers mid-stream. `checkup` flags those.
 
-```ps1
-scoop export > scoopfile.json
-bagger import scoopfile.json
-```
-
-Missing buckets are added automatically, holds are restored, and `bagger export` writes the same format back, so `scoop import` accepts it too. I proved both directions live, including a holds roundtrip. Apps installed from bare URLs can't migrate automatically and are reported as skipped — the honest edge, stated upfront.
+## Trying it changes nothing
 
 ```ps1
 scoop bucket add bagger https://github.com/vincentmathis/bagger-bucket
 scoop install bagger
 ```
 
-Also on crates.io (`cargo install bagger`), or the one-liner in the README.
+Then just run `bagger` in your existing setup — `list`, `status`, `upgrade` all work on your current apps. (Prefer a sandbox? `bagger import` takes a `scoop export` file into a fresh root, buckets auto-added, holds restored.)
 
 ## What's deliberately different
 
@@ -48,4 +43,4 @@ Three things, all documented: `upgrade` (inherited from hok, the project this wa
 
 ## Try to break it
 
-That's the actual ask: install it alongside Scoop (roots are independent), migrate a few apps, and file issues where behavior differs. The compat ledger tells you exactly what's covered, and anything you find becomes the next entry. Happy to answer questions here or on the repo.
+That's the actual ask: run it against your Scoop setup and file issues where behavior differs. The compat ledger tells you exactly what's covered, and anything you find becomes the next entry. Happy to answer questions here or on the repo.

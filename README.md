@@ -29,6 +29,8 @@ Moves mountains. Installs apps.
 [![crate](https://img.shields.io/crates/v/bagger)](https://crates.io/crates/bagger)
 [![license][license-badge]](LICENSE)
 
+![bagger demo](bagger-demo.gif)
+
 ## Why an excavator to install `jq`
 
 - **Speed.** Native binary, no shell startup cost, parallel manifest parsing.

@@ -1,7 +1,7 @@
 # bagger 1.0 launch checklist
 
 Files in this folder:
-- `bagger-demo.gif` (900x520, 367KB) — migration demo, embed in README/blog/posts
+- `bagger-demo.gif` (900x520) — drop-in demo: same root, list/status/run/upgrade
 - `blog-post.md` — long-form post (dev.to / personal blog)
 - `social-shorts.md` — X, Bluesky, Mastodon, LinkedIn copy
 - `render_demo.py` — regenerates the GIF if the script changes
