@@ -147,6 +147,9 @@ jobs:
   cd_attach_artifacts:
     name: Release Artifacts
     needs: [cd_release_please, cd_release_build]
+    # Without this gate the job runs on every main push with an empty tag
+    # and fails the whole workflow even when nothing was released.
+    if: ${{ needs.cd_release_please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Prepare Artifacts
