@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.0](https://github.com/vincentmathis/bagger/compare/v1.0.2...v1.1.0) (2026-10-09)
+
+
+### Features
+
+* shared-root operation docs, junctioned buckets, dual metadata ([d28b84b](https://github.com/vincentmathis/bagger/commit/d28b84b8b31e8503edf785b12b597932234fa28d))
+* upstream-faithful search (binary matching, remote fallback) ([c1b4f54](https://github.com/vincentmathis/bagger/commit/c1b4f54681831e5fe7a6c87b3a9d826f0a7e2abd))
+
+
+### Bug Fixes
+
+* ASCII-safe CLI output (box drawing broke cp1252 consoles) ([052d782](https://github.com/vincentmathis/bagger/commit/052d78259d5104e2d38c23fe1ef5666738fb7132))
+* cleanup --cache prunes downloads of uninstalled apps ([8af1d6d](https://github.com/vincentmathis/bagger/commit/8af1d6d76c2e67239ffa4a99a89adced2ec51cd6))
+* restore demo media, recreate tape, progress bar uses =&gt; fills ([3865d53](https://github.com/vincentmathis/bagger/commit/3865d53e99a259e09ab568fe913bfd05b6d4152c))
+
 ## [1.0.2](https://github.com/vincentmathis/bagger/compare/v1.0.1...v1.0.2) (2026-10-09)
 
 
