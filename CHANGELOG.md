@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/vincentmathis/bagger/compare/v1.0.1...v1.0.2) (2026-10-09)
+
+
+### Bug Fixes
+
+* upstream-compatible install metadata (scoop-*.json, manifest-source url) ([39c6b53](https://github.com/vincentmathis/bagger/commit/39c6b53d47d74af808c8ef0856449c980a17c581))
+
 ## [1.0.1](https://github.com/vincentmathis/bagger/compare/v1.0.0...v1.0.1) (2026-10-09)
 
 
