@@ -57,8 +57,8 @@ Legend:
 | `bagger home <app>` | [x] | Open app homepage in browser |
 | `bagger shim` | [x] | List, add, and remove shims |
 | `bagger alias` | [x] | Manage command aliases (list, add, rm; persisted to config) |
-| `bagger import` | [x] | Import apps from export file/stdin and install them (restores holds, skips isolated) |
-| `bagger export` | [x] | Export installed apps to JSON (incl. architecture + held) |
+| `bagger import` | [x] | Import apps from export file/stdin and install them (restores holds, skips isolated); reads upstream's `{buckets, apps}` shape and bagger's legacy array, auto-adding missing buckets |
+| `bagger export` | [x] | Export installed apps to JSON (incl. architecture + held); upstream object shape with buckets so `scoop import` accepts it |
 | `bagger help` | [x] | Auto-generated via clap |
 
 ### Download & Verify Commands
@@ -339,6 +339,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 59. **GitHub private-release downloads** - `releases/download` URLs resolve to API asset URLs for private repos when a token is configured (repo check + tag asset pick, `token` scheme like upstream); `api.github.com` asset downloads carry `Accept: application/octet-stream` + `Bearer` (curl backend; aria2 failures fall back to curl); proven live against a public 93-byte asset (binary bytes, not JSON metadata); the private-repo branch is unit-tested (URL split, asset pick, header selection) but has no private repo to verify against
 60. **Nightly status display** - `stale_nightlies()` (bucket manifest still `nightly`, installed stamp dated but not today, `update_nightly` set, holds excluded) feeds `status`, `list --upgradable`, and `checkup`, which show today's stamp as the target; proven live with a fabricated yesterday install (flagged in all three, silent by default, healed by `upgrade`); pins need no `update -f` equivalent — bucket attribution lets them upgrade normally (proven: `1.0` pin → plain `upgrade` → `2.0`)
 61. **Upstream re-verification corrections** - reading `scoop-cleanup.ps1` showed `cleanup` deletes `_<version>.old*` backups (no exclusion like `Get-InstalledVersion`'s list filter), so the earlier exclusion was reverted — backups clean like any old version; `cleanup -k` now also drops `*.download` partials and stale `.aria2` control files (upstream drops the former); `aria2-enabled` flipped to default-on like upstream (safe under the curl fallback); `bagger update <app>` forwards to `upgrade` with a notice (upstream semantics) instead of erroring
+62. **Bidirectional export/import interop** - `export` emits upstream's exact `{buckets, apps}` shape (PascalCase core, `architecture`/`held` extensions upstream ignores); `import` reads both shapes plus either key casing, and auto-adds missing buckets from the export like upstream does; proven live both directions on a real 130-app export (scoop→bagger: buckets auto-added, 3 apps installed and executed; bagger→scoop with `SCOOP` pointed at scratch: same 3 apps, same versions) plus a holds roundtrip; sourceless (isolated) apps report as unmigratable in both directions
 
 ## Build & Distribution
 

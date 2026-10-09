@@ -97,10 +97,18 @@ iex (iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/main/scrip
 ### From crates.io
 
 ```sh
-# NOTE: pre-releases are opt-in on crates.io; the plain
-# `cargo install bagger` form only resolves stable versions.
 cargo install bagger
 ```
+
+### Migrating from Scoop
+
+```ps1
+scoop export > scoopfile.json
+$env:SCOOP = "$HOME\scoop-bagger"  # or just install alongside; roots are independent
+bagger import scoopfile.json
+```
+
+Missing buckets are added automatically, holds are restored, and `bagger export` writes the same format back, so `scoop import` accepts it too. Apps installed from URLs (no bucket) can't migrate automatically and are reported as skipped.
 
 ### From source
 
@@ -111,9 +119,7 @@ cargo build --release
 # the binary lives at target/release/bagger.exe
 ```
 
-🚧 **Stability caveat**: `bagger` is on a pre-1.0 track; the core Scoop
-command surface is fully implemented, but individual flag behaviour may
-differ slightly from upstream Scoop. Pinned releases and checksums are on
+Pinned releases and checksums are on
 the [GitHub releases page](https://github.com/vincentmathis/bagger/releases).
 
 ---

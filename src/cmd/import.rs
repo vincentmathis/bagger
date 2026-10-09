@@ -28,10 +28,37 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
         }
     };
 
-    let apps: Vec<serde_json::Value> = serde_json::from_str(&input)?;
+    let (buckets, apps) = parse_export(&input)?;
     if apps.is_empty() {
         println!("Nothing to import.");
         return Ok(());
+    }
+
+    // Upstream `scoop import` adds missing buckets first.
+    if !buckets.is_empty() {
+        let existing: Vec<String> = scoop_rs::operation::bucket_list(session)?
+            .iter()
+            .map(|b| b.name().to_owned())
+            .collect();
+        for bucket in &buckets {
+            if existing
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(&bucket.name))
+            {
+                continue;
+            }
+            if bucket.source.is_empty() {
+                eprintln!(
+                    "warning: bucket '{}' has no source URL; skipping",
+                    bucket.name
+                );
+                continue;
+            }
+            println!("Adding bucket {}...", bucket.name);
+            if let Err(e) = scoop_rs::operation::bucket_add(session, &bucket.name, &bucket.source) {
+                eprintln!("warning: could not add bucket '{}': {e}", bucket.name);
+            }
+        }
     }
 
     let mut queries = vec![];
@@ -39,11 +66,11 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
     let mut skipped = vec![];
 
     for app in &apps {
-        let name = app.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let name = app.name.as_str();
         if name.is_empty() {
             continue;
         }
-        let bucket = app.get("bucket").and_then(|v| v.as_str()).unwrap_or("");
+        let bucket = app.bucket.as_str();
 
         // Isolated apps have no bucket manifest to reinstall from.
         if bucket == "__isolated__" {
@@ -54,11 +81,7 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
         // Per-app architecture from the export, unless globally overridden.
         let arch = match args.arch.as_deref() {
             Some(arch) => Some(arch.to_owned()),
-            None => app
-                .get("architecture")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_owned()),
+            None => app.arch.clone(),
         };
 
         let query = match bucket.is_empty() {
@@ -67,7 +90,7 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
         };
         queries.push((arch, query));
 
-        if app.get("held").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if app.held {
             held.push(name.to_owned());
         }
     }
@@ -119,4 +142,151 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// A bucket entry from an export file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExportBucket {
+    name: String,
+    source: String,
+}
+
+/// An app entry from an export file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExportApp {
+    name: String,
+    bucket: String,
+    arch: Option<String>,
+    held: bool,
+}
+
+/// Read a string field under any of several key spellings (upstream
+/// PascalCase or bagger lowercase).
+fn str_field(obj: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> String {
+    keys.iter()
+        .filter_map(|k| obj.get(*k)?.as_str())
+        .next()
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// Parse an export file in either shape: upstream's
+/// `{"buckets": [...], "apps": [...]}` object or bagger's legacy bare
+/// array. Unknown keys are ignored; entries without names are skipped.
+fn parse_export(input: &str) -> Result<(Vec<ExportBucket>, Vec<ExportApp>)> {
+    let value: serde_json::Value = serde_json::from_str(input)?;
+    let (buckets_value, apps_value) = match &value {
+        serde_json::Value::Object(map) => (
+            map.get("buckets").or(map.get("Buckets")),
+            map.get("apps")
+                .or(map.get("Apps"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(vec![])),
+        ),
+        serde_json::Value::Array(_) => (None, value.clone()),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "export file must contain an app list (array, or {{\"buckets\", \"apps\"}} object)"
+            ))
+        }
+    };
+
+    let mut buckets = Vec::new();
+    if let Some(list) = buckets_value.and_then(|v| v.as_array()) {
+        for entry in list {
+            let Some(obj) = entry.as_object() else {
+                continue;
+            };
+            let name = str_field(obj, &["name", "Name", "bucket"]);
+            if name.is_empty() || name == "__isolated__" {
+                continue;
+            }
+            buckets.push(ExportBucket {
+                name,
+                source: str_field(obj, &["source", "Source", "url", "URL"]),
+            });
+        }
+    }
+
+    let mut apps = Vec::new();
+    let list = apps_value.as_array().ok_or_else(|| {
+        anyhow::anyhow!(
+            "export file must contain an app list (array, or {{\"buckets\", \"apps\"}} object)"
+        )
+    })?;
+    for entry in list {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let name = str_field(obj, &["Name", "name"]);
+        if name.is_empty() {
+            continue;
+        }
+        let arch = str_field(obj, &["architecture", "Architecture"]);
+        apps.push(ExportApp {
+            name,
+            bucket: str_field(obj, &["Source", "source", "bucket"]),
+            arch: (!arch.is_empty()).then_some(arch),
+            held: obj
+                .get("held")
+                .or(obj.get("Held"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        });
+    }
+
+    Ok((buckets, apps))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Upstream `scoop export` shape (PascalCase object) parses, including
+    /// the bucket list for auto-adding.
+    #[test]
+    fn parses_upstream_export_shape() {
+        let input = r#"{
+            "buckets": [{"Name": "extras", "Source": "https://github.com/ScoopInstaller/Extras"}],
+            "apps": [
+                {"Name": "bat", "Version": "0.26.1", "Source": "extras", "Updated": "2026-01-01", "Info": ""},
+                {"Name": "", "Source": "main"}
+            ]
+        }"#;
+        let (buckets, apps) = parse_export(input).unwrap();
+        assert_eq!(
+            buckets,
+            vec![ExportBucket {
+                name: "extras".to_owned(),
+                source: "https://github.com/ScoopInstaller/Extras".to_owned(),
+            }]
+        );
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].name, "bat");
+        assert_eq!(apps[0].bucket, "extras");
+        assert_eq!(apps[0].arch, None);
+        assert!(!apps[0].held);
+    }
+
+    /// Bagger's own shape (bare array, lowercase + extensions) parses.
+    #[test]
+    fn parses_legacy_array_shape() {
+        let input = r#"[
+            {"name": "zstd", "bucket": "main", "version": "1.5.7", "architecture": "64bit", "held": true},
+            {"name": "lonely", "bucket": "__isolated__", "version": "1.0", "architecture": "", "held": false}
+        ]"#;
+        let (buckets, apps) = parse_export(input).unwrap();
+        assert!(buckets.is_empty());
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].arch, Some("64bit".to_owned()));
+        assert!(apps[0].held);
+        // The isolated marker survives parsing (the installer skips it).
+        assert_eq!(apps[1].bucket, "__isolated__");
+    }
+
+    #[test]
+    fn rejects_non_list_exports() {
+        assert!(parse_export("{}").unwrap().1.is_empty());
+        assert!(parse_export("42").is_err());
+    }
 }
