@@ -845,10 +845,7 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                     pkg.version()
                 );
             }
-            if force
-                && (working_dir.join("install.json").exists()
-                    || working_dir.join("manifest.json").exists())
-            {
+            if force && super::has_install_metadata(&working_dir) {
                 // Upstream `update -f`: rotate the previous install aside
                 // instead of merging the reinstall into it.
                 let backup = rotate_version_dir(&apps_dir.join(pkg.name()), pkg.version())?;
@@ -933,24 +930,36 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             };
             let install_base = apps_dir.join(pkg.name()).join(&install_subdir);
 
-            // Save manifest.json
-            let manifest_path = install_base.join("manifest.json");
+            // Save the installed manifest under both names (upstream
+            // `scoop-manifest.json`, legacy `manifest.json`).
             let manifest_json = serde_json::to_string_pretty(pkg.manifest().inner())?;
-            std::fs::write(&manifest_path, manifest_json)?;
+            std::fs::write(install_base.join("manifest.json"), &manifest_json)?;
+            std::fs::write(install_base.join("scoop-manifest.json"), &manifest_json)?;
 
-            // Write install.json (isolated packages record no bucket so
-            // they keep the `__isolated__` marker on later queries)
-            let install_bucket = match pkg.bucket() == crate::constant::ISOLATED_PACKAGE_BUCKET {
+            // Write install info under both names (upstream
+            // `scoop-install.json`, legacy `install.json`). Isolated
+            // packages record no bucket so they keep the `__isolated__`
+            // marker on later queries. The `url` mirrors upstream
+            // semantics — the manifest source for isolated installs,
+            // absent for bucket installs. It must never be a download
+            // URL: upstream `update` mistakes that for a manifest and
+            // fails the reinstall.
+            let isolated = pkg.bucket() == crate::constant::ISOLATED_PACKAGE_BUCKET;
+            let install_bucket = match isolated {
                 true => None,
                 false => Some(pkg.bucket().to_owned()),
+            };
+            let install_url = match isolated {
+                true => Some(pkg.manifest().path().to_string_lossy().into_owned()),
+                false => None,
             };
             let install_info = InstallInfo::new(
                 crate::operation::resolved_arch(pkg),
                 install_bucket,
-                pkg.download_urls().first().map(|u| u.to_string()),
+                install_url,
             );
-            let install_json_path = install_base.join("install.json");
-            internal::fs::write_json(&install_json_path, &install_info)?;
+            internal::fs::write_json(install_base.join("install.json"), &install_info)?;
+            internal::fs::write_json(install_base.join("scoop-install.json"), &install_info)?;
 
             // Set up persist directories
             persist::link(session, pkg)?;
@@ -1068,10 +1077,15 @@ fn valid_manifest_version(version: &str) -> bool {
 /// purged.
 fn purge_failed_dir(app_dir: &std::path::Path, version: &str) -> Fallible<bool> {
     let working_dir = app_dir.join(version);
-    if !working_dir.is_dir()
-        || working_dir.join("install.json").exists()
-        || working_dir.join("manifest.json").exists()
-    {
+    if !working_dir.is_dir() {
+        return Ok(false);
+    }
+    // Purge only true garbage: no manifest and no install info under
+    // either naming scheme. A half-present directory may be another
+    // tool's live install — never delete what might be data.
+    let any_manifest = super::installed_manifest_path(&working_dir).is_file();
+    let any_info = super::install_info_path(&working_dir).is_file();
+    if any_manifest || any_info {
         return Ok(false);
     }
     // The live directory (behind `current`) is a pending upgrade, not a

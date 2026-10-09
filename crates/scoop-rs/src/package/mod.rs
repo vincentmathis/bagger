@@ -54,6 +54,34 @@ pub(crate) fn is_dated_nightly(version: &str) -> bool {
         && version[8..].bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Installed manifest path inside a version directory, preferring
+/// upstream's `scoop-manifest.json` with fallback to the legacy name.
+pub(crate) fn installed_manifest_path(dir: &std::path::Path) -> std::path::PathBuf {
+    let scoped = dir.join("scoop-manifest.json");
+    if scoped.is_file() {
+        scoped
+    } else {
+        dir.join("manifest.json")
+    }
+}
+
+/// Install info path inside a version directory, preferring upstream's
+/// `scoop-install.json` with fallback to the legacy name.
+pub(crate) fn install_info_path(dir: &std::path::Path) -> std::path::PathBuf {
+    let scoped = dir.join("scoop-install.json");
+    if scoped.is_file() {
+        scoped
+    } else {
+        dir.join("install.json")
+    }
+}
+
+/// Whether a version directory carries install metadata under either
+/// naming scheme.
+pub(crate) fn has_install_metadata(dir: &std::path::Path) -> bool {
+    installed_manifest_path(dir).is_file() && install_info_path(dir).is_file()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OriginateFrom {
     Bucket(String),

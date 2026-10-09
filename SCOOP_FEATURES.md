@@ -7,6 +7,8 @@ Legend:
 - [~] Partially/Experimental
 - [ ] Not implemented
 
+Command provenance: all 28 upstream commands are implemented (`help` is served by clap, matching `scoop help`). Three commands have no upstream counterpart, marked `(extension)` below: `upgrade` (inherited from hok, the project bagger was renamed from — upstream upgrades via `update`), `autofetch` (bagger original; upstream's equivalent is the bucket-maintainer tool `bin/checkver.ps1 -Update`), and `completions` (shell completion scripts).
+
 ---
 
 ## Commands
@@ -15,29 +17,29 @@ Legend:
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
+| `bagger cat <app>` | [x] | Show manifest JSON |
+| `bagger checkup` | [x] | Check for updates, report held/running/upgradable apps; system diagnostics (Defender exclusion, main bucket, long paths, developer mode) |
+| `bagger hold <app>` | [x] | Mark apps as held |
+| `bagger info <app>` | [x] | Show manifest info for any app |
 | `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars (upgrades outdated apps unless `-U`; skips with a warning when already current); also accepts manifest URLs and local `.json` files (isolated); `app@version` / `bucket/app@version` / `url@version` / `path.json@version` pins (history → autoupdate generation); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
+| `bagger list` | [x] | List installed apps; supports `--upgradable` (incl. stale nightlies) |
+| `bagger prefix <app>` | [x] | Show installation path for an app |
+| `bagger reset <app>` | [x] | Reset an installed package to a specific version or re-extract |
+| `bagger search <query>` | [x] | Search across all buckets |
+| `bagger status` | [x] | Show held, upgradable (incl. stale nightlies), and running apps |
+| `bagger unhold <app>` | [x] | Remove hold from apps |
 | `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal, `-g/--global` |
 | `bagger update` | [x] | Pull all subscribed buckets (no args); named apps (incl. `*`) forward to `upgrade` (like upstream); shows pulled commit logs unless `show_update_log` is false; stamps `last_update` |
-| `bagger upgrade` | [x] | Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override; `--force` reinstalls current versions (previous dir rotated to `_<version>.old`), also via `force_update` config; reports when everything is already current |
-| `bagger search <query>` | [x] | Search across all buckets |
-| `bagger list` | [x] | List installed apps; supports `--upgradable` (incl. stale nightlies) |
-| `bagger info <app>` | [x] | Show manifest info for any app |
-| `bagger cat <app>` | [x] | Show manifest JSON |
-| `bagger hold <app>` | [x] | Mark apps as held |
-| `bagger unhold <app>` | [x] | Remove hold from apps |
-| `bagger prefix <app>` | [x] | Show installation path for an app |
+| `bagger upgrade` | [x] | (extension) Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override; `--force` reinstalls current versions (previous dir rotated to `_<version>.old`), also via `force_update` config; reports when everything is already current |
 | `bagger which <command>` | [x] | Find which app owns an executable |
-| `bagger status` | [x] | Show held, upgradable (incl. stale nightlies), and running apps |
-| `bagger checkup` | [x] | Check for updates, report held/running/upgradable apps; system diagnostics (Defender exclusion, main bucket, long paths, developer mode) |
-| `bagger reset <app>` | [x] | Reset an installed package to a specific version or re-extract |
 
 ### Bucket Commands
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
 | `bagger bucket add <name> [url]` | [x] | Add bucket from built-in list or custom URL (git clone) |
-| `bagger bucket remove <name>` | [x] | Remove bucket |
 | `bagger bucket list` | [x] | List added buckets (manifest counts, sources) |
+| `bagger bucket remove <name>` | [x] | Remove bucket |
 
 ### Cache Commands
 
@@ -50,25 +52,26 @@ Legend:
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
-| `bagger config [set] <key> [value]` | [x] | Get/set Scoop config.json |
-| `bagger cleanup <app>` | [x] | Remove old versions, keep current |
-| `bagger home <app>` | [x] | Open app homepage in browser |
-| `bagger shim` | [x] | List, add, and remove shims |
 | `bagger alias` | [x] | Manage command aliases (list, add, rm; persisted to config) |
-| `bagger import` | [x] | Import apps from export file/stdin and install them (restores holds, skips isolated); reads upstream's `{buckets, apps}` shape and bagger's legacy array, auto-adding missing buckets |
+| `bagger cleanup <app>` | [x] | Remove old versions, keep current |
+| `bagger completions` | [x] | (extension) Generate shell completion scripts; upstream has no equivalent |
+| `bagger config [set] <key> [value]` | [x] | Get/set Scoop config.json |
 | `bagger export` | [x] | Export installed apps to JSON (incl. architecture + held); upstream object shape with buckets so `scoop import` accepts it |
-| `bagger help` | [x] | Auto-generated via clap |
+| `bagger help` | [x] | Auto-generated via clap (matches `scoop help`) |
+| `bagger home <app>` | [x] | Open app homepage in browser |
+| `bagger import` | [x] | Import apps from export file/stdin and install them (restores holds, skips isolated); reads upstream's `{buckets, apps}` shape and bagger's legacy array, auto-adding missing buckets |
+| `bagger shim` | [x] | List, add, and remove shims |
 
 ### Download & Verify Commands
 
 | Command | Status | Notes |
 | :--- | :---: | :--- |
+| `bagger autofetch <app> [all] [-w]` | [x] | (extension) Checkver + autoupdate URL expansion preview; `-w` rewrites version, URLs and download-mode hashes (upstream equivalent: bucket-maintainer tool `bin/checkver.ps1 -Update`) |
+| `bagger checkver <app>` | [x] | Check latest version from app manifest URLs |
+| `bagger checkver all` | [x] | Check all installed apps for updates |
 | `bagger create` | [x] | Create a bucket or manifest template |
 | `bagger depends <app>` | [x] | Show dependencies and reverse dependencies |
 | `bagger download <app>` | [x] | Download package without installing; `--arch` override |
-| `bagger checkver <app>` | [x] | Check latest version from app manifest URLs |
-| `bagger checkver all` | [x] | Check all installed apps for updates |
-| `bagger autofetch <app> [all] [-w]` | [x] | Checkver + autoupdate URL expansion preview; `-w` rewrites version, URLs and download-mode hashes |
 
 ### Security Commands
 
@@ -277,7 +280,8 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 
 ## Missing Features (Medium Priority)
 
-- (none — all tracked features implemented)
+- **checkver page-fetch headers** - checkver/autoupdate page fetches don't send `private_hosts` headers or `Referer` (package downloads do both); no `--version` pin for single checks
+- (nothing else tracked — see deliberate divergences below)
 - **Known divergences (deliberate)** - `update -f` spelling is `upgrade --force`; missing shim targets warn instead of aborting the install; `install` upgrades outdated apps unless `-U/--no-upgrade` (upstream warns and skips; bagger reports skips only when already current)
 
 ## Previously Missing - Now Implemented (this iteration)
@@ -337,6 +341,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 59. **GitHub private-release downloads** - `releases/download` URLs resolve to API asset URLs for private repos when a token is configured (repo check + tag asset pick, `token` scheme like upstream); `api.github.com` asset downloads carry `Accept: application/octet-stream` + `Bearer` (curl backend; aria2 failures fall back to curl); proven live against a public 93-byte asset (binary bytes, not JSON metadata); the private-repo branch is unit-tested (URL split, asset pick, header selection) but has no private repo to verify against
 60. **Nightly status display** - `stale_nightlies()` (bucket manifest still `nightly`, installed stamp dated but not today, `update_nightly` set, holds excluded) feeds `status`, `list --upgradable`, and `checkup`, which show today's stamp as the target; proven live with a fabricated yesterday install (flagged in all three, silent by default, healed by `upgrade`); pins need no `update -f` equivalent — bucket attribution lets them upgrade normally (proven: `1.0` pin → plain `upgrade` → `2.0`)
 61. **Upstream re-verification corrections** - reading `scoop-cleanup.ps1` showed `cleanup` deletes `_<version>.old*` backups (no exclusion like `Get-InstalledVersion`'s list filter), so the earlier exclusion was reverted — backups clean like any old version; `cleanup -k` now also drops `*.download` partials and stale `.aria2` control files (upstream drops the former); `aria2-enabled` flipped to default-on like upstream (safe under the curl fallback); `bagger update <app>` forwards to `upgrade` with a notice (upstream semantics) instead of erroring
+62. **install.json compatibility fix (found via a real failure)** - upstream `scoop update` aborted reinstalling a bagger-managed app because bagger recorded the *download* URL in `install.json`'s `url` field and upstream mistook it for a manifest; bagger now mirrors upstream semantics exactly (manifest source for isolated installs, absent for bucket installs) and reads/writes both `scoop-*.json` and legacy names; proven live (fresh installs carry both file pairs with correct `url`, and upstream `scoop list`/`info` read bagger installs on a shared root)
 62. **Bidirectional export/import interop** - `export` emits upstream's exact `{buckets, apps}` shape (PascalCase core, `architecture`/`held` extensions upstream ignores); `import` reads both shapes plus either key casing, and auto-adds missing buckets from the export like upstream does; proven live both directions on a real 130-app export (scoop→bagger: buckets auto-added, 3 apps installed and executed; bagger→scoop with `SCOOP` pointed at scratch: same 3 apps, same versions) plus a holds roundtrip; sourceless (isolated) apps report as unmigratable in both directions
 
 ## Build & Distribution

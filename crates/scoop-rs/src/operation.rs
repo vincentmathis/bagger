@@ -3022,9 +3022,18 @@ pub fn package_hold(session: &Session, name: &str, flag: bool) -> Fallible<()> {
     path.push("current");
     path.push("install.json");
 
-    if let Ok(mut install_info) = InstallInfo::parse(&path) {
+    // Resolve the real file first (upstream `scoop-install.json` preferred):
+    // hold flags must round-trip through the same file that queries read.
+    // `path` itself is the legacy name; mirror into it when it exists so
+    // old readers never see a stale hold flag (the commit writes both).
+    let info_path = crate::package::install_info_path(&path);
+    if let Ok(mut install_info) = InstallInfo::parse(&info_path) {
         install_info.set_held(flag);
-        internal::fs::write_json(path, install_info)
+        internal::fs::write_json(&info_path, &install_info)?;
+        if path != info_path && path.is_file() {
+            internal::fs::write_json(&path, &install_info)?;
+        }
+        Ok(())
     } else {
         Err(Error::PackageHoldBrokenInstall(name.to_owned()))
     }

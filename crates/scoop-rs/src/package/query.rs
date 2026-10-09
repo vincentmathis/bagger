@@ -113,8 +113,9 @@ pub(crate) fn query_installed(
                         };
                         // The name `scoop` is reserved for Scoop, ignore it
                         let is_scoop = name == "scoop";
-                        let manifest_path = e.path().join("current/manifest.json");
-                        let install_info_path = e.path().join("current/install.json");
+                        let current = e.path().join("current");
+                        let manifest_path = super::installed_manifest_path(&current);
+                        let install_info_path = super::install_info_path(&current);
                         let is_not_broken = manifest_path.exists() && install_info_path.exists();
 
                         if !is_dir || is_scoop || !is_not_broken {
@@ -410,14 +411,14 @@ pub(crate) fn query_synced(
 
                             // The query has finished, the package has been found,
                             // the last step is to check if the package is installed.
-                            let mut path = apps_dir.join(name);
-                            path.push("current");
-                            path.push("install.json");
+                            let current = apps_dir.join(name).join("current");
 
-                            if let Ok(install_info) = InstallInfo::parse(&path) {
-                                path.pop();
-                                path.push("manifest.json");
-                                if let Ok(install_manifest) = Manifest::parse(path) {
+                            if let Ok(install_info) =
+                                InstallInfo::parse(super::install_info_path(&current))
+                            {
+                                if let Ok(install_manifest) =
+                                    Manifest::parse(super::installed_manifest_path(&current))
+                                {
                                     let state = InstallState::Installed(InstallStateInstalled {
                                         version: install_manifest.version().to_owned(),
                                         bucket: install_info.bucket().map(|s| s.to_owned()),
@@ -701,6 +702,44 @@ mod tests {
         );
     }
 
+    /// Upstream's `scoop-*.json` names resolve like the legacy ones (and
+    /// win when both exist).
+    #[test]
+    fn installed_query_reads_scoped_filenames() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-installed-scoped");
+        let _ = std::fs::remove_dir_all(&dir);
+        let current = dir.join("apps").join("newapp").join("current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(
+            current.join("scoop-manifest.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            current.join("scoop-install.json"),
+            r#"{"architecture": "64bit", "bucket": "fake"}"#,
+        )
+        .unwrap();
+
+        std::env::set_var("SCOOP", &dir);
+        std::env::set_var("SCOOP_GLOBAL", dir.join("global"));
+        std::env::set_var("SCOOP_CACHE", dir.join("cache"));
+        let session = Session::new();
+        let pkgs = query_installed(&session, &["*"], &[]).unwrap();
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+
+        let pkg = pkgs
+            .iter()
+            .find(|p| p.name() == "newapp")
+            .expect("scoop-named install should be found");
+        assert_eq!(pkg.installed_version(), Some("1.0"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Build a scratch root with one installed app and, optionally, a
     /// bucket manifest at `bucket_version`. Returns the root path; the
     /// caller holds [`crate::test_support::env_guard`] and points `SCOOP`
@@ -921,14 +960,15 @@ pub(crate) fn load_isolated_package(session: &Session, query: &str) -> Fallible<
     let package = Package::from(&name, ISOLATED_PACKAGE_BUCKET, manifest);
 
     // Fill the install state from the apps dir, mirroring `query_synced`.
-    let mut path = session.config().root_path().join("apps").join(&name);
-    path.push("current");
-    path.push("install.json");
+    let current = session
+        .config()
+        .root_path()
+        .join("apps")
+        .join(&name)
+        .join("current");
 
-    if let Ok(install_info) = InstallInfo::parse(&path) {
-        path.pop();
-        path.push("manifest.json");
-        if let Ok(install_manifest) = Manifest::parse(path) {
+    if let Ok(install_info) = InstallInfo::parse(super::install_info_path(&current)) {
+        if let Ok(install_manifest) = Manifest::parse(super::installed_manifest_path(&current)) {
             let state = InstallState::Installed(InstallStateInstalled {
                 version: install_manifest.version().to_owned(),
                 bucket: install_info.bucket().map(|s| s.to_owned()),
