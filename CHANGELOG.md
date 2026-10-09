@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/vincentmathis/bagger/compare/v1.0.0...v1.0.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* gate artifact attach on release creation ([8be1cbb](https://github.com/vincentmathis/bagger/commit/8be1cbbdb61d2c17a4098a590fc02ef55194fe0d))
+
 ## [1.0.0](https://github.com/vincentmathis/bagger/compare/v0.1.0-beta.7...v1.0.0) (2026-10-09)
 
 First stable release: full Scoop command + manifest parity, verified install-by-install against upstream behavior.

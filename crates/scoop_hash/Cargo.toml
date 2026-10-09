@@ -2,7 +2,7 @@
 name = "bagger-hash"
 description = "Hashing library for bagger (scoop-rs)"
 repository = "https://github.com/vincentmathis/bagger"
-version = "1.0.0"
+version = "1.0.1"
 authors = ["Chawye Hsu <su+cratesio@chawyehsu.com>"]
 documentation = "https://docs.rs/bagger-hash"
 categories = ["cryptography"]
