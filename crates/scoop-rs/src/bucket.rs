@@ -229,8 +229,11 @@ pub fn bucket_added(session: &Session) -> Fallible<Vec<Bucket>> {
                 .par_bridge()
                 .filter_map(|entry| {
                     if let Ok(entry) = entry {
-                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
                         let path = entry.path();
+                        // `file_type` does not follow reparse points, so a
+                        // junctioned bucket directory would be skipped;
+                        // `is_dir` follows links (broken ones fail closed).
+                        let is_dir = path.is_dir();
 
                         if is_dir {
                             match Bucket::from(&path) {
@@ -350,5 +353,54 @@ impl BucketUpdateLogContext {
     /// Get the pulled commit entries.
     pub fn commits(&self) -> &[String] {
         &self.commits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Junctioned bucket directories resolve like real ones (`file_type`
+    /// does not follow reparse points, so the naive check skips them).
+    #[test]
+    #[cfg(windows)]
+    fn junctioned_buckets_are_discovered() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-bucket-junction");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let target = base.join("real");
+        std::fs::create_dir_all(target.join("bucket")).unwrap();
+        std::fs::write(
+            target.join("bucket/j.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+        )
+        .unwrap();
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+
+        // A real bucket plus a junction pointing at a second one.
+        std::fs::create_dir_all(root.join("buckets/realb/bucket")).unwrap();
+        std::fs::write(
+            root.join("buckets/realb/bucket/a.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+        )
+        .unwrap();
+        crate::internal::fs::symlink_dir(&target, &root.join("buckets/jlinked")).unwrap();
+
+        let session = crate::Session::new();
+        let names: Vec<String> = bucket_added(&session)
+            .unwrap()
+            .iter()
+            .map(|b| b.name().to_owned())
+            .collect();
+        assert!(names.contains(&"realb".to_owned()), "got: {names:?}");
+        assert!(names.contains(&"jlinked".to_owned()), "got: {names:?}");
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
     }
 }

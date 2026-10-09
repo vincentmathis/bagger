@@ -109,13 +109,24 @@ cargo install bagger
 
 ### Migrating from Scoop
 
+No migration needed to try it: bagger uses the same `~\scoop` root by
+default and reads everything Scoop installed — `list`, `status`,
+upgrades, and uninstalls all operate on the existing apps in place.
+
+For a side-by-side trial (or a fresh root), import an export file;
+missing buckets are added automatically and holds are restored:
+
 ```ps1
 scoop export > scoopfile.json
-$env:SCOOP = "$HOME\scoop-bagger"  # or just install alongside; roots are independent
+$env:SCOOP = "$HOME\scoop-bagger"  # omit to use the shared root
 bagger import scoopfile.json
 ```
 
-Missing buckets are added automatically, holds are restored, and `bagger export` writes the same format back, so `scoop import` accepts it too. Apps installed from URLs (no bucket) can't migrate automatically and are reported as skipped.
+`bagger export` writes the same format back, so `scoop import` accepts
+it too. Apps installed from URLs (no bucket) can't migrate automatically
+and are reported as skipped. Note: each tool only manages its own shim
+flavor (Scoop: `.exe`, bagger: `.cmd`), so switching managers mid-stream
+can leave the other's shims behind — `checkup` flags those.
 
 ### From source
 
