@@ -246,6 +246,13 @@ cargo clippy --all-targets
 cargo build --release
 ```
 
+## Acknowledgments
+
+Bagger grew out of [hok](https://github.com/chawyehsu/hok) by Chawye Hsu,
+which laid the foundation (core library, early commands, architecture);
+it was renamed, brought to full Scoop parity, and released as 1.0 from
+there. Upstream behavior is defined by [Scoop](https://github.com/ScoopInstaller/Scoop).
+
 ## License
 
 **bagger** © [Vincent Mathis](https://github.com/vincentmathis). Released under the [Apache-2.0](LICENSE) license.

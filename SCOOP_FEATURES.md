@@ -7,7 +7,7 @@ Legend:
 - [~] Partially/Experimental
 - [ ] Not implemented
 
-Command provenance: all 28 upstream commands are implemented (`help` is served by clap, matching `scoop help`). Three commands have no upstream counterpart, marked `(extension)` below: `upgrade` (inherited from hok, the project bagger was renamed from — upstream upgrades via `update`), `autofetch` (bagger original; upstream's equivalent is the bucket-maintainer tool `bin/checkver.ps1 -Update`), and `completions` (shell completion scripts).
+Command provenance: all 28 upstream commands are implemented (`help` is served by clap, matching `scoop help`). Three commands have no upstream counterpart, marked `(extension)` below: `upgrade` (inherited from hok by Chawye Hsu, the project bagger was renamed from — upstream upgrades via `update`), `autofetch` (added during bagger's parity drive; upstream's equivalent is the bucket-maintainer tool `bin/checkver.ps1 -Update`), and `completions` (shell completion scripts).
 
 ---
 
