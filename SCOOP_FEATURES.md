@@ -17,9 +17,7 @@ Legend:
 | :--- | :---: | :--- |
 | `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars (upgrades outdated apps unless `-U`; skips with a warning when already current); also accepts manifest URLs and local `.json` files (isolated); `app@version` / `bucket/app@version` / `url@version` / `path.json@version` pins (history → autoupdate generation); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
 | `bagger uninstall <app>` | [x] | Supports `-p` (purge), cascade removal, `-g/--global` |
-| `bagger update` | [x] | Pull all subscribed buckets (no args); shows pulled commit logs unless `show_update_log` is false; stamps `last_update`; named apps forward to `upgrade` (like upstream) |
-
-> **Note on `update *`:** In older Scoop, `scoop update *` meant "upgrade all apps". In modern Scoop (and in `bagger`), use `bagger upgrade` (with no arguments) to upgrade all installed apps. The `update` command only updates bucket manifests and does not accept app names or wildcards.
+| `bagger update` | [x] | Pull all subscribed buckets (no args); named apps (incl. `*`) forward to `upgrade` (like upstream); shows pulled commit logs unless `show_update_log` is false; stamps `last_update` |
 | `bagger upgrade` | [x] | Upgrade all installed apps (or named ones); `-g/--global` for global scope; `--arch` override; `--force` reinstalls current versions (previous dir rotated to `_<version>.old`), also via `force_update` config; reports when everything is already current |
 | `bagger search <query>` | [x] | Search across all buckets |
 | `bagger list` | [x] | List installed apps; supports `--upgradable` (incl. stale nightlies) |
