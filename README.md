@@ -77,7 +77,7 @@ root. Anything not listed here is not promised.
 | `-g/--global` under `%ProgramData%\scoop` | ✓ (admin) | ✓ (admin-gated) | gate verified; cache stays user-scoped |
 | Hook scripts (`$dir`, `Expand-7zipArchive`, …) | ✓ | ✓ (shipped in `0.1.0-beta.10`) | full hook scope + archive helpers |
 | `BAGGER_FLAVOR=heavy` progress strings | — | ✓ | opt-in only; default output is script-compatible |
-| Self-update (`update scoop`) | ✓ | — | reinstall via `install.ps1` or `cargo install -f bagger --version 0.1.0-beta.11` |
+| Self-update (`update scoop`) | ✓ | — | reinstall via `install.ps1` or `cargo install -f bagger` |
 | Non-Windows | — | — | Windows-only, like Scoop |
 
 ## Install
@@ -99,7 +99,7 @@ iex (iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/main/scrip
 ```sh
 # NOTE: pre-releases are opt-in on crates.io; the plain
 # `cargo install bagger` form only resolves stable versions.
-cargo install bagger --version 0.1.0-beta.11
+cargo install bagger
 ```
 
 ### From source

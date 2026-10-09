@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.0](https://github.com/vincentmathis/bagger/compare/v0.1.0-beta.7...v1.0.0) (2026-10-09)
+
+First stable release: full Scoop command + manifest parity, verified install-by-install against upstream behavior.
+
+### Features
+
+* all 31 Scoop commands, global/isolated installs, `--arch` + `SCOOP_ARCH` + `default_architecture`
+* installer/uninstaller execution parity (`file`/`args`/`script`/`keep`, `is_in_dir`, PATH scrub)
+* autoupdate/checkver incl. `regex`/`$base64`, hash modes, `@version` pins, nightly stamping
+* hooks, shims, persist, env, shortcuts, psmodules, VirusTotal, aria2 (with curl fallback)
+* `checkup` system diagnostics, `shim refresh`, `upgrade --force`, `update <app>` forwarding
+
+### Bug Fixes
+
+* native MSI/Inno extraction, real-name staging, running-process bulk skip, shim poisoning + arg forwarding, cleanup resilience, hollow-install repair
+
 ## [0.1.0-beta.11](https://github.com/vincentmathis/bagger/compare/v0.1.0-beta.10...v0.1.0-beta.11) (2026-10-07)
 
 

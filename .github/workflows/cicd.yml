@@ -72,9 +72,6 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           release-type: rust
-          # Pinned: release-please cannot increment beta suffixes itself
-          # (it would produce 0.1.1-beta.x); bump this with Cargo.toml.
-          release-as: 0.1.0-beta.11
 
   # Build production artifacts
   cd_release_build:
