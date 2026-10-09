@@ -71,7 +71,7 @@ impl MultiProgressUI {
                     ProgressStyle::default_bar()
                         .template(BAR_FMT)
                         .unwrap()
-                        .progress_chars("#> "),
+                        .progress_chars("=> "),
                 );
                 bar
             });
