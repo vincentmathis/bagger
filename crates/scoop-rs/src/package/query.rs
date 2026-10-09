@@ -63,6 +63,32 @@ impl Matcher for RegexMatcher {
     }
 }
 
+/// Match a query against `bin` definitions, mirroring upstream
+/// `bin_match_json`: the target's basename without extension (or the
+/// alias) must match. Returns the matched display filenames.
+fn bin_match(
+    bins: &[Vec<&str>],
+    matchers: &[(Option<String>, Box<dyn Matcher + Send + Sync + '_>)],
+) -> Vec<String> {
+    use crate::internal::path::{leaf, leaf_base};
+
+    let mut matched = Vec::new();
+    for def in bins {
+        let Some(target) = def.first() else {
+            continue;
+        };
+        let stem = leaf_base(target).unwrap_or(target);
+        let alias = def.get(1).copied();
+        let hit = matchers
+            .iter()
+            .any(|(_, m)| m.is_match(stem) || alias.is_some_and(|a| m.is_match(a)));
+        if hit {
+            matched.push(leaf(target).unwrap_or(target).to_owned());
+        }
+    }
+    matched
+}
+
 /// Search installed packages.
 pub(crate) fn query_installed(
     session: &Session,
@@ -178,14 +204,14 @@ pub(crate) fn query_installed(
                                             }
                                         }
 
-                                        if options.contains(&QueryOption::Binary) {
-                                            let binaries = manifest.shims().unwrap_or_default();
-                                            let binary_matched = matchers.iter().any(|(_, m)| {
-                                                binaries.iter().any(|&b| m.is_match(b))
-                                            });
-                                            if binary_matched {
-                                                unmatched = false;
-                                            }
+                                        if options.contains(&QueryOption::Binary)
+                                            && !bin_match(
+                                                &manifest.bin().unwrap_or_default(),
+                                                &matchers,
+                                            )
+                                            .is_empty()
+                                        {
+                                            unmatched = false;
                                         }
                                     }
                                 }
@@ -391,14 +417,14 @@ pub(crate) fn query_synced(
                                         }
                                     }
 
-                                    if options.contains(&QueryOption::Binary) {
-                                        let binaries = manifest.shims().unwrap_or_default();
-                                        let binary_matched = matchers
-                                            .iter()
-                                            .any(|(_, m)| binaries.iter().any(|&b| m.is_match(b)));
-                                        if binary_matched {
-                                            unmatched = false;
-                                        }
+                                    if options.contains(&QueryOption::Binary)
+                                        && !bin_match(
+                                            &manifest.bin().unwrap_or_default(),
+                                            &matchers,
+                                        )
+                                        .is_empty()
+                                    {
+                                        unmatched = false;
                                     }
                                 }
                             }
@@ -738,6 +764,55 @@ mod tests {
         assert_eq!(pkg.installed_version(), Some("1.0"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Upstream `bin_match_json`: stems and aliases match, extensions
+    /// and directories never do.
+    #[test]
+    fn bin_match_mirrors_upstream_semantics() {
+        use regex::RegexBuilder;
+
+        fn matchers(query: &str) -> Vec<(Option<String>, Box<dyn Matcher + Send + Sync>)> {
+            vec![(
+                None,
+                Box::new(RegexMatcher(
+                    RegexBuilder::new(query)
+                        .case_insensitive(true)
+                        .multi_line(true)
+                        .build()
+                        .unwrap(),
+                )),
+            )]
+        }
+
+        // Plain target: stem matches, extension never does.
+        assert_eq!(
+            bin_match(&[vec!["extractttag.exe"]], &matchers("ttt")),
+            vec!["extractttag.exe".to_owned()]
+        );
+        assert!(bin_match(&[vec!["extractttag.exe"]], &matchers("exe")).is_empty());
+        // Alias matches independently of the target.
+        assert_eq!(
+            bin_match(&[vec!["python.exe", "py"]], &matchers("py")),
+            vec!["python.exe".to_owned()]
+        );
+        assert_eq!(
+            bin_match(&[vec!["python.exe", "py"]], &matchers("thon")),
+            vec!["python.exe".to_owned()]
+        );
+        // Subdirectories are stripped before matching.
+        assert_eq!(
+            bin_match(&[vec!["bin/tool.exe"]], &matchers("tool")),
+            vec!["tool.exe".to_owned()]
+        );
+        // Case-insensitive, like upstream `-match`.
+        assert_eq!(
+            bin_match(&[vec!["FooBar.EXE"]], &matchers("foobar")),
+            vec!["FooBar.EXE".to_owned()]
+        );
+        // Empty defs and misses yield nothing.
+        assert!(bin_match(&[vec![]], &matchers("x")).is_empty());
+        assert!(bin_match(&[vec!["other.exe"]], &matchers("zzz")).is_empty());
     }
 
     /// Build a scratch root with one installed app and, optionally, a

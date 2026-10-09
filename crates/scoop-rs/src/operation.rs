@@ -1252,6 +1252,118 @@ fn resolve_fosshub_url(page_url: &str, proxy: Option<&str>) -> Option<String> {
     json.get("data")?.get("url")?.as_str().map(str::to_owned)
 }
 
+/// Binaries of a manifest matching `query`, mirroring upstream
+/// `bin_match_json` display values: full filenames whose stem or alias
+/// matches. `literal` selects plain case-insensitive matching (bagger
+/// `--explicit`) over regex.
+pub fn matching_bin_names(
+    manifest: &crate::package::manifest::Manifest,
+    query: &str,
+    literal: bool,
+) -> Vec<String> {
+    use crate::internal::path::{leaf, leaf_base};
+
+    let mut out = Vec::new();
+    let Some(bins) = manifest.bin() else {
+        return out;
+    };
+    let query_lower = query.to_lowercase();
+    let regex = (!literal)
+        .then(|| {
+            regex::RegexBuilder::new(query)
+                .case_insensitive(true)
+                .multi_line(true)
+                .build()
+                .ok()
+        })
+        .flatten();
+    for def in &bins {
+        let Some(target) = def.first() else {
+            continue;
+        };
+        let stem = leaf_base(target).unwrap_or(target);
+        let alias = def.get(1).copied();
+        let hit = match &regex {
+            Some(re) => re.is_match(stem) || alias.is_some_and(|a| re.is_match(a)),
+            None => {
+                stem.to_lowercase().contains(&query_lower)
+                    || alias.is_some_and(|a| a.to_lowercase().contains(&query_lower))
+            }
+        };
+        if hit {
+            out.push(leaf(target).unwrap_or(target).to_owned());
+        }
+    }
+    out
+}
+
+/// Search not-yet-added known buckets via the GitHub API (upstream
+/// `search_remotes`): manifest paths matching the query. Returns
+/// `(bucket, name)` hits. Unreachable buckets fail silently (auth and
+/// rate-limit hints come from `github_api_get`).
+pub fn search_remote_buckets(session: &Session, query: &str) -> Fallible<Vec<(String, String)>> {
+    let added: Vec<String> = bucket_list(session)?
+        .iter()
+        .map(|b| b.name().to_owned())
+        .collect();
+    let proxy = session.config().proxy().map(|s| s.to_owned());
+    // Tree paths match with the query interpolated as a regex, like upstream.
+    let path_matcher = regex::RegexBuilder::new(&format!("^bucket/(.*{query}.*)\\.json$"))
+        .case_insensitive(true)
+        .build()
+        .map_err(|e| Error::Custom(format!("invalid regular expression '{query}': {e}")))?;
+    let mut out = Vec::new();
+    for (bucket, repo_url) in bucket_list_known() {
+        if added.iter().any(|b| b == bucket) {
+            continue;
+        }
+        let Some((owner, repo)) = split_github_repo(repo_url) else {
+            continue;
+        };
+        let api = format!("https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1");
+        let Some(body) = github_api_get(session, &api, proxy.as_deref()) else {
+            continue;
+        };
+        for name in remote_manifest_names(&body, &path_matcher) {
+            out.push((bucket.to_owned(), name));
+        }
+    }
+    Ok(out)
+}
+
+/// Split a `https://github.com/<owner>/<repo>[.git]` URL.
+fn split_github_repo(url: &str) -> Option<(String, String)> {
+    let path = url
+        .strip_prefix("https://github.com/")?
+        .trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return None;
+    }
+    Some((owner.to_owned(), repo.to_owned()))
+}
+
+/// Manifest names from a GitHub tree API response whose `bucket/` paths
+/// match. Pure for testability.
+fn remote_manifest_names(body: &str, path_matcher: &regex::Regex) -> Vec<String> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return vec![];
+    };
+    let Some(tree) = json.get("tree").and_then(|t| t.as_array()) else {
+        return vec![];
+    };
+    tree.iter()
+        .filter_map(|e| e.get("path")?.as_str())
+        .filter_map(|p| {
+            path_matcher
+                .captures(p)?
+                .get(1)
+                .map(|m| m.as_str().to_owned())
+        })
+        .collect()
+}
+
 /// Fetch a GitHub API URL, authenticating when a token is configured
 /// (upstream `Bearer` + API-version headers).
 ///
@@ -2502,7 +2614,40 @@ mod tests {
     }
 
     /// GitHub release URL splitting and asset picking (pure parts of the
-    /// private-release flow; the API calls need a token and a network).
+    /// private-release flow; the API calls need a token and a network).    /// Remote bucket search parts: repo URL splitting and tree-path
+    /// filtering (the API fetch itself needs a network).
+    #[test]
+    fn remote_bucket_search_parts() {
+        assert_eq!(
+            super::split_github_repo("https://github.com/ScoopInstaller/Main"),
+            Some(("ScoopInstaller".to_owned(), "Main".to_owned()))
+        );
+        assert_eq!(
+            super::split_github_repo("https://github.com/ScoopInstaller/Main.git"),
+            Some(("ScoopInstaller".to_owned(), "Main".to_owned()))
+        );
+        assert_eq!(super::split_github_repo("https://example.com/x/y"), None);
+        assert_eq!(
+            super::split_github_repo("https://github.com/onlyowner"),
+            None
+        );
+
+        let body = r#"{"tree": [
+            {"path": "bucket/argyllcms.json"},
+            {"path": "bucket/README.md"},
+            {"path": "other/argyllcms.json"}
+        ]}"#;
+        let matcher = regex::RegexBuilder::new("^bucket/(.*argyll.*)\\.json$")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        assert_eq!(
+            super::remote_manifest_names(body, &matcher),
+            vec!["argyllcms".to_owned()]
+        );
+        assert!(super::remote_manifest_names("not json", &matcher).is_empty());
+    }
+
     #[test]
     fn github_private_url_parts() {
         assert_eq!(

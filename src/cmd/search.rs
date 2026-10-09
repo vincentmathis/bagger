@@ -6,10 +6,10 @@ use crate::Result;
 
 /// Search available package(s)
 ///
-/// Search available package(s) from synced buckets.
-/// The query is performed against package names by default, use
-/// --with-description or --with-binary to search through package
-/// descriptions or binaries.
+/// Search available package(s) from synced buckets. Matching covers
+/// package names and binaries by default (like upstream); use
+/// --with-description to also search descriptions, --explicit for
+/// literal instead of regex matching.
 #[derive(Debug, Parser)]
 #[clap(arg_required_else_help = true)]
 pub struct Args {
@@ -17,9 +17,9 @@ pub struct Args {
     #[arg(required = true, action = ArgAction::Append)]
     query: Vec<String>,
     /// Turn regex off and use explicit matching
-    #[arg(short = 'e', long, action = ArgAction::SetTrue, conflicts_with_all = &["with_binary", "with_description"])]
+    #[arg(short = 'e', long, action = ArgAction::SetTrue)]
     explicit: bool,
-    /// Search through package binaries as well
+    /// Also show all package binaries in results
     #[arg(short = 'B', long, action = ArgAction::SetTrue)]
     with_binary: bool,
     /// Search through package descriptions as well
@@ -29,11 +29,7 @@ pub struct Args {
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
     let queries = args.query.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-    let mut options = vec![];
-
-    if args.with_binary {
-        options.push(QueryOption::Binary);
-    }
+    let mut options = vec![QueryOption::Binary];
 
     if args.with_description {
         options.push(QueryOption::Description);
@@ -45,7 +41,36 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
 
     let packages = operation::package_query(session, queries, options, false)?;
 
-    for pkg in packages {
+    // Precompiled display matchers (query construction already validated
+    // any regex, so build failures here fall back to literal matching).
+    let display_matchers: Vec<Option<regex::Regex>> = args
+        .query
+        .iter()
+        .map(|q| {
+            (!args.explicit)
+                .then(|| {
+                    regex::RegexBuilder::new(q)
+                        .case_insensitive(true)
+                        .multi_line(true)
+                        .build()
+                        .ok()
+                })
+                .flatten()
+        })
+        .collect();
+    let name_hit = |name: &str| {
+        args.query.iter().enumerate().any(|(i, q)| {
+            if args.explicit || display_matchers[i].is_none() {
+                name.to_lowercase().contains(&q.to_lowercase())
+            } else {
+                display_matchers[i]
+                    .as_ref()
+                    .is_some_and(|re| re.is_match(name))
+            }
+        })
+    };
+
+    for pkg in &packages {
         let mut output = String::new();
         output.push_str(
             format!("{}/{} {}", pkg.name(), pkg.bucket().green(), pkg.version()).as_str(),
@@ -77,9 +102,44 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                 Some(shims) => shims.join(","),
             };
             output.push_str(format!("\n  {}", shims).as_str());
+        } else {
+            // Show why this matched when the name didn't: the matched
+            // binaries, like upstream's Binaries column.
+            let mut matched = Vec::new();
+            for q in &args.query {
+                matched.extend(operation::matching_bin_names(
+                    pkg.manifest(),
+                    q,
+                    args.explicit,
+                ));
+            }
+            matched.sort();
+            matched.dedup();
+            if !matched.is_empty() && !name_hit(pkg.name()) {
+                output.push_str(format!("\n  {}", matched.join(",")).as_str());
+            }
         }
 
         println!("{}", output);
     }
+
+    // Fall back to not-yet-added known buckets (upstream `search_remotes`).
+    let mut remote: Vec<(String, String)> = Vec::new();
+    if packages.is_empty() {
+        remote = operation::search_remote_buckets(session, &args.query.join("|"))?;
+        if !remote.is_empty() {
+            println!("\nResults from other known buckets...");
+            println!("(add them using 'bagger bucket add <bucket name>')");
+            for (bucket, name) in &remote {
+                println!("  {name}/{bucket}");
+            }
+        }
+    }
+
+    if packages.is_empty() && remote.is_empty() {
+        eprintln!("No matches found.");
+        std::process::exit(1);
+    }
+
     Ok(())
 }
