@@ -53,7 +53,7 @@ Command provenance: all 28 upstream commands are implemented (`help` is served b
 | Command | Status | Notes |
 | :--- | :---: | :--- |
 | `bagger alias` | [x] | Manage command aliases (list, add, rm; persisted to config) |
-| `bagger cleanup <app>` | [x] | Remove old versions, keep current |
+| `bagger cleanup <app>` | [x] | Remove old versions, keep current; `--cache` prunes downloads (incl. `*.download` partials) even when the app isn't installed |
 | `bagger completions` | [x] | (extension) Generate shell completion scripts; upstream has no equivalent |
 | `bagger config [set] <key> [value]` | [x] | Get/set Scoop config.json |
 | `bagger export` | [x] | Export installed apps to JSON (incl. architecture + held); upstream object shape with buckets so `scoop import` accepts it |

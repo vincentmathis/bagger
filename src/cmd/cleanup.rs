@@ -86,7 +86,26 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                 }
             }
             if !found {
-                println!("{} was not installed.", requested);
+                if args.cache {
+                    // The app is gone but its downloads may linger: clear
+                    // them like upstream does before touching version
+                    // directories, so a reinstall fetches fresh files.
+                    let files = operation::cache_list(session, "*")?;
+                    let mut removed = 0;
+                    for file in files {
+                        if file.package_name().eq_ignore_ascii_case(name) {
+                            fs::remove_file(file.path())?;
+                            removed += 1;
+                        }
+                    }
+                    if removed > 0 {
+                        println!("Removed {removed} cached file(s) for '{requested}'.");
+                    } else {
+                        println!("{requested} was not installed.");
+                    }
+                } else {
+                    println!("{} was not installed.", requested);
+                }
             }
         }
     }
