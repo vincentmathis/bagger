@@ -45,16 +45,16 @@ Moves mountains. Installs apps.
 
 Median of 5 runs, fresh process each time, one warmup discarded.
 Ryzen 7 3700X, Windows, 102 installed apps, 7 buckets.
-`bagger` 0.1.0-beta.9 (release build) vs Scoop at current `master`
+`bagger` 1.0.0 (release build) vs Scoop at current `master`
 invoked through its `scoop.ps1` shim (which is the point: the ~1 s
 PowerShell startup is included in Scoop's column).
 
 | Operation            | Scoop (PS) | bagger | Speedup |
 | :---                 | ---:       | ---:   | ---:    |
-| `--version`          | 993 ms     | 17 ms  | ~58x    |
+| `--version`          | 993 ms     | 14 ms  | ~71x    |
 | `list`               | 1405 ms    | 26 ms  | ~54x    |
-| `search python`      | 1515 ms    | 34 ms  | ~45x    |
-| `info 7zip`          | 810 ms     | 30 ms  | ~27x    |
+| `search python`      | 1515 ms    | 30 ms  | ~51x    |
+| `info 7zip`          | 810 ms     | 26 ms  | ~31x    |
 
 The manifest parser is parallel, so parsing 6,100 manifests takes ~30 ms
 *without* any cache — enabling `use_sqlite_cache` measured 31 ms on the
