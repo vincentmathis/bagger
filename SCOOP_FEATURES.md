@@ -24,7 +24,7 @@ Command provenance: all 28 upstream commands are implemented (`help` is served b
 | `bagger install <app>` | [x] | Full install with deps, shims, shortcuts, persist, env vars (upgrades outdated apps unless `-U`; skips with a warning when already current); also accepts manifest URLs and local `.json` files (isolated); `app@version` / `bucket/app@version` / `url@version` / `path.json@version` pins (history → autoupdate generation); `-g/--global` installs for all users (admin); `--arch` overrides target arch |
 | `bagger list` | [x] | List installed apps; supports `--upgradable` (incl. stale nightlies) |
 | `bagger prefix <app>` | [x] | Show installation path for an app |
-| `bagger reset <app>` | [x] | Reset an installed package to a specific version or re-extract |
+| `bagger reset <app>` | [x] | Reset an installed package to a specific version or re-extract; `current` removal is junction-aware with readonly handling (os error 183 class) |
 | `bagger search <query>` | [x] | Matches names + binaries by default (stem/alias, like upstream; matched bins shown when the name didn't hit); `--with-description` adds descriptions, `--explicit` for literal matching; falls back to not-yet-added known buckets via GitHub API; exits 1 with `No matches found.` |
 | `bagger status` | [x] | Show held, upgradable (incl. stale nightlies), and running apps |
 | `bagger unhold <app>` | [x] | Remove hold from apps |
