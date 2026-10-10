@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.1](https://github.com/vincentmathis/bagger/compare/v1.1.0...v1.1.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* cleanup honors scoop-*.json, spares metadata-less dirs loudly ([93c5789](https://github.com/vincentmathis/bagger/commit/93c57892a8a433a7602de13628d8a1c6abfbe2c7))
+* reset clears readonly current link instead of failing 183 ([075e5f5](https://github.com/vincentmathis/bagger/commit/075e5f5702e29ed3de653801502681e35f3a9175))
+* restore demo.gif removed from disk ([80afc6a](https://github.com/vincentmathis/bagger/commit/80afc6a12c93c1645e8f0a93f6f30d70f049dd7f))
+
 ## [1.1.0](https://github.com/vincentmathis/bagger/compare/v1.0.2...v1.1.0) (2026-10-09)
 
 
