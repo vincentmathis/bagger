@@ -29,7 +29,7 @@ Moves mountains. Installs apps.
 [![crate](https://img.shields.io/crates/v/bagger)](https://crates.io/crates/bagger)
 [![license][license-badge]](LICENSE)
 
-![bagger demo](bagger-demo.gif)
+![bagger demo](demo/bagger.gif)
 
 ## Why an excavator to install `jq`
 
