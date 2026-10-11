@@ -120,6 +120,7 @@ dependencies = [
  "clap-verbosity-flag",
  "clap_complete",
  "crossterm",
+ "dirs",
  "indicatif",
  "junction",
  "regex",

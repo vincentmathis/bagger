@@ -90,6 +90,10 @@ root. Anything not listed here is not promised.
 iwr -useb https://raw.githubusercontent.com/vincentmathis/bagger/main/scripts/install.ps1 | iex
 ```
 
+The installer also wires up PowerShell tab-completion (PowerShell 7+;
+Windows PowerShell 5.1 ignores it silently). Already installed? Run
+`bagger completions powershell --install` (or `-NoCompletions` to skip).
+
 System-wide instead (requires admin):
 
 ```ps1

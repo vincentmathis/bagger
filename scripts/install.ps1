@@ -14,6 +14,7 @@ param(
     [switch]$System,          # install to Program Files (machine-wide, requires admin)
     [string]$Dir,             # override install directory
     [switch]$NoEnv,           # do not modify user/system PATH
+    [switch]$NoCompletions,    # do not install PowerShell completions into $PROFILE
     [switch]$Force,           # reinstall even if already present & newer
     [string]$Tag = "latest"   # GitHub tag / release to fetch
 )
@@ -61,28 +62,30 @@ $zipUrl = $asset.browser_download_url
 $zipTmp = "$env:TEMP\bagger-install.zip"
 
 # — check existing ─────────────────────────────────────────────────────
-if (-not $Force -and (Test-Path "$Dir\bagger.exe")) {
+$exe = "$Dir\bagger.exe"
+$upToDate = $false
+if (-not $Force -and (Test-Path $exe)) {
     try {
-        $local = [Version]((Get-Item "$Dir\bagger.exe").VersionInfo.ProductVersion)
+        $local = [Version]((Get-Item $exe).VersionInfo.ProductVersion)
     } catch { $local = $null }
     if ($local -and $remote -and ($local -ge $remote)) {
-        Write-Step "$Dir\bagger.exe (v$local) is up to date (remote v$remote). Use -Force to reinstall."
-        exit 0
+        Write-Step "$exe (v$local) is up to date (remote v$remote)."
+        $upToDate = $true
     }
 }
 
-# — download ───────────────────────────────────────────────────────────
-Write-Step "Downloading $($asset.name) ..."
-irm -Uri $zipUrl -OutFile $zipTmp
+# — download & extract ───────────────────────────────────────────────
+if (-not $upToDate) {
+    Write-Step "Downloading $($asset.name) ..."
+    irm -Uri $zipUrl -OutFile $zipTmp
 
-# — extract ────────────────────────────────────────────────────────────
-Write-Step "Extracting to $Dir ..."
-New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-Expand-Archive -LiteralPath $zipTmp -DestinationPath $Dir -Force
+    Write-Step "Extracting to $Dir ..."
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    Expand-Archive -LiteralPath $zipTmp -DestinationPath $Dir -Force
 
-$exe = "$Dir\bagger.exe"
-if (-not (Test-Path $exe)) { Die "Extraction did not yield bagger.exe" }
-Remove-Item $zipTmp -ErrorAction SilentlyContinue
+    if (-not (Test-Path $exe)) { Die "Extraction did not yield bagger.exe" }
+    Remove-Item $zipTmp -ErrorAction SilentlyContinue
+}
 
 # — PATH ───────────────────────────────────────────────────────────────
 if (-not $NoEnv) {
@@ -101,4 +104,23 @@ $env:Path = "$Dir;$env:Path"
 $verOut = (bagger --version 2>$null)
 if ($verOut -match 'bagger (\S+)') { Write-Host "bagger $($Matches[1]) installed to $exe" -ForegroundColor Green }
 else { Die "bagger.exe failed to start after install." }
+
+# — shell completions ────────────────────────────────────────────────
+# Delegates to `bagger completions powershell --install`, which is
+# idempotent (marker-guarded), so re-running this script backfills
+# completions on up-to-date installs too. Same marker is used for manual
+# installs, so the two never duplicate each other.
+if (-not $NoCompletions) {
+    try {
+        Write-Step "Installing PowerShell completions ..."
+        # Native-command failures don't throw under $ErrorActionPreference="Stop",
+        # so check the exit code explicitly (e.g. upgrading from a bagger that
+        # predates --install must warn, not die).
+        bagger completions powershell --install
+        if ($LASTEXITCODE -ne 0) { throw "bagger completions exited with code $LASTEXITCODE" }
+    } catch {
+        Write-Host "[bagger] WARNING: could not install shell completions: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 Write-Host "Run 'bagger help' to get started." -ForegroundColor Green
