@@ -1682,8 +1682,9 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
                 )?;
             }
 
-            // Remove the app directory
-            internal::fs::remove_dir(app_dir)?;
+            // Remove the app directory (already-absent is fine: a retried
+            // uninstall after a partial failure must converge, not abort).
+            internal::fs::tolerate_not_found(internal::fs::remove_dir(&app_dir))?;
 
             if purge {
                 if let Some(tx) = session.emitter() {
@@ -1691,7 +1692,7 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
                 }
 
                 let persist_dir = config.root_path().join("persist").join(package.name());
-                internal::fs::remove_dir(persist_dir)?;
+                internal::fs::tolerate_not_found(internal::fs::remove_dir(&persist_dir))?;
 
                 if let Some(tx) = session.emitter() {
                     let _ = tx.send(Event::PackagePersistPurgeDone);
@@ -2093,5 +2094,45 @@ mod tests {
         assert!(err.to_string().contains("missing"));
 
         cleanup_installer_env(&base);
+    }
+
+    /// Uninstalling after a partial failure (shims already removed, app dir
+    /// still present) converges instead of aborting with os error 2.
+    #[test]
+    fn remove_converges_after_partial_failure() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-remove-retry");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let version = root.join("apps/halfapp/1.0");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(
+            version.join("manifest.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT",
+                "bin": "half.exe"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            version.join("install.json"),
+            r#"{"architecture": "64bit", "bucket": "fake"}"#,
+        )
+        .unwrap();
+        crate::internal::fs::symlink_dir(&version, root.join("apps/halfapp/current")).unwrap();
+        // Shims dir exists but the shim is already gone (first attempt
+        // removed it before dying further down the tail).
+        std::fs::create_dir_all(root.join("shims")).unwrap();
+
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        let session = Session::new();
+        let did_work = remove(&session, &["halfapp"], &[]).unwrap();
+        assert!(did_work);
+        assert!(!root.join("apps/halfapp").exists());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
     }
 }

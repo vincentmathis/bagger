@@ -518,7 +518,9 @@ pub fn remove(session: &Session, package: &Package) -> Fallible<()> {
                         let _ = tx.send(Event::PackageShimRemoveProgress(shim_name));
                     }
 
-                    std::fs::remove_file(&shim_path)?;
+                    // The file can vanish between the check and the removal
+                    // (concurrent uninstall, AV quarantine); missing is fine.
+                    internal::fs::tolerate_not_found(std::fs::remove_file(&shim_path))?;
                 } else {
                     // this is for removing the `pkg_name` suffix added by the
                     // `alt_ext` above
@@ -558,17 +560,30 @@ pub fn remove(session: &Session, package: &Package) -> Fallible<()> {
                     }
 
                     // sort by modified time, so the latest one will be used
-                    // when there are multiple alter shims for the same shim
+                    // when there are multiple alter shims for the same shim.
+                    // Unreadable metadata sorts oldest instead of panicking.
                     if alt_shims.len() > 1 {
                         alt_shims.sort_by_key(|de| {
-                            std::cmp::Reverse(de.metadata().unwrap().modified().unwrap())
+                            std::cmp::Reverse(
+                                de.metadata()
+                                    .and_then(|m| m.modified())
+                                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                            )
                         });
                     }
 
                     let alt_shim = alt_shims.first().unwrap();
                     let alt_path = alt_shim.path();
                     let alt_path_new = alt_path.with_file_name(fname);
-                    std::fs::rename(&alt_path, &alt_path_new)?;
+                    // A stale alter shim must not wedge the uninstall; warn
+                    // loudly and continue instead.
+                    if let Err(e) = std::fs::rename(&alt_path, &alt_path_new) {
+                        eprintln!(
+                            "warning: could not restore alternate shim '{}' for '{}': {e}",
+                            alt_path.display(),
+                            pkg_name,
+                        );
+                    }
                 }
             }
         }
@@ -699,6 +714,55 @@ mod tests {
         add(&session, &pkg).unwrap();
         assert_eq!(&std::fs::read(shims.join("tool.exe")).unwrap()[..2], b"MZ");
         assert!(shims.join("tool.cmd").is_file());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn remove_tolerates_missing_shims_and_restores_alters() {
+        // Regression test: uninstalling after a partial failure (shims
+        // already gone) must converge, not abort with os error 2.
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-shim-remove");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let current = root.join("apps/unshim/current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(
+            current.join("manifest.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT",
+                "bin": [["unshim.exe"], ["ghost.exe"], ["altapp.exe"]]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            current.join("install.json"),
+            r#"{"architecture": "64bit", "bucket": "fake"}"#,
+        )
+        .unwrap();
+        let shims = root.join("shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::write(shims.join("unshim.cmd"), "@echo off\n").unwrap();
+        // ghost.cmd deliberately absent (vanished between installs).
+        std::fs::write(shims.join("altapp.cmd"), "old\n").unwrap();
+        std::fs::write(shims.join("altapp.cmd.other"), "restored\n").unwrap();
+
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        let session = Session::new();
+        let pkgs = crate::package::query::query_installed(&session, &["*"], &[]).unwrap();
+        let pkg = pkgs.iter().find(|p| p.name() == "unshim").unwrap();
+        remove(&session, pkg).unwrap();
+
+        assert!(!shims.join("unshim.cmd").exists());
+        // The overlapped alternate shim is restored under its plain name.
+        assert_eq!(
+            std::fs::read_to_string(shims.join("altapp.cmd")).unwrap(),
+            "restored\n"
+        );
 
         std::env::remove_var("SCOOP");
         std::env::remove_var("SCOOP_GLOBAL");
