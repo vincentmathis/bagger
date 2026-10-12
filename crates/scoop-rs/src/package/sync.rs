@@ -1246,9 +1246,9 @@ fn run_installer_file(
                 status
             )));
         }
-        if let Some(tx) = session.emitter() {
-            let _ = tx.send(Event::PackageCommitDone(pkg.name().to_owned()));
-        }
+        // NOTE: no PackageCommitDone here either. Running the installer
+        // file is a mid-transaction step (its start is announced above for
+        // binaries); the owning transaction reports completion exactly once.
         // Upstream only removes installer binaries (`.ps1` files are kept);
         // removal is skipped when `keep` is set.
         if !is_ps1 && !keep {
@@ -2092,6 +2092,56 @@ mod tests {
         let err = run_installer_file(&_session, &pkg, &dir, Some("setup.cmd"), None, false, false)
             .unwrap_err();
         assert!(err.to_string().contains("missing"));
+
+        cleanup_installer_env(&base);
+    }
+
+    /// Running installer files/scripts emits no `PackageCommitDone`: they
+    /// are mid-transaction steps, and each extra send printed another green
+    /// "'x' was uninstalled." line on top of the real commit event.
+    #[test]
+    #[cfg(windows)]
+    fn installer_file_sends_no_commit_done() {
+        use crate::Event;
+
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-installer-events");
+        let session = installer_session(&base);
+        let rx = session.event_bus().receiver();
+
+        // Binary installer.
+        let pkg = installer_package(r#"{"file": "setup.cmd", "args": "/S"}"#);
+        let dir = base.join("root/apps/instapp/1.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("setup.cmd"), "@echo off\r\n").unwrap();
+        run_installer_file(
+            &session,
+            &pkg,
+            &dir,
+            Some("setup.cmd"),
+            pkg.manifest().installer().unwrap().args(),
+            true,
+            false,
+        )
+        .unwrap();
+
+        // PowerShell installer (runs through the hook-script path).
+        std::fs::write(dir.join("setup.ps1"), "\"ok\" | Out-Null\r\n").unwrap();
+        run_installer_file(&session, &pkg, &dir, Some("setup.ps1"), None, true, false).unwrap();
+
+        // Hook script path directly.
+        crate::internal::ps::invoke_script(&session, &pkg, "install", &["\"ok\""], &dir).unwrap();
+
+        let mut commits = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::PackageCommitDone(_)) {
+                commits += 1;
+            }
+        }
+        assert_eq!(
+            commits, 0,
+            "installer steps must not send PackageCommitDone"
+        );
 
         cleanup_installer_env(&base);
     }
