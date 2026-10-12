@@ -14,7 +14,7 @@ use crate::Result;
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The query string (regex supported by default)
-    #[arg(required = true, action = ArgAction::Append)]
+    #[arg(required = true, action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::known_apps))]
     query: Vec<String>,
     /// Turn regex off and use explicit matching
     #[arg(short = 'e', long, action = ArgAction::SetTrue)]

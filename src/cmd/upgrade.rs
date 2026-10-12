@@ -13,7 +13,7 @@ use crate::{cui, flavor, util, Result};
 #[derive(Debug, Parser)]
 pub struct Args {
     /// The package(s) to be upgraded (default: all except held)
-    #[arg(action = ArgAction::Append)]
+    #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     package: Vec<String>,
     /// Ignore failures to ensure a complete transaction
     #[arg(short = 'f', long, action = ArgAction::SetTrue)]

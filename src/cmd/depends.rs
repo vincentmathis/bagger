@@ -9,6 +9,7 @@ use crate::Result;
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The package name
+    #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::all_apps))]
     package: String,
     /// Show reverse dependencies (who depends on this package)
     #[arg(short = 'r', long, action = clap::ArgAction::SetTrue)]

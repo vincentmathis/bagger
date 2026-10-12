@@ -9,7 +9,7 @@ use crate::{cui, flavor, Result};
 pub struct Args {
     /// The app(s) to upgrade (forwards to `upgrade`, like upstream
     /// `scoop update <app>`); empty updates buckets
-    #[arg(action = ArgAction::Append)]
+    #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     package: Vec<String>,
     /// Assume yes to all prompts and run non-interactively
     #[arg(short = 'y', long, action = ArgAction::SetTrue)]

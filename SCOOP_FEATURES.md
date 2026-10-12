@@ -54,7 +54,7 @@ Command provenance: all 28 upstream commands are implemented (`help` is served b
 | :--- | :---: | :--- |
 | `bagger alias` | [x] | Manage command aliases (list, add, rm; persisted to config) |
 | `bagger cleanup <app>` | [x] | Remove old versions, keep current; `--cache` prunes downloads (incl. `*.download` partials) even when the app isn't installed |
-| `bagger completions` | [x] | (extension) Generate shell completion scripts (`--install` writes them to the shell's startup files; `install.ps1` runs this automatically); upstream has no equivalent. PowerShell completion fires on PS 7+ only (5.1 limitation) |
+| `bagger completions` | [x] | (extension) Generate shell completion scripts (`--install` wires a live hook into the shell's startup files; `install.ps1` runs this automatically); upstream has no equivalent. PowerShell completion fires on PS 7+ only (5.1 limitation). The hook completes flags, subcommands, and live names: installed apps for `uninstall`/`upgrade`/`hold`/`cleanup`/`reset`/…, bucket manifests for `install`/`download`/`search`, buckets for `bucket`, shim names for `which`, config keys for `config` |
 | `bagger config [set] <key> [value]` | [x] | Get/set Scoop config.json |
 | `bagger export` | [x] | Export installed apps to JSON (incl. architecture + held); upstream object shape with buckets so `scoop import` accepts it |
 | `bagger help` | [x] | Auto-generated via clap (matches `scoop help`) |

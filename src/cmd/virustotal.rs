@@ -10,6 +10,7 @@ use crate::Result;
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The package name to scan
+    #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::all_apps))]
     package: String,
 
     /// VirusTotal API key (or set VIRUSTOTAL_API_KEY env var)

@@ -1,4 +1,4 @@
-use clap::{crate_description, crate_name, crate_version, Parser, Subcommand};
+use clap::{crate_description, crate_name, crate_version, CommandFactory, Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 use scoop_rs::Session;
 use tracing_subscriber::{
@@ -106,6 +106,11 @@ pub enum Command {
 
 /// CLI entry point
 pub fn start() -> Result<()> {
+    // Dynamic shell completion (COMPLETE=<shell>): answer the shell hook
+    // and exit. Must run before anything touches stdout (including the
+    // logger) or parses args — stdout is the candidate protocol here.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
     let args = Cli::parse();
 
     let session = Session::default();

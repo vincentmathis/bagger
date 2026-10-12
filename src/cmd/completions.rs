@@ -39,14 +39,15 @@ pub fn execute(args: Args) -> Result<()> {
         Shell::Zsh => append_rc_file("zsh", home_file(".zshrc")?)?,
         Shell::Fish => write_generated(
             &home_file(".config")?.join("fish/completions/bagger.fish"),
-            script.as_bytes(),
+            fish_block().as_bytes(),
         )?,
         _ => {
-            // Elvish has no startup-file convention we can wire automatically:
-            // save the module and tell the user how to load it.
-            let path = home_file(".elvish")?.join("lib/bagger.elv");
-            write_generated(&path, script.as_bytes())?;
-            println!("Add `use bagger` to ~/.elvish/rc.elv to enable completions.");
+            let rc = home_file(".elvish")?.join("rc.elv");
+            append_block(&rc, &elvish_block())?;
+            println!(
+                "Restart your shell (or source {}) to use completions.",
+                rc.display()
+            );
         }
     }
     Ok(())
@@ -59,20 +60,33 @@ fn home_file(name: &str) -> Result<PathBuf> {
 
 /// The live-evaluated block written into PowerShell profiles.
 ///
-/// Evaluated at every shell startup so completions always match the
-/// installed binary; the guards keep orphaned blocks silent after an
-/// uninstall. Native argument completers only fire on PowerShell 7+ —
-/// Windows PowerShell 5.1 registers them without error but never invokes
-/// them — hence the version gate (avoids taxing 5.1 shell startup).
+/// Sources the `CompleteEnv` registration on every shell startup, so both
+/// flags/subcommands and live app/bucket/config names complete, always
+/// matching the installed binary. The guards keep orphaned blocks silent
+/// after an uninstall. Native argument completers only fire on
+/// PowerShell 7+ — Windows PowerShell 5.1 registers them without error but
+/// never invokes them — hence the version gate (avoids taxing 5.1 shell
+/// startup).
 fn powershell_block() -> String {
     format!(
-        "{MARKER_START}\nif (($PSVersionTable.PSVersion.Major -ge 7) -and (Get-Command bagger -ErrorAction SilentlyContinue)) {{\n    bagger completions powershell | Out-String | Invoke-Expression\n}}\n{MARKER_END}\n"
+        "{MARKER_START}\nif (($PSVersionTable.PSVersion.Major -ge 7) -and (Get-Command bagger -ErrorAction SilentlyContinue)) {{\n    $env:COMPLETE = \"powershell\"; bagger | Out-String | Invoke-Expression; Remove-Item Env:\\COMPLETE\n}}\n{MARKER_END}\n"
     )
 }
 
 /// The live-evaluated block appended to bash/zsh rc files.
 fn sh_block(shell: &str) -> String {
-    format!("{MARKER_START}\ncommand -v bagger >/dev/null && eval \"$(bagger completions {shell})\"\n{MARKER_END}\n")
+    format!("{MARKER_START}\ncommand -v bagger >/dev/null && eval \"$(COMPLETE={shell} bagger)\"\n{MARKER_END}\n")
+}
+
+/// The content of the fish completions file: re-sourced every shell, so it
+/// stays in sync with the installed binary.
+fn fish_block() -> String {
+    format!("{MARKER_START}\nCOMPLETE=fish bagger | source\n{MARKER_END}\n")
+}
+
+/// The line appended to elvish's rc.elv.
+fn elvish_block() -> String {
+    format!("{MARKER_START}\neval (E:COMPLETE=elvish bagger | slurp)\n{MARKER_END}\n")
 }
 
 fn install_powershell() -> Result<()> {
@@ -165,7 +179,8 @@ mod tests {
         assert!(block.contains(MARKER_START));
         assert!(block.contains(MARKER_END));
         assert!(block.contains("Get-Command bagger"));
-        assert!(block.contains("bagger completions powershell"));
+        // Dynamic hook: re-sources the CompleteEnv registration live.
+        assert!(block.contains("COMPLETE"));
         // Native completers only fire on PS 7+; don't tax 5.1 startups.
         assert!(block.contains("PSVersionTable"));
     }
@@ -174,7 +189,7 @@ mod tests {
     fn sh_block_evals_matching_shell() {
         let block = sh_block("bash");
         assert!(block.contains(MARKER_START));
-        assert!(block.contains("bagger completions bash"));
+        assert!(block.contains("COMPLETE=bash bagger"));
     }
 
     #[test]

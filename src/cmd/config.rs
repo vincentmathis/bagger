@@ -22,6 +22,7 @@ pub enum Command {
     #[clap(arg_required_else_help = true)]
     Set {
         /// The key of the config
+        #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::config_keys))]
         key: String,
         /// The value of the setting
         value: String,
@@ -30,6 +31,7 @@ pub enum Command {
     #[clap(arg_required_else_help = true)]
     Unset {
         /// The key of the setting
+        #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::config_keys))]
         key: String,
     },
 }

@@ -8,7 +8,7 @@ use crate::Result;
 #[derive(Debug, Parser)]
 pub struct Args {
     /// The query string (regex supported by default)
-    #[arg(action = ArgAction::Append)]
+    #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     query: Vec<String>,
     /// Turn regex off and use explicit matching
     #[arg(short = 'e', long, action = ArgAction::SetTrue)]
