@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.0](https://github.com/vincentmathis/bagger/compare/v1.1.0...v1.2.0) (2026-10-13)
+
+
+### Features
+
+* install shell completions via 'completions --install' and install.ps1 ([0d9c77d](https://github.com/vincentmathis/bagger/commit/0d9c77d371017669ae85cf4217c0f1410a064dc4))
+* live app/bucket/config name completion via CompleteEnv ([178537d](https://github.com/vincentmathis/bagger/commit/178537de1c67f823695671db04eb5d1e9eaf8848))
+
+
+### Bug Fixes
+
+* cleanup honors scoop-*.json, spares metadata-less dirs loudly ([93c5789](https://github.com/vincentmathis/bagger/commit/93c57892a8a433a7602de13628d8a1c6abfbe2c7))
+* exactly one commit event per uninstall (green line printed 2-3x) ([a1822f7](https://github.com/vincentmathis/bagger/commit/a1822f7dd7322942c2e2ad09b82d14d3ffdd3701))
+* profile hook tolerates pre-CompleteEnv binaries (empty output guard) ([ba39398](https://github.com/vincentmathis/bagger/commit/ba3939817de2d16ded402ccc3b7608d886d190dd))
+* reset clears readonly current link instead of failing 183 ([075e5f5](https://github.com/vincentmathis/bagger/commit/075e5f5702e29ed3de653801502681e35f3a9175))
+* restore demo.gif removed from disk ([80afc6a](https://github.com/vincentmathis/bagger/commit/80afc6a12c93c1645e8f0a93f6f30d70f049dd7f))
+* uninstall converges after partial failure instead of aborting (os error 2) ([abdca23](https://github.com/vincentmathis/bagger/commit/abdca236ef313019af38b526f41a64b1afeac218))
+
 ## [1.1.0](https://github.com/vincentmathis/bagger/compare/v1.0.2...v1.1.0) (2026-10-09)
 
 
