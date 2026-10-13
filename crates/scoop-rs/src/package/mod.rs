@@ -82,6 +82,45 @@ pub fn has_install_metadata(dir: &std::path::Path) -> bool {
     installed_manifest_path(dir).is_file() && install_info_path(dir).is_file()
 }
 
+/// Directory holding a package's install metadata: `current` normally;
+/// under `no_junction` the live version directory (rotation backups
+/// `_*` excluded, highest version wins when several qualify). Falls back
+/// to `current` when nothing qualifies, preserving the old skip behavior.
+pub(crate) fn installed_metadata_dir(
+    app_dir: &std::path::Path,
+    no_junction: bool,
+) -> std::path::PathBuf {
+    if !no_junction {
+        return app_dir.join("current");
+    }
+    let mut best: Option<(std::path::PathBuf, String)> = None;
+    if let Ok(entries) = std::fs::read_dir(app_dir) {
+        for entry in entries.filter_map(|de| de.ok()) {
+            let path = entry.path();
+            let Some(name) = entry.file_name().to_str().map(|s| s.to_owned()) else {
+                continue;
+            };
+            if name == "current" || name.starts_with('_') {
+                continue;
+            }
+            if !has_install_metadata(&path) {
+                continue;
+            }
+            let replace = match &best {
+                None => true,
+                Some((_, version)) => {
+                    crate::internal::compare_versions(&name, version) == std::cmp::Ordering::Greater
+                }
+            };
+            if replace {
+                best = Some((path, name));
+            }
+        }
+    }
+    best.map(|(path, _)| path)
+        .unwrap_or_else(|| app_dir.join("current"))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OriginateFrom {
     Bucket(String),

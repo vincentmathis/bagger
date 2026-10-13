@@ -3278,19 +3278,22 @@ pub fn package_hold(session: &Session, name: &str, flag: bool) -> Fallible<()> {
         return Err(Error::PackageHoldNotInstalled(name.to_owned()));
     }
 
-    path.push("current");
-    path.push("install.json");
+    // Under no_junction the metadata lives in the version dir, not `current`.
+    // (This also fixes a double-join: the helpers take the directory, not
+    // the install.json path itself — hold was broken for every install.)
+    let meta_dir = crate::package::installed_metadata_dir(&path, session.config().no_junction());
+    let legacy = meta_dir.join("install.json");
 
     // Resolve the real file first (upstream `scoop-install.json` preferred):
     // hold flags must round-trip through the same file that queries read.
-    // `path` itself is the legacy name; mirror into it when it exists so
-    // old readers never see a stale hold flag (the commit writes both).
-    let info_path = crate::package::install_info_path(&path);
+    // `legacy` mirrors it when it exists so old readers never see a stale
+    // hold flag (the commit writes both).
+    let info_path = crate::package::install_info_path(&meta_dir);
     if let Ok(mut install_info) = InstallInfo::parse(&info_path) {
         install_info.set_held(flag);
         internal::fs::write_json(&info_path, &install_info)?;
-        if path != info_path && path.is_file() {
-            internal::fs::write_json(&path, &install_info)?;
+        if legacy != info_path && legacy.is_file() {
+            internal::fs::write_json(&legacy, &install_info)?;
         }
         Ok(())
     } else {

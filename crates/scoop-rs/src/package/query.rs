@@ -98,6 +98,7 @@ pub(crate) fn query_installed(
     let is_explicit_mode = options.contains(&QueryOption::Explicit);
     let is_wildcard_query = queries.contains(&"*") || queries.is_empty();
     let root_path = session.config().root_path().to_owned();
+    let no_junction = session.config().no_junction();
     let apps_dir = root_path.join("apps");
     // build matchers
     let mut matchers: Vec<(Option<String>, Box<dyn Matcher + Send + Sync>)> = vec![];
@@ -139,9 +140,9 @@ pub(crate) fn query_installed(
                         };
                         // The name `scoop` is reserved for Scoop, ignore it
                         let is_scoop = name == "scoop";
-                        let current = e.path().join("current");
-                        let manifest_path = super::installed_manifest_path(&current);
-                        let install_info_path = super::install_info_path(&current);
+                        let meta_dir = super::installed_metadata_dir(&e.path(), no_junction);
+                        let manifest_path = super::installed_manifest_path(&meta_dir);
+                        let install_info_path = super::install_info_path(&meta_dir);
                         let is_not_broken = manifest_path.exists() && install_info_path.exists();
 
                         if !is_dir || is_scoop || !is_not_broken {
@@ -312,6 +313,7 @@ pub(crate) fn query_synced(
     let is_wildcard_query = queries.contains(&"*") || queries.is_empty();
     let buckets = crate::bucket::bucket_added(session)?;
     let apps_dir = session.config().root_path().join("apps");
+    let no_junction = session.config().no_junction();
 
     // Open the SQLite manifest cache when enabled. Failures are
     // non-fatal: queries transparently fall back to parsing from disk.
@@ -437,13 +439,14 @@ pub(crate) fn query_synced(
 
                             // The query has finished, the package has been found,
                             // the last step is to check if the package is installed.
-                            let current = apps_dir.join(name).join("current");
+                            let meta_dir =
+                                super::installed_metadata_dir(&apps_dir.join(name), no_junction);
 
                             if let Ok(install_info) =
-                                InstallInfo::parse(super::install_info_path(&current))
+                                InstallInfo::parse(super::install_info_path(&meta_dir))
                             {
                                 if let Ok(install_manifest) =
-                                    Manifest::parse(super::installed_manifest_path(&current))
+                                    Manifest::parse(super::installed_manifest_path(&meta_dir))
                                 {
                                     let state = InstallState::Installed(InstallStateInstalled {
                                         version: install_manifest.version().to_owned(),
@@ -875,6 +878,82 @@ mod tests {
         assert!(missing.is_empty());
 
         std::env::remove_var("SCOOP");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn installed_query_explicit_avoids_substring_sweep() {
+        // `upgrade git` must not match `gitui`/`git-lfs`: bare queries
+        // are regex substrings, Explicit is exact.
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-query-substring");
+        let _ = std::fs::remove_dir_all(&dir);
+        for name in ["git", "gitui", "git-lfs"] {
+            let current = dir.join("apps").join(name).join("current");
+            std::fs::create_dir_all(&current).unwrap();
+            std::fs::write(
+                current.join("manifest.json"),
+                r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                current.join("install.json"),
+                r#"{"architecture": "64bit", "bucket": "qbuk"}"#,
+            )
+            .unwrap();
+        }
+        std::env::set_var("SCOOP", &dir);
+        let session = Session::new();
+
+        let loose = query_installed(&session, &["git"], &[]).unwrap();
+        assert_eq!(loose.len(), 3);
+        let exact = query_installed(&session, &["git"], &[QueryOption::Explicit]).unwrap();
+        assert_eq!(
+            exact.iter().map(|p| p.name()).collect::<Vec<_>>(),
+            vec!["git"]
+        );
+
+        std::env::remove_var("SCOOP");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn installed_query_finds_no_junction_layout() {
+        // Without a `current` link the metadata lives in the version dir;
+        // such installs must still resolve (and hold).
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-query-nojunction");
+        let _ = std::fs::remove_dir_all(&dir);
+        let version = dir.join("apps").join("njapp").join("2.0");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(
+            version.join("manifest.json"),
+            r#"{"version": "2.0", "homepage": "https://example.com", "license": "MIT"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            version.join("install.json"),
+            r#"{"architecture": "64bit", "bucket": "qbuk"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("config.json"), r#"{"no_junction": true}"#).unwrap();
+        std::env::set_var("SCOOP", &dir);
+        std::env::set_var("SCOOP_GLOBAL", dir.join("global"));
+        std::env::set_var("SCOOP_CACHE", dir.join("cache"));
+        let session = Session::new_with(dir.join("config.json")).unwrap();
+        assert!(session.config().no_junction());
+
+        let pkgs = query_installed(&session, &["njapp"], &[QueryOption::Explicit]).unwrap();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].installed_version(), Some("2.0"));
+
+        crate::operation::package_hold(&session, "njapp", true).unwrap();
+        let again = query_installed(&session, &["njapp"], &[QueryOption::Explicit]).unwrap();
+        assert!(again[0].is_held());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
         std::fs::remove_dir_all(&dir).ok();
     }
     #[test]

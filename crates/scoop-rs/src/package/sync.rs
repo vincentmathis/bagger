@@ -407,7 +407,13 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
     let update_nightly = session.config().update_nightly();
 
     if only_upgrade {
-        packages = query::query_installed(session, queries, &[QueryOption::Upgradable])?;
+        // Exact matching: `upgrade git` must not sweep up `gitui` or
+        // `git-lfs` (regex substring matching upgraded the wrong apps).
+        packages = query::query_installed(
+            session,
+            queries,
+            &[QueryOption::Upgradable, QueryOption::Explicit],
+        )?;
 
         // Replace the packages with their upgradable references.
         packages = packages

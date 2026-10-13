@@ -728,15 +728,29 @@ macro_rules! arch_specific_field {
         let mut ret = $self.inner.$field.as_ref();
 
         if let Some(arch) = $self.inner.architecture.as_ref() {
-            let selected = match crate::arch::selected() {
-                crate::arch::Arch::Ia32 => &arch.ia32,
-                crate::arch::Arch::Amd64 => &arch.amd64,
-                crate::arch::Arch::Aarch64 => &arch.aarch64,
+            let section = |which: crate::arch::Arch| match which {
+                crate::arch::Arch::Ia32 => arch.ia32.as_ref(),
+                crate::arch::Arch::Amd64 => arch.amd64.as_ref(),
+                crate::arch::Arch::Aarch64 => arch.aarch64.as_ref(),
             };
-            if let Some(spec) = selected {
-                let $field = spec.$field.as_ref();
-                if $field.is_some() {
-                    ret = $field;
+            // An explicit `--arch` selects exactly; otherwise walk the
+            // host fallback chain. The first section carrying the field
+            // wins, so a 32bit-only manifest still resolves on 64-bit.
+            let override_chain;
+            let chain: &[crate::arch::Arch] = match crate::arch::override_arch() {
+                Some(exact) => {
+                    override_chain = [exact];
+                    &override_chain
+                }
+                None => crate::arch::fallback_chain(),
+            };
+            for which in chain {
+                if let Some(spec) = section(*which) {
+                    let $field = spec.$field.as_ref();
+                    if $field.is_some() {
+                        ret = $field;
+                        break;
+                    }
                 }
             }
         }
