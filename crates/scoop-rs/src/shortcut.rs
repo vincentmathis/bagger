@@ -105,6 +105,53 @@ fn create_lnk(
     }
 }
 
+/// Shortcut display names a manifest declares: `shortcuts[i][1]`, or the
+/// target's leaf basename for lone-target entries. Shared by add/remove
+/// so both sides resolve the same files (including `A\B` subfolders).
+pub(crate) fn shortcut_names(
+    manifest: &crate::package::manifest::Manifest,
+    package_name: &str,
+    version_dir: &Path,
+) -> Vec<String> {
+    manifest
+        .shortcuts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|def| !def.is_empty())
+        .map(|def| {
+            if def.len() > 1 {
+                def[1].to_owned()
+            } else {
+                internal::path::leaf_base(&version_dir.join(def[0]))
+                    .unwrap_or(package_name)
+                    .to_owned()
+            }
+        })
+        .collect()
+}
+
+/// Remove shortcuts by display name (upgrade finalization): the stale set
+/// a new manifest no longer declares. Missing files are fine.
+pub(crate) fn remove_stale(
+    session: &Session,
+    stale: &std::collections::HashSet<String>,
+) -> Fallible<()> {
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let base = scope_shortcut_dir(session.config().is_global_scope());
+    for name in stale {
+        let path = shortcut_path(&base, name);
+        if path.is_file() {
+            if let Some(tx) = session.emitter() {
+                let _ = tx.send(Event::PackageShortcutRemoveProgress(name.clone()));
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    Ok(())
+}
+
 /// Add shortcut(s) for a given package.
 ///
 /// Creates `.lnk` shortcuts in the user's Start Menu for each shortcut defined

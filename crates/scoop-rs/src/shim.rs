@@ -51,16 +51,23 @@ pub enum ShimType {
 }
 
 impl<'a> Shim<'a> {
+    /// Display name for a bin definition, mirroring [`Shim::new`] without
+    /// constructing one: lone entries resolve to the target's basename
+    /// without extension (`bin/tool.exe` → `tool`), pairs use the alias.
+    pub(crate) fn name_of(def: &[&'a str]) -> &'a str {
+        if def.len() == 1 {
+            internal::path::leaf_base(def[0]).unwrap_or(def[0])
+        } else {
+            def[1]
+        }
+    }
+
     pub fn new(def: Vec<&'a str>) -> Shim<'a> {
         let length = def.len();
         assert_ne!(length, 0);
 
         let real_name = def[0];
-        let name = if length == 1 {
-            internal::path::leaf_base(real_name).unwrap_or(real_name)
-        } else {
-            def[1]
-        };
+        let name = Self::name_of(&def);
 
         let args = if length < 2 {
             None
@@ -539,6 +546,51 @@ fn shim_target_path(session: &Session, pkg_name: &str, real_name: &str) -> PathB
         "current".to_string()
     };
     apps_dir.join(pkg_name).join(version).join(real_name)
+}
+
+/// Remove shims by name (upgrade finalization): the stale set a new
+/// manifest no longer declares. Matches the plain file plus anything
+/// suffixed under it (`name.cmd.other`), with the same dot boundary the
+/// restore scan uses, so `git` never takes `gitui.cmd` with it. Native
+/// `.exe` files are never ours: only batch-content poison (our old bug)
+/// is removed, real binaries are left alone.
+pub(crate) fn remove_stale(
+    session: &Session,
+    stale: &std::collections::HashSet<String>,
+) -> Fallible<()> {
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let shims_dir = session.config().root_path().join("shims");
+    let entries = match shims_dir.read_dir() {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.filter_map(|de| de.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let hit = stale
+            .iter()
+            .any(|s| name == *s || name.starts_with(&format!("{s}.")));
+        if !hit {
+            continue;
+        }
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+            && !is_poisoned_exe(&path)
+        {
+            continue;
+        }
+        if let Some(tx) = session.emitter() {
+            let _ = tx.send(Event::PackageShimRemoveProgress(name.clone()));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(())
 }
 
 /// Remove shims for a package.

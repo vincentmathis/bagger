@@ -239,7 +239,7 @@ Manifest fields from the [Scoop schema](https://github.com/ScoopInstaller/Scoop/
 | Hash verification (MD5, SHA1, SHA256, SHA512) | [x] | via bagger-hash |
 | Download progress tracking | [x] | |
 | Parallel bucket updates | [x] | ThreadPool-based |
-| Transactional install/uninstall | [x] | Emit events, rollback support |
+| Transactional install/uninstall | [x] | Emit events, per-package continue with `-f/--ignore-failure` (first error returned at end); no rollback — committed packages stay committed |
 | Held package protection | [x] | Packages are skipped unless `--force` |
 | Multiple architecture support | [x] | 32bit, 64bit, arm64; `--arch` flag / `SCOOP_ARCH` env override resolution + install record |
 | Cross-bucket package replacement | [x] | When package moves buckets |
