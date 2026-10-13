@@ -49,7 +49,7 @@ pub(crate) fn resolve_dependencies(
                                 query.split_once('/').unwrap_or(("", query));
                             let bucket_matched =
                                 query_bucket.is_empty() || p.bucket() == query_bucket;
-                            let name_matched = p.name() == query_name;
+                            let name_matched = p.name().eq_ignore_ascii_case(query_name);
                             bucket_matched && name_matched
                         })
                         .cloned()

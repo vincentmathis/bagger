@@ -3,6 +3,7 @@ use crossterm::style::Stylize;
 use scoop_rs::{operation, QueryOption, Session};
 use std::path::PathBuf;
 
+use crate::util;
 use crate::Result;
 
 /// Reset an installed package to a specific version or re-extract it
@@ -14,9 +15,13 @@ pub struct Args {
     package: String,
     /// Specific version to reset to (default: current version)
     version: Option<String>,
+    /// Reset a globally installed app (requires admin rights)
+    #[arg(short = 'g', long, action = clap::ArgAction::SetTrue)]
+    global: bool,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    util::apply_global_flag(args.global, session)?;
     let config = session.config();
 
     // Exact matching: `reset zip` must not resolve to `7zip`.
@@ -165,6 +170,7 @@ mod tests {
             Args {
                 package: "resetapp".to_owned(),
                 version: None,
+                global: false,
             },
             &session,
         )

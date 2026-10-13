@@ -111,7 +111,10 @@ pub fn start() -> Result<()> {
     // logger) or parses args — stdout is the candidate protocol here.
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 
-    let args = Cli::parse();
+    // User aliases (`bagger alias add ll "list -u"`) expand before parsing;
+    // builtins always win over aliases.
+    let args = Cli::try_parse_from(alias::expand_argv(std::env::args_os().collect()))
+        .unwrap_or_else(|e| e.exit());
 
     let session = Session::default();
     // The `debug` config raises the log floor, mirroring upstream's

@@ -455,7 +455,9 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 .filter(|&p| {
                     let (query_bucket, query_name) = query.split_once('/').unwrap_or(("", query));
                     let bucket_matched = query_bucket.is_empty() || p.bucket() == query_bucket;
-                    let name_matched = p.name() == query_name;
+                    // App lookup is case-insensitive, like Windows file
+                    // names and upstream `-match`.
+                    let name_matched = p.name().eq_ignore_ascii_case(query_name);
                     bucket_matched && name_matched
                 })
                 .cloned()
@@ -1521,7 +1523,7 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
     for &name in queries {
         let mut matched = installed
             .iter()
-            .filter(|&p| p.name() == name)
+            .filter(|&p| p.name().eq_ignore_ascii_case(name))
             .cloned()
             .collect::<Vec<_>>();
 

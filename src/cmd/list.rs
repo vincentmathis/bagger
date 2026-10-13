@@ -19,9 +19,13 @@ pub struct Args {
     /// List held package(s)
     #[arg(short = 'H', long, action = ArgAction::SetTrue)]
     held: bool,
+    /// List globally installed app(s) (requires admin rights)
+    #[arg(short = 'g', long, action = ArgAction::SetTrue)]
+    global: bool,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    crate::util::apply_global_flag(args.global, session)?;
     let queries = args.query.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     let mut options = vec![];
 

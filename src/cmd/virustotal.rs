@@ -34,7 +34,7 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
     };
 
     let config = session.config();
-    let cache_dir = PathBuf::from(config.root_path()).join("cache");
+    let cache_dir = PathBuf::from(config.cache_path());
     drop(config);
 
     if !cache_dir.exists() {
@@ -50,13 +50,11 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
             let path = entry.path();
             let name = path.file_name().unwrap().to_string_lossy().to_string();
 
-            // Cache files follow pattern: app#version#hash.ext
-            if path.is_file()
-                && (name
-                    .to_lowercase()
-                    .starts_with(&format!("{}-", args.package.to_lowercase()))
-                    || name.contains(&args.package))
-            {
+            // Cache files follow pattern: app#version#hash.ext — match
+            // the app segment exactly (a `contains` sweep also scans
+            // `git-lfs` for `git`).
+            let owner = name.split('#').next().unwrap_or("");
+            if path.is_file() && owner.eq_ignore_ascii_case(&args.package) {
                 matching_files.push(path);
             }
         }

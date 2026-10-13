@@ -2,6 +2,7 @@ use clap::{ArgAction, Parser};
 use crossterm::style::Stylize;
 use scoop_rs::{operation, Session};
 
+use crate::util;
 use crate::Result;
 
 /// Unhold package(s) to enable changes
@@ -11,9 +12,13 @@ pub struct Args {
     /// The package(s) to be unheld
     #[arg(required = true, action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     package: Vec<String>,
+    /// Unhold globally installed app(s) (requires admin rights)
+    #[arg(short = 'g', long, action = ArgAction::SetTrue)]
+    global: bool,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    util::apply_global_flag(args.global, session)?;
     let packages = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     for name in packages {
         print!("Unholding {}...", name);

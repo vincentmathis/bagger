@@ -53,7 +53,9 @@ fn create_bucket(name: &str, dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(&bucket_subdir)?;
 
     let gitignore = bucket_dir.join(".gitignore");
-    std::fs::write(&gitignore, "*.json\n")?;
+    // Never `*.json`: manifests under `bucket/` are the whole point and
+    // must be tracked. Ignore OS/editor artifacts only.
+    std::fs::write(&gitignore, "# OS and editor artifacts (manifests must be tracked)\n.DS_Store\nThumbs.db\n*.swp\n*~\n.vscode/\n")?;
 
     let readme = bucket_dir.join("README.md");
     std::fs::write(&readme, format!("# {}\n\n", name))?;
