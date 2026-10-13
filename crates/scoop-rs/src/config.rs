@@ -37,7 +37,18 @@ impl ConfigBuilder {
 
         // Tolerate a UTF-8 BOM like the manifest parser does.
         let buf = buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf);
-        let inner = serde_json::from_slice(buf)?;
+        let mut inner: ConfigInner = serde_json::from_slice(buf)?;
+        // Location keys are environment-derived upstream: `SCOOP`,
+        // `SCOOP_CACHE` and `SCOOP_GLOBAL` always beat file values.
+        if std::env::var_os("SCOOP").is_some() {
+            inner.root_path = default::root_path();
+        }
+        if std::env::var_os("SCOOP_CACHE").is_some() {
+            inner.cache_path = default::cache_path();
+        }
+        if std::env::var_os("SCOOP_GLOBAL").is_some() {
+            inner.global_path = default::global_path();
+        }
         let config = Config {
             path,
             inner,
@@ -655,6 +666,75 @@ impl Config {
                     Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
                 },
             },
+            "aria2_split" | "aria2-split" => match is_unset {
+                true => self.inner.aria2_split = None,
+                false => match value.parse::<u32>() {
+                    Ok(value) => self.inner.aria2_split = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "aria2_max_connection_per_server" | "aria2-max-connection-per-server" => {
+                match is_unset {
+                    true => self.inner.aria2_max_connection_per_server = None,
+                    false => match value.parse::<u32>() {
+                        Ok(value) => self.inner.aria2_max_connection_per_server = Some(value),
+                        Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                    },
+                }
+            }
+            "aria2_min_split_size" | "aria2-min-split-size" => {
+                self.inner.aria2_min_split_size = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            "aria2_retry_wait" | "aria2-retry-wait" => match is_unset {
+                true => self.inner.aria2_retry_wait = None,
+                false => match value.parse::<u32>() {
+                    Ok(value) => self.inner.aria2_retry_wait = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "aria2_options" | "aria2-options" => {
+                self.inner.aria2_options = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            "no_junction" | "no_junctions" => match is_unset {
+                true => self.inner.no_junction = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.no_junction = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "scoop_branch" => {
+                self.inner.scoop_branch = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            "scoop_repo" => {
+                self.inner.scoop_repo = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            "shim" => {
+                self.inner.shim = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            // Location keys are derived from the environment
+            // (`SCOOP`/`SCOOP_CACHE`/`SCOOP_GLOBAL`), which always wins:
+            // setting them here would be silently ignored.
+            "root_path" | "rootPath" | "cache_path" | "cachePath" | "global_path"
+            | "globalPath" => {
+                return Err(Error::Custom(format!(
+                    "'{key}' is derived from the SCOOP/SCOOP_CACHE/SCOOP_GLOBAL environment, use those instead"
+                )))
+            }
             key => return Err(Error::ConfigKeyInvalid(key.to_owned())),
         }
 
@@ -870,5 +950,74 @@ mod default {
     #[inline]
     pub(super) fn is_default_global_path<P: AsRef<Path>>(path: P) -> bool {
         is_default(global_path().as_path(), path.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_config(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let path = dir.join("config.json");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn set_covers_numeric_and_flag_keys() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-config-set");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SCOOP", dir.join("root"));
+        let path = write_config(&dir, "{}");
+        let mut config = ConfigBuilder::new().path(&path).load().unwrap();
+
+        config.set("aria2-split", "8").unwrap();
+        assert_eq!(config.inner.aria2_split, Some(8));
+        config.set("aria2-max-connection-per-server", "16").unwrap();
+        assert_eq!(config.inner.aria2_max_connection_per_server, Some(16));
+        config.set("aria2-min-split-size", "5M").unwrap();
+        assert_eq!(config.inner.aria2_min_split_size.as_deref(), Some("5M"));
+        config.set("aria2-retry-wait", "3").unwrap();
+        assert_eq!(config.inner.aria2_retry_wait, Some(3));
+        config.set("aria2-options", "--quiet").unwrap();
+        assert_eq!(config.inner.aria2_options.as_deref(), Some("--quiet"));
+        config.set("no_junction", "true").unwrap();
+        assert_eq!(config.inner.no_junction, Some(true));
+        config.set("scoop_branch", "develop").unwrap();
+        assert_eq!(config.inner.scoop_branch.as_deref(), Some("develop"));
+        // Rejects non-numeric values for numeric keys.
+        assert!(config.set("aria2-split", "many").is_err());
+        // Location keys are env-derived, never settable.
+        let err = config.set("root_path", "C:\\x").unwrap_err();
+        assert!(err.to_string().contains("SCOOP"), "{err}");
+
+        std::env::remove_var("SCOOP");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn env_beats_file_locations() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-config-precedence");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_config(
+            &dir,
+            r#"{"root_path": "C:\\file-root", "cache_path": "C:\\file-cache", "global_path": "C:\\file-global"}"#,
+        );
+        std::env::set_var("SCOOP", dir.join("env-root"));
+        std::env::set_var("SCOOP_CACHE", dir.join("env-cache"));
+        std::env::set_var("SCOOP_GLOBAL", dir.join("env-global"));
+        let config = ConfigBuilder::new().path(&path).load().unwrap();
+        assert_eq!(config.inner.root_path, dir.join("env-root").as_path());
+        assert_eq!(config.inner.cache_path, dir.join("env-cache").as_path());
+        assert_eq!(config.inner.global_path, dir.join("env-global").as_path());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_CACHE");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

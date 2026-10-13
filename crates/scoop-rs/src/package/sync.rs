@@ -895,9 +895,6 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             // installer file/script below).
             extract_package(session, pkg, &working_dir)?;
 
-            // Handle extract_dir/extract_to from manifest
-            handle_extract_location(session, pkg, &working_dir)?;
-
             // Run pre_install after extraction (upstream order): hook
             // scripts such as `Expand-7zipArchive "$dir\inner.7z"` operate
             // on the extracted tree.
@@ -1272,6 +1269,14 @@ fn run_installer_file(
 }
 
 /// Extract downloaded archives in the working directory.
+///
+/// Each archive extracts into its own staging directory so `extract_dir`
+/// and `extract_to` pair with URLs by index (upstream semantics): a lone
+/// entry broadcasts to every URL (e.g. msival2's single `extract_dir`
+/// over 4 URLs), otherwise entry[i] applies to URL[i] (aspell,
+/// unxutils). Staged content then merges to the working dir (or the
+/// paired `extract_to` subdirectory); unextractable files (e.g. `.exe`
+/// app binaries) stay at the top level where shims expect them.
 fn extract_package(
     session: &Session,
     pkg: &Package,
@@ -1279,12 +1284,19 @@ fn extract_package(
 ) -> Fallible<()> {
     let filenames = pkg.download_staged_filenames();
     let config = session.config();
+    let extract_dirs = pkg.manifest().extract_dir().unwrap_or_default();
+    let extract_tos = pkg.manifest().extract_to().unwrap_or_default();
 
-    for filename in filenames.iter() {
+    for (index, filename) in filenames.iter().enumerate() {
         let archive_path = working_dir.join(filename);
         if !archive_path.exists() {
             continue;
         }
+
+        // Fresh staging per URL (leftovers from a failed run are dropped).
+        let stage = working_dir.join(format!("__url_{index}"));
+        let _ = remove_dir_all::remove_dir_all(&stage);
+        internal::fs::ensure_dir(&stage)?;
 
         // MSI packages go through the native MSI extractor (lessmsi or
         // msiexec, mirroring upstream `Expand-MsiArchive`); 7z mangles
@@ -1301,13 +1313,9 @@ fn extract_package(
                 )));
             }
             let lessmsi = crate::internal::ps::helper_exe(session, "lessmsi", "lessmsi.exe");
-            internal::archive::extract_msi(
-                &archive_path,
-                working_dir,
-                config.use_lessmsi(),
-                lessmsi,
-            )?;
+            internal::archive::extract_msi(&archive_path, &stage, config.use_lessmsi(), lessmsi)?;
             let _ = std::fs::remove_file(&archive_path);
+            merge_staged_content(&stage, working_dir, paired_entry(&extract_tos, index))?;
             continue;
         }
 
@@ -1337,7 +1345,7 @@ fn extract_package(
                     })?;
             let status = std::process::Command::new(&innounp)
                 .arg("-x")
-                .arg(format!("-d{}", working_dir.to_string_lossy()))
+                .arg(format!("-d{}", stage.to_string_lossy()))
                 .arg(&archive_path)
                 .arg("-y")
                 .arg("-c{app}")
@@ -1350,6 +1358,7 @@ fn extract_package(
                 )));
             }
             let _ = std::fs::remove_file(&archive_path);
+            merge_staged_content(&stage, working_dir, paired_entry(&extract_tos, index))?;
             continue;
         }
 
@@ -1373,128 +1382,132 @@ fn extract_package(
                 // 7z handles .tar files natively, and .tar.gz etc. automatically
                 internal::archive::extract_with_root(
                     &archive_path,
-                    working_dir,
+                    &stage,
                     Some(config.root_path()),
                 )?;
             } else {
-                // Extract to a temporary subdirectory first
-                let extract_dir = working_dir.join(format!("__extract_{}", filename));
+                // Extract to the staging directory first
                 internal::archive::extract_with_root(
                     &archive_path,
-                    &extract_dir,
+                    &stage,
                     Some(config.root_path()),
                 )?;
-
-                // Move contents from extract_dir to working_dir
-                let entries = std::fs::read_dir(&extract_dir)?;
-                for entry in entries {
-                    let entry = entry?;
-                    let name = entry.file_name();
-                    let src = entry.path();
-                    let dst = working_dir.join(&name);
-                    if dst.exists() {
-                        let _ = std::fs::remove_file(&dst);
-                    }
-                    std::fs::rename(&src, &dst)?;
-                }
-                let _ = internal::fs::remove_dir(&extract_dir);
             }
 
             // Clean up the archive file after extraction
             let _ = std::fs::remove_file(&archive_path);
+
+            // This URL's extract_dir promotes within the stage.
+            if let Some(sub) = paired_entry(&extract_dirs, index) {
+                promote_subdir(&stage, &sub)?;
+            }
+            merge_staged_content(&stage, working_dir, paired_entry(&extract_tos, index))?;
         }
     }
 
     Ok(())
 }
 
-/// Handle extract_dir and extract_to manifest fields.
-///
-/// - `extract_dir`: promote the named subdirectory of the extracted tree
-///   (upstream `Invoke-Extraction` moves `$dest\$extract_dir` up to `$dest`;
-///   a no-op when the subdirectory does not exist, e.g. flat 7z output).
-/// - `extract_to`: move extracted content into a subdirectory of the app dir.
-///
-/// Paths are never moved into their own descendants (a no-op instead of a
-/// platform error).
-fn handle_extract_location(
-    session: &Session,
-    pkg: &Package,
+/// Pick the `extract_dir`/`extract_to` entry for one URL: a lone entry
+/// broadcasts to every URL, otherwise entries pair by URL index.
+fn paired_entry(entries: &[&str], index: usize) -> Option<String> {
+    if entries.len() == 1 {
+        entries.first().map(|s| s.to_string())
+    } else {
+        entries.get(index).map(|s| s.to_string())
+    }
+}
+
+/// Promote a subdirectory's contents up into its root, pruning the
+/// emptied directories deepest-first. A no-op when the subdirectory
+/// does not exist (e.g. flat 7z output).
+fn promote_subdir(root: &std::path::Path, sub: &str) -> Fallible<()> {
+    let src_dir = root.join(sub);
+    if !src_dir.is_dir() {
+        return Ok(());
+    }
+    // Move the subdirectory's contents up into the root.
+    let entries = std::fs::read_dir(&src_dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let src = entry.path();
+        let dst = root.join(&name);
+        if dst.exists() {
+            if dst.is_dir() {
+                continue;
+            }
+            let _ = std::fs::remove_file(&dst);
+        }
+        std::fs::rename(&src, &dst)?;
+    }
+    // Remove the (now empty) promoted directories, deepest first.
+    let mut dir = src_dir.as_path();
+    while dir.starts_with(root) && dir != root {
+        if std::fs::read_dir(dir)?.next().is_some() {
+            break;
+        }
+        std::fs::remove_dir(dir)?;
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// Merge staged content to its destination: the working dir, or the
+/// paired `extract_to` subdirectory of it (created on demand).
+/// Unextractable files left at the top level are never relocated.
+/// Directories merge recursively (matching direct multi-archive
+/// extraction); files replace.
+fn merge_staged_content(
+    stage: &std::path::Path,
     working_dir: &std::path::Path,
+    extract_to: Option<String>,
 ) -> Fallible<()> {
-    let config = session.config();
-    let apps_dir = config.root_path().join("apps");
-
-    if let Some(extract_dir) = pkg.manifest().extract_dir() {
-        for sub in extract_dir {
-            let src_dir = working_dir.join(sub);
-            if !src_dir.is_dir() {
-                continue;
-            }
-            // Move the subdirectory's contents up into the working dir.
-            let entries = std::fs::read_dir(&src_dir)?;
-            for entry in entries {
-                let entry = entry?;
-                let name = entry.file_name();
-                let src = entry.path();
-                let dst = working_dir.join(&name);
-                if dst.exists() {
-                    if dst.is_dir() {
-                        continue;
-                    }
-                    let _ = std::fs::remove_file(&dst);
-                }
-                std::fs::rename(&src, &dst)?;
-            }
-            // Remove the (now empty) promoted directories, deepest first.
-            let mut dir = src_dir.as_path();
-            while dir.starts_with(working_dir) && dir != working_dir {
-                if std::fs::read_dir(dir)?.next().is_some() {
-                    break;
-                }
-                std::fs::remove_dir(dir)?;
-                match dir.parent() {
-                    Some(parent) => dir = parent,
-                    None => break,
-                }
-            }
+    let dest = match extract_to {
+        Some(sub) => {
+            let dir = working_dir.join(sub);
+            internal::fs::ensure_dir(&dir)?;
+            dir
         }
-    }
+        None => working_dir.to_owned(),
+    };
+    merge_dir_contents(stage, &dest)?;
+    let _ = std::fs::remove_dir(stage);
+    Ok(())
+}
 
-    // extract_to is applied after extraction, moving content to a subdirectory
-    // within the app's directory (not the version dir)
-    if let Some(extract_to) = pkg.manifest().extract_to() {
-        let target_dir = apps_dir
-            .join(pkg.name())
-            .join(pkg.version())
-            .join(extract_to[0]);
-        internal::fs::ensure_dir(&target_dir)?;
-
-        // Never relocate the downloaded archives themselves: consumed ones
-        // are already gone, and skipped ones (e.g. an unextractable `.exe`
-        // that IS the app binary, as in oh-my-posh) must stay at the top
-        // level where shims expect them.
-        let archives: std::collections::HashSet<String> =
-            pkg.download_staged_filenames().into_iter().collect();
-        let entries = std::fs::read_dir(working_dir)?;
-        for entry in entries {
-            let entry = entry?;
-            let name = entry.file_name();
-            let path = entry.path();
-            if path == target_dir {
+/// Move every entry of `src` into `dst`, merging directories recursively
+/// and replacing files.
+fn merge_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> Fallible<()> {
+    let entries = std::fs::read_dir(src)?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let from = entry.path();
+        let to = dst.join(&name);
+        if from.is_dir() {
+            if to.exists() && to.is_dir() {
+                merge_dir_contents(&from, &to)?;
+                let _ = std::fs::remove_dir(&from);
                 continue;
             }
-            if archives.contains(&name.to_string_lossy().into_owned()) {
-                continue;
+            if to.exists() {
+                let _ = std::fs::remove_file(&to);
             }
-            let dest = target_dir.join(&name);
-            if dest.exists() {
-                let _ = std::fs::remove_file(&dest);
-            }
-            std::fs::rename(&path, &dest)?;
+            std::fs::rename(&from, &to)?;
+            continue;
         }
+        if to.exists() {
+            if to.is_dir() {
+                continue;
+            }
+            let _ = std::fs::remove_file(&to);
+        }
+        std::fs::rename(&from, &to)?;
     }
-
     Ok(())
 }
 
@@ -1980,7 +1993,62 @@ mod tests {
         std::env::remove_var("SCOOP");
         std::env::remove_var("SCOOP_GLOBAL");
         std::env::remove_var("SCOOP_CACHE");
-        std::fs::remove_dir_all(base).ok();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `extract_dir`/`extract_to` pair with URLs by index; a lone entry
+    /// broadcasts. Merges recurse, files replace, promotions prune.
+    #[test]
+    fn extract_pairing_merge_and_promote() {
+        assert_eq!(paired_entry(&["a"], 0), Some("a".to_string()));
+        assert_eq!(paired_entry(&["a"], 7), Some("a".to_string()));
+        assert_eq!(paired_entry(&["a", "b"], 1), Some("b".to_string()));
+        assert_eq!(paired_entry(&["a", "b"], 5), None);
+        assert_eq!(paired_entry(&[], 0), None);
+
+        let base = std::env::temp_dir().join("bagger-test-extract-pair");
+        let _ = std::fs::remove_dir_all(&base);
+        let stage = base.join("stage");
+        let dest = base.join("dest");
+        std::fs::create_dir_all(stage.join("sub/deep")).unwrap();
+        std::fs::write(stage.join("sub/deep/f.txt"), "f").unwrap();
+        std::fs::write(stage.join("top.txt"), "top").unwrap();
+        std::fs::create_dir_all(dest.join("sub")).unwrap();
+        std::fs::write(dest.join("sub/old.txt"), "old").unwrap();
+
+        promote_subdir(&stage, "sub").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(stage.join("deep/f.txt")).unwrap(),
+            "f"
+        );
+        assert!(!stage.join("sub").exists());
+
+        merge_staged_content(&stage, &dest, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deep/f.txt")).unwrap(),
+            "f"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("top.txt")).unwrap(),
+            "top"
+        );
+        // Recursive merge kept the pre-existing file.
+        assert_eq!(
+            std::fs::read_to_string(dest.join("sub/old.txt")).unwrap(),
+            "old"
+        );
+
+        // extract_to relocates staged content into the subdirectory.
+        let stage2 = base.join("stage2");
+        std::fs::create_dir_all(&stage2).unwrap();
+        std::fs::write(stage2.join("moved.txt"), "m").unwrap();
+        merge_staged_content(&stage2, &dest, Some("sub2".to_string())).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("sub2/moved.txt")).unwrap(),
+            "m"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// `args` without `file` runs the staged download (upstream `coalesce`
