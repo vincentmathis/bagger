@@ -63,13 +63,16 @@ fn home_file(name: &str) -> Result<PathBuf> {
 /// Sources the `CompleteEnv` registration on every shell startup, so both
 /// flags/subcommands and live app/bucket/config names complete, always
 /// matching the installed binary. The guards keep orphaned blocks silent
-/// after an uninstall. Native argument completers only fire on
-/// PowerShell 7+ — Windows PowerShell 5.1 registers them without error but
-/// never invokes them — hence the version gate (avoids taxing 5.1 shell
-/// startup).
+/// after an uninstall. The output is only evaluated when non-empty: older
+/// bagger releases predate the completion hook and print help to stderr
+/// instead, which would leave `Invoke-Expression` with an empty string
+/// (a startup error on every shell). Native argument completers only fire
+/// on PowerShell 7+ — Windows PowerShell 5.1 registers them without error
+/// but never invokes them — hence the version gate (avoids taxing 5.1
+/// shell startup).
 fn powershell_block() -> String {
     format!(
-        "{MARKER_START}\nif (($PSVersionTable.PSVersion.Major -ge 7) -and (Get-Command bagger -ErrorAction SilentlyContinue)) {{\n    $env:COMPLETE = \"powershell\"; bagger | Out-String | Invoke-Expression; Remove-Item Env:\\COMPLETE\n}}\n{MARKER_END}\n"
+        "{MARKER_START}\nif (($PSVersionTable.PSVersion.Major -ge 7) -and (Get-Command bagger -ErrorAction SilentlyContinue)) {{\n    $env:COMPLETE = \"powershell\"\n    $baggerCompletions = bagger 2>$null | Out-String\n    Remove-Item Env:\\COMPLETE\n    if (-not [string]::IsNullOrWhiteSpace($baggerCompletions)) {{\n        $baggerCompletions | Invoke-Expression\n    }}\n}}\n{MARKER_END}\n"
     )
 }
 
@@ -181,6 +184,8 @@ mod tests {
         assert!(block.contains("Get-Command bagger"));
         // Dynamic hook: re-sources the CompleteEnv registration live.
         assert!(block.contains("COMPLETE"));
+        // Empty output (pre-hook binaries) must not reach Invoke-Expression.
+        assert!(block.contains("IsNullOrWhiteSpace"));
         // Native completers only fire on PS 7+; don't tax 5.1 startups.
         assert!(block.contains("PSVersionTable"));
     }
