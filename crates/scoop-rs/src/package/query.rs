@@ -1097,7 +1097,10 @@ pub(crate) fn load_isolated_package(session: &Session, query: &str) -> Fallible<
         let content = internal::network::fetch_url(query, proxy.as_deref())
             .ok_or_else(|| Error::Custom(format!("failed to fetch manifest from '{query}'")))?;
 
-        let display = session.config().cache_path().join(format!("{name}.json"));
+        // The origin stays the source URL (verbatim, never normalized):
+        // it becomes install.json `url`, and a fabricated cache path
+        // would point at a file that is never written.
+        let display = std::path::PathBuf::from(query);
         (name, display, content.into_bytes())
     } else {
         let path = std::path::Path::new(local_path);

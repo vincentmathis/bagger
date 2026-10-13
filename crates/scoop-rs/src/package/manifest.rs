@@ -479,11 +479,12 @@ impl<T: Serialize> Serialize for Vectorized<T> {
     where
         S: Serializer,
     {
-        match self.0.len() {
-            0 => serializer.serialize_none(),
-            1 => serializer.serialize_some(&self.0[0]),
-            _ => serializer.collect_seq(self.0.iter()),
-        }
+        // Always write the true shape. Collapsing a single element to its
+        // bare form corrupts nested fields on re-read: `[["a.exe","alias"]]`
+        // would come back as two bins `["a.exe","alias"]`, breaking shim
+        // removal and refresh for aliased shims. The deserializer accepts
+        // both forms, so plain singles stay readable everywhere.
+        serializer.collect_seq(self.0.iter())
     }
 }
 
@@ -784,9 +785,10 @@ impl Manifest {
 
     /// Create a [`Manifest`] from in-memory JSON bytes.
     ///
-    /// `origin` records where the manifest came from (a bucket file, a local
-    /// path, or a synthetic cache path for a remote URL) and is exposed via
-    /// [`path`][1]. It is not required to exist on disk.
+    /// `origin` records where the manifest came from: a bucket file, a local
+    /// path, or the source URL for a remote manifest. Remote origins are
+    /// kept verbatim (never path-normalized). It is not required to exist
+    /// on disk.
     ///
     /// [1]: #method.path
     pub fn parse_bytes(bytes: &[u8], origin: &Path) -> Fallible<Manifest> {
@@ -803,7 +805,13 @@ impl Manifest {
         let inner: ManifestSpec = serde_json::from_slice(bytes).inspect_err(|e| {
             warn!("failed to parse manifest {} (err: {})", origin.display(), e);
         })?;
-        let path = internal::path::normalize_path(origin);
+        // Remote origins (`https://…`) are not filesystem paths: normalizing
+        // would mangle the separators, so keep them verbatim.
+        let path = if origin.to_string_lossy().contains("://") {
+            origin.to_owned()
+        } else {
+            internal::path::normalize_path(origin)
+        };
         // let mut checksum = bagger_hash::Checksum::new("sha256");
         // checksum.consume(&bytes);
         // let hash = checksum.result();
@@ -1437,6 +1445,27 @@ mod tests {
         let m = Manifest::parse_bytes(&bytes, std::path::Path::new("bom.json"))
             .expect("BOM-prefixed manifest should parse");
         assert_eq!(m.version(), "1.0");
+    }
+
+    #[test]
+    fn nested_vectorized_round_trips_shape() {
+        // An aliased bin must survive a write/re-read cycle as one entry,
+        // not two: `[["a.exe","alias"]]` collapsing to `["a.exe","alias"]`
+        // used to double the bins (breaking shim removal/refresh).
+        let m = manifest(&base(
+            r#""bin": [["a.exe", "alias"]], "persist": [["src", "target"]]"#,
+        ));
+        let json = serde_json::to_string_pretty(m.inner()).unwrap();
+        let again = Manifest::parse_bytes(json.as_bytes(), std::path::Path::new("rt.json"))
+            .expect("re-serialized manifest should parse");
+        assert_eq!(m.bin().map(|b| b.len()), again.bin().map(|b| b.len()));
+        assert_eq!(again.bin().unwrap().len(), 1);
+        assert_eq!(
+            again
+                .persist()
+                .map(|p| p.into_iter().map(|e| e.join(",")).collect::<Vec<_>>()),
+            Some(vec!["src,target".to_string()])
+        );
     }
 
     fn base(extra: &str) -> String {

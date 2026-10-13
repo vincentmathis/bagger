@@ -96,8 +96,10 @@ pub fn install(session: &Session, package: &Package) -> Fallible<()> {
             if !path_within(&path_entry, &app_base) {
                 continue;
             }
+            // Upstream `Add-Path` prepends, so freshly installed apps win
+            // over older entries (e.g. a system-wide same-named binary).
             if !paths.contains(&path_entry) {
-                paths.push(path_entry);
+                paths.insert(0, path_entry);
                 changed = true;
             }
         }
