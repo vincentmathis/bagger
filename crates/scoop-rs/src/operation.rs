@@ -442,6 +442,41 @@ impl CheckverResult {
     }
 }
 
+/// Resolve the page a checkver run fetches: the explicit `url` when set,
+/// otherwise the homepage — except bare `"checkver": "github"`, which only
+/// carries the default regex and, like upstream, checks the repo's
+/// releases page instead.
+fn checkver_url(checkver: Option<&crate::package::manifest::Checkver>, homepage: &str) -> String {
+    match checkver.and_then(|c| c.url.as_deref()) {
+        Some(url) => url.to_string(),
+        None if checkver.and_then(|c| c.regex.as_deref())
+            == Some(crate::package::manifest::GITHUB_CHECKVER_REGEX)
+            && is_github_repo_url(homepage) =>
+        {
+            format!("{}/releases/latest", homepage.trim_end_matches('/'))
+        }
+        None => homepage.to_string(),
+    }
+}
+
+/// Whether a homepage URL points at a GitHub repository
+/// (`https://github.com/<owner>/<repo>`, optional trailing slash/`.git`).
+fn is_github_repo_url(url: &str) -> bool {
+    let rest = url
+        .trim_end_matches('/')
+        .strip_suffix(".git")
+        .unwrap_or(url)
+        .trim_end_matches('/');
+    let Some(path) = rest.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let mut parts = path.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(owner), Some(repo), None) if !owner.is_empty() && !repo.is_empty()
+    )
+}
+
 /// Check the latest version of a package by fetching its checkver URL.
 ///
 /// # Returns
@@ -494,10 +529,8 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
         });
     }
 
-    let url = checkver
-        .and_then(|c| c.url.as_deref())
-        .unwrap_or_else(|| manifest.homepage())
-        .to_string();
+    let homepage = manifest.homepage();
+    let url = checkver_url(checkver, homepage);
 
     // `checkver.useragent` wins, then the session user agent.
     let user_agent = checkver
@@ -1440,6 +1473,28 @@ mod remote_search_tests {
 
         std::env::remove_var("SCOOP_CACHE");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn checkver_url_prefers_releases_page_for_github_shorthand() {
+        use crate::package::manifest::Manifest;
+
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://github.com/owner/repo",
+                "license": "MIT", "checkver": "github"}"#,
+            std::path::Path::new("cv-url.json"),
+        )
+        .unwrap();
+        let checkver = manifest.checkver();
+        assert_eq!(
+            super::checkver_url(checkver, manifest.homepage()),
+            "https://github.com/owner/repo/releases/latest"
+        );
+        // Explicit urls and non-github homepages are untouched.
+        assert_eq!(
+            super::checkver_url(None, "https://example.com/app"),
+            "https://example.com/app"
+        );
     }
 }
 

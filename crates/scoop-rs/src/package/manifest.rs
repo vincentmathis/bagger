@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-use crate::constant::{REGEX_HASH, SPDX_LIST};
+use crate::constant::{REGEX_ARCHIVE_7Z, REGEX_HASH, SPDX_LIST};
 use crate::error::Fallible;
 use crate::internal;
 
@@ -226,6 +226,10 @@ pub struct Sourceforge {
 
     pub path: String,
 }
+
+/// Default version regex for GitHub checkver shorthands (`"checkver":
+/// `"github"` and `{"github": …}`): matches `/releases/tag/vX.Y` links.
+pub const GITHUB_CHECKVER_REGEX: &str = "/releases/tag/(?:v|V)?([\\d.]+)";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Checkver {
@@ -642,7 +646,7 @@ impl<'de> Deserialize<'de> for Checkver {
                 E: de::Error,
             {
                 let regex = match s {
-                    "github" => Some("/releases/tag/(?:v|V)?([\\d.]+)".to_owned()),
+                    "github" => Some(GITHUB_CHECKVER_REGEX.to_owned()),
                     _ => Some(s.to_owned()),
                 };
 
@@ -676,9 +680,15 @@ impl<'de> Deserialize<'de> for Checkver {
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "github" => {
+                            // Explicit `url`/`regex` keys always win,
+                            // regardless of key order in the file.
                             let prefix = map.next_value::<String>()?;
-                            url = Some(format!("{}/releases/latest", prefix));
-                            regex = Some("/releases/tag/(?:v|V)?([\\d.]+)".to_owned());
+                            if url.is_none() {
+                                url = Some(format!("{}/releases/latest", prefix));
+                            }
+                            if regex.is_none() {
+                                regex = Some(GITHUB_CHECKVER_REGEX.to_owned());
+                            }
                         }
                         "re" | "regex" => regex = Some(map.next_value()?),
                         "url" => url = Some(map.next_value()?),
@@ -1071,6 +1081,17 @@ impl Manifest {
             deps.insert("main/innounp".to_owned());
         }
 
+        // Non-zip archives need 7z to extract (like upstream `depends`,
+        // which keys off the URL extension rather than hook contents).
+        // `.zip` is excluded: it extracts without 7zip.
+        let needs_7z = self.url().iter().any(|u| {
+            let clean = u.split(['#', '?']).next().unwrap_or(u);
+            REGEX_ARCHIVE_7Z.is_match(&clean.to_ascii_lowercase())
+        });
+        if needs_7z {
+            deps.insert("7zip".to_owned());
+        }
+
         let hook_scripts = [
             self.pre_install(),
             self.post_install(),
@@ -1103,7 +1124,11 @@ impl Manifest {
             }
         });
 
-        deps.into_iter().collect()
+        // Sorted for determinism: HashSet iteration order used to shuffle
+        // dependency resolution (and install order) run to run.
+        let mut deps: Vec<String> = deps.into_iter().collect();
+        deps.sort();
+        deps
     }
 
     /// Get shims defined in this manifest.
@@ -1495,6 +1520,46 @@ mod tests {
         assert!(checkver.regex.is_some());
         // Effective checkver exposes the synthesized pair.
         assert!(m.effective_checkver().is_some());
+    }
+
+    #[test]
+    fn checkver_github_explicit_keys_win_in_any_order() {
+        // `{"github": …, "regex": …}` must keep the explicit regex no
+        // matter which key comes first.
+        for json in [
+            r#""checkver": {"github": "https://github.com/owner/repo", "regex": "v([\\d.]+)"}"#,
+            r#""checkver": {"regex": "v([\\d.]+)", "github": "https://github.com/owner/repo"}"#,
+        ] {
+            let m = manifest(&base(json));
+            let checkver = m.checkver().expect("checkver");
+            assert_eq!(
+                checkver.url.as_deref(),
+                Some("https://github.com/owner/repo/releases/latest")
+            );
+            assert_eq!(checkver.regex.as_deref(), Some("v([\\d.]+)"));
+        }
+    }
+
+    #[test]
+    fn archive_urls_pull_7zip_dependency() {
+        let seven = manifest(&base(
+            r#""url": "https://example.com/a.7z", "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855""#,
+        ));
+        assert!(seven.dependencies().contains(&"7zip".to_string()));
+
+        let zip = manifest(&base(
+            r#""url": "https://example.com/a.zip", "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855""#,
+        ));
+        assert!(!zip.dependencies().contains(&"7zip".to_string()));
+
+        // Deterministic order across calls.
+        let multi = manifest(&base(
+            r#""depends": ["zebra", "apple"], "url": "https://example.com/a.7z", "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855""#,
+        ));
+        let deps = multi.dependencies();
+        let mut sorted = deps.clone();
+        sorted.sort();
+        assert_eq!(deps, sorted);
     }
 
     #[test]

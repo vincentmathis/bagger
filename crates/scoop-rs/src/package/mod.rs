@@ -295,12 +295,14 @@ impl Package {
                 hasher.consume(u.as_bytes());
                 let mut hash = hasher.finalize();
                 hash.truncate(7);
-                let path = PathBuf::from(u);
-                let mut ext = path
-                    .extension()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
+                // Extension from the query-stripped URL (`?dl=1` suffixes
+                // are not filename characters on Windows), sanitized so
+                // the cache filename is always valid.
+                let clean = u.split(['#', '?']).next().unwrap_or(u);
+                let path = PathBuf::from(clean);
+                let mut ext = crate::internal::fs::filenamify(
+                    path.extension().unwrap_or_default().to_string_lossy(),
+                );
                 if !ext.is_empty() {
                     ext.insert(0, '.');
                 }
@@ -665,5 +667,28 @@ mod tests {
         assert!(!has_install_metadata(&partial));
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Cache filenames stay valid Windows names when URLs carry query
+    /// strings (`?dl=1` suffixes are not filename characters).
+    #[test]
+    fn download_filenames_sanitize_query_extensions() {
+        use crate::package::manifest::Manifest;
+
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT",
+                "architecture": {"64bit": {"url": "https://example.com/f.exe?dl=1"}}}"#,
+            std::path::Path::new("dlq.json"),
+        )
+        .unwrap();
+        let pkg = Package::from("dlq", "main", manifest);
+        let names = pkg.download_filenames();
+        assert_eq!(names.len(), 1);
+        assert!(
+            !names[0].contains(['?', '&', '=']),
+            "cache filename must be valid: {}",
+            names[0]
+        );
+        assert!(names[0].ends_with(".exe"), "{}", names[0]);
     }
 }

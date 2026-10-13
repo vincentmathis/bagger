@@ -779,6 +779,13 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 if actual != expected {
                     let name = pkg.name().to_owned();
                     let url = pkg.download_urls()[idx].to_owned();
+                    // Drop the bad file so the next run re-downloads
+                    // instead of failing the same integrity check forever.
+                    let _ = std::fs::remove_file(&path);
+                    eprintln!(
+                        "warning: removed corrupt cache file '{}'; it will be re-downloaded",
+                        path.display()
+                    );
                     let ctx =
                         super::HashMismatchContext::new(name, url, expected.to_owned(), actual);
                     return Err(Error::HashMismatch(ctx));
