@@ -326,12 +326,16 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     });
 
     let queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-    operation::package_sync(session, queries, options)?;
+    // Restore the cursor before propagating errors: `?` below must not
+    // leave the terminal without a cursor.
+    let result = operation::package_sync(session, queries, options);
 
     handle.join().unwrap();
 
     let mut stdout = std::io::stdout();
     let _ = stdout.execute(cursor::Show);
+
+    result?;
 
     Ok(())
 }

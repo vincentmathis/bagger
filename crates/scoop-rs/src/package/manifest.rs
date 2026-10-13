@@ -781,6 +781,11 @@ impl Manifest {
         // to integrate. But I believe there should be an alternative to
         // `serde_json` which can parse JSON files much *faster*. Perhaps
         // `simd_json` can be the one. See https://github.com/serde-rs/json-benchmark
+        //
+        // `serde_json` rejects a UTF-8 BOM, but manifests saved by Windows
+        // editors (and `config.json` alike) may carry one — strip it so
+        // such files parse instead of vanishing from queries.
+        let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
         let inner: ManifestSpec = serde_json::from_slice(bytes).inspect_err(|e| {
             warn!("failed to parse manifest {} (err: {})", origin.display(), e);
         })?;
@@ -1382,6 +1387,42 @@ mod tests {
     fn manifest(json: &str) -> Manifest {
         Manifest::parse_bytes(json.as_bytes(), std::path::Path::new("schema-test.json"))
             .expect("fixture should parse")
+    }
+
+    #[test]
+    fn hash_string_rejects_unanchored_junk() {
+        // Alternation-precedence regression: `^`/`$` must anchor every
+        // alternative, not just the first/last.
+        let good = [
+            "md5:d41d8cd98f00b204e9800998ecf8427e",
+            "sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ];
+        for h in good {
+            assert!(HashString::new(h).is_ok(), "{h}");
+        }
+        let bad = [
+            "xxsha1:da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709yy",
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855garbage",
+            "junk",
+            "sha256:xyz",
+        ];
+        for h in bad {
+            assert!(HashString::new(h).is_err(), "{h}");
+        }
+    }
+
+    #[test]
+    fn bom_prefixed_manifest_parses() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+        );
+        let m = Manifest::parse_bytes(&bytes, std::path::Path::new("bom.json"))
+            .expect("BOM-prefixed manifest should parse");
+        assert_eq!(m.version(), "1.0");
     }
 
     fn base(extra: &str) -> String {

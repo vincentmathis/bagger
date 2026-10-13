@@ -73,11 +73,15 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     let mut stdout = std::io::stdout();
     let _ = stdout.execute(cursor::Hide);
 
-    operation::bucket_update(session)?;
+    // Restore the cursor before propagating errors: `?` below must not
+    // leave the terminal without a cursor.
+    let result = operation::bucket_update(session);
 
     handle.join().unwrap();
 
     let _ = stdout.execute(cursor::Show);
+
+    result?;
 
     Ok(())
 }

@@ -209,6 +209,20 @@ pub fn bucket_update(session: &Session) -> Fallible<()> {
 /// This method will return an error if the bucket does not exist. I/O errors
 /// will be returned if the bucket directory is unable to be removed.
 pub fn bucket_remove(session: &Session, name: &str) -> Fallible<()> {
+    // The name is joined onto the buckets dir and the whole tree is
+    // deleted, so it must be a plain bucket name: anything else (`..`,
+    // separators, absolute paths) could wipe the Scoop root or worse.
+    let valid = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':'])
+        && std::path::Path::new(name)
+            .file_name()
+            .is_some_and(|n| n == name);
+    if !valid {
+        return Err(Error::Custom(format!("invalid bucket name '{name}'")));
+    }
+
     let mut path = session.config().root_path().to_owned();
     path.push("buckets");
     path.push(name);
@@ -281,7 +295,28 @@ pub fn cache_remove(session: &Session, query: &str) -> Fallible<()> {
     match query {
         "*" => {
             let config = session.config();
-            Ok(internal::fs::empty_dir(config.cache_path())?)
+            // The manifest cache database lives in the cache dir; wiping
+            // it forces a full bucket rescan, so it is spared.
+            let db = config.cache_path().join("manifests.db");
+            let mut spared = false;
+            if let Ok(entries) = config.cache_path().read_dir() {
+                for entry in entries.filter_map(|de| de.ok()) {
+                    let path = entry.path();
+                    if path == db {
+                        spared = true;
+                        continue;
+                    }
+                    if path.is_dir() {
+                        let _ = remove_dir_all::remove_dir_all(&path);
+                    } else {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+            if spared {
+                debug!("spared manifest cache database during cache clear");
+            }
+            Ok(())
         }
         query => {
             let files = cache_list(session, query)?;
@@ -1307,11 +1342,7 @@ pub fn search_remote_buckets(session: &Session, query: &str) -> Fallible<Vec<(St
         .map(|b| b.name().to_owned())
         .collect();
     let proxy = session.config().proxy().map(|s| s.to_owned());
-    // Tree paths match with the query interpolated as a regex, like upstream.
-    let path_matcher = regex::RegexBuilder::new(&format!("^bucket/(.*{query}.*)\\.json$"))
-        .case_insensitive(true)
-        .build()
-        .map_err(|e| Error::Custom(format!("invalid regular expression '{query}': {e}")))?;
+    let path_matcher = remote_path_matcher(query)?;
     let mut out = Vec::new();
     for (bucket, repo_url) in bucket_list_known() {
         if added.iter().any(|b| b == bucket) {
@@ -1344,6 +1375,18 @@ fn split_github_repo(url: &str) -> Option<(String, String)> {
     Some((owner.to_owned(), repo.to_owned()))
 }
 
+/// Tree-path matcher for remote bucket search: the query (itself an
+/// alternation of the user's queries) is interpolated as a regex, like
+/// upstream. The alternation is grouped: without `(?:…)` the `|` would
+/// split the surrounding `.*` anchors (`.*a|b.*` matches `.*a` OR `b.*`).
+/// Pure for testability.
+fn remote_path_matcher(query: &str) -> Fallible<regex::Regex> {
+    regex::RegexBuilder::new(&format!("^bucket/(.*(?:{query}).*)\\.json$"))
+        .case_insensitive(true)
+        .build()
+        .map_err(|e| Error::Custom(format!("invalid regular expression '{query}': {e}")))
+}
+
 /// Manifest names from a GitHub tree API response whose `bucket/` paths
 /// match. Pure for testability.
 fn remote_manifest_names(body: &str, path_matcher: &regex::Regex) -> Vec<String> {
@@ -1362,6 +1405,42 @@ fn remote_manifest_names(body: &str, path_matcher: &regex::Regex) -> Vec<String>
                 .map(|m| m.as_str().to_owned())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod remote_search_tests {
+    use super::*;
+
+    #[test]
+    fn multi_query_alternation_stays_anchored() {
+        // `search a b` joins queries with `|`; the group must keep the
+        // `.*` anchors around the whole alternation.
+        let matcher = remote_path_matcher("q1|q2").unwrap();
+        assert!(matcher.is_match("bucket/aq1b.json"));
+        assert!(matcher.is_match("bucket/q2.json"));
+        assert!(!matcher.is_match("bucket/other.json"));
+        assert!(!matcher.is_match("bucket/q1b.txt"));
+    }
+
+    #[test]
+    fn cache_clear_spares_manifest_db() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-cache-db");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = dir.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("manifests.db"), b"db").unwrap();
+        std::fs::write(cache.join("junk.download"), b"x").unwrap();
+        std::env::set_var("SCOOP_CACHE", &cache);
+        let session = Session::new();
+
+        super::cache_remove(&session, "*").unwrap();
+        assert!(cache.join("manifests.db").is_file());
+        assert!(!cache.join("junk.download").exists());
+
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 /// Fetch a GitHub API URL, authenticating when a token is configured
@@ -2375,6 +2454,41 @@ mod tests {
 
         std::env::remove_var("SCOOP");
         std::env::remove_var("SCOOP_GLOBAL");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bucket_remove_rejects_unsafe_names() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-bucket-rm-guard");
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("root");
+        std::fs::create_dir_all(root.join("buckets/realb")).unwrap();
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", dir.join("global"));
+        std::env::set_var("SCOOP_CACHE", dir.join("cache"));
+        let session = Session::new();
+
+        for evil in [
+            "", ".", "..", "../other", "a/b", "a\\b", "C:\\temp", "C:/temp",
+        ] {
+            let err = super::bucket_remove(&session, evil).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid bucket name"),
+                "{evil}: {err}"
+            );
+        }
+        // The root and the real bucket both survive the attempts.
+        assert!(root.is_dir());
+        assert!(root.join("buckets/realb").is_dir());
+
+        // A real bucket still removes fine.
+        super::bucket_remove(&session, "realb").unwrap();
+        assert!(!root.join("buckets/realb").exists());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
         std::fs::remove_dir_all(&dir).ok();
     }
 

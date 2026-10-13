@@ -35,7 +35,9 @@ impl ConfigBuilder {
 
         std::fs::File::open(&path)?.read_to_end(&mut buf)?;
 
-        let inner = serde_json::from_slice(&buf)?;
+        // Tolerate a UTF-8 BOM like the manifest parser does.
+        let buf = buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf);
+        let inner = serde_json::from_slice(buf)?;
         let config = Config {
             path,
             inner,

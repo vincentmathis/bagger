@@ -257,15 +257,19 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         }
     });
 
-    let did_work = operation::package_sync(session, queries, options)?;
+    // Restore the cursor before propagating errors: `?` below must not
+    // leave the terminal without a cursor.
+    let did_work = operation::package_sync(session, queries, options);
 
     handle.join().unwrap();
+
+    let _ = stdout.execute(cursor::Show);
+
+    let did_work = did_work?;
 
     if !did_work {
         println!("Latest versions for all apps are installed.");
     }
-
-    let _ = stdout.execute(cursor::Show);
 
     Ok(())
 }
