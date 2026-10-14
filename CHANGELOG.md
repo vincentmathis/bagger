@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/vincentmathis/bagger/compare/v1.2.0...v1.2.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* audit batch 1 (safety + correctness) ([35b8060](https://github.com/vincentmathis/bagger/commit/35b8060b66308f94fb3fe4f757fc413941f1feab))
+* audit batch 2 (matching, arch, no_junction, hold) ([31cdbd3](https://github.com/vincentmathis/bagger/commit/31cdbd3225732853ed8a73f19da8e3f035959cea))
+
 ## [1.2.0](https://github.com/vincentmathis/bagger/compare/v1.1.0...v1.2.0) (2026-10-13)
 
 
