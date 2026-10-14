@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/vincentmathis/bagger/compare/v1.2.1...v1.2.2) (2026-10-14)
+
+
+### Bug Fixes
+
+* serialize env-mutating tests on one process-wide guard ([ba62f61](https://github.com/vincentmathis/bagger/commit/ba62f61217ea84312e92d9615d325772ba544a22))
+
 ## [1.2.1](https://github.com/vincentmathis/bagger/compare/v1.2.0...v1.2.1) (2026-10-13)
 
 
