@@ -36,22 +36,19 @@ mod windows {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::Path;
 
-    use once_cell::sync::Lazy;
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ};
     use winreg::RegKey;
 
     use crate::error::Fallible;
-
-    /// `HKEY_CURRENT_USER` registry key handle.
-    static HKCU: Lazy<RegKey> = Lazy::new(|| RegKey::predef(HKEY_CURRENT_USER));
-    /// `HKEY_LOCAL_MACHINE` registry key handle.
-    static HKLM: Lazy<RegKey> = Lazy::new(|| RegKey::predef(HKEY_LOCAL_MACHINE));
 
     const USER_ENV_SUBKEY: &str = "Environment";
     const MACHINE_ENV_SUBKEY: &str =
         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 
     fn open_env_key(global: bool, writable: bool) -> Fallible<RegKey> {
+        // Predefined keys are opened fresh per call: `RegKey` is not
+        // `Sync`, so no process-wide statics (and a predef open is just
+        // a handle constant, not real I/O).
         if global {
             let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
             if writable {
@@ -63,10 +60,11 @@ mod windows {
                 Ok(hklm.open_subkey(MACHINE_ENV_SUBKEY)?)
             }
         } else if writable {
-            let (key, _) = HKCU.create_subkey(Path::new(USER_ENV_SUBKEY))?;
+            let (key, _) =
+                RegKey::predef(HKEY_CURRENT_USER).create_subkey(Path::new(USER_ENV_SUBKEY))?;
             Ok(key)
         } else {
-            Ok(HKCU.open_subkey(Path::new(USER_ENV_SUBKEY))?)
+            Ok(RegKey::predef(HKEY_CURRENT_USER).open_subkey(Path::new(USER_ENV_SUBKEY))?)
         }
     }
 
@@ -127,7 +125,7 @@ mod windows {
                     env.set_raw_value(
                         key,
                         &winreg::RegValue {
-                            bytes: encode_reg_string(value),
+                            bytes: encode_reg_string(value).into(),
                             vtype: REG_EXPAND_SZ,
                         },
                     )?;
