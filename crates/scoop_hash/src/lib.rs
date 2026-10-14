@@ -42,7 +42,12 @@ macro_rules! impl_hasher_for {
                 let ret = self.result_string();
 
                 #[cfg(feature = "rustcrypto")]
-                let ret = format!("{:x}", self.inner.finalize());
+                let ret = self
+                    .inner
+                    .finalize()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
 
                 ret
             }

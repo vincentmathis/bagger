@@ -1,4 +1,4 @@
-use sha1::Digest;
+use digest::Digest;
 use sha1::Sha1;
 
 pub struct WrappedSha1 {
