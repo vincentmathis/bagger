@@ -23,6 +23,18 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     remove_dir_all::remove_dir_all(path)
 }
 
+/// Fold `NotFound` into success: the goal state (absent) is already
+/// achieved, so e.g. retrying an uninstall after a partial failure, or
+/// losing an exists-check-then-act race, must not abort the transaction.
+/// Any other error still propagates.
+#[inline]
+pub fn tolerate_not_found(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 /// Remove all files and subdirectories in given `path`.
 ///
 /// This function will not remove the given `path` itself. No-op if the given
@@ -49,7 +61,9 @@ pub fn walk_dir_json<P: AsRef<Path>>(path: P) -> io::Result<Vec<PathBuf>> {
         .filter_map(io::Result::ok)
         .filter(|de| {
             let path = de.path();
-            let name = path.file_name().unwrap().to_str().unwrap();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                return false;
+            };
             // Only files, and avoid npm package config file
             path.is_file() && name.ends_with(".json") && name != "package.json"
         })
@@ -229,4 +243,16 @@ pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(src: P, lnk: Q) -> io::Result<()>
 #[inline]
 pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(src: P, lnk: Q) -> io::Result<()> {
     std::os::unix::fs::symlink(src, lnk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tolerate_not_found_folds_missing_into_success() {
+        assert!(tolerate_not_found(Ok(())).is_ok());
+        assert!(tolerate_not_found(Err(io::Error::from(io::ErrorKind::NotFound))).is_ok());
+        assert!(tolerate_not_found(Err(io::Error::from(io::ErrorKind::PermissionDenied))).is_err());
+    }
 }

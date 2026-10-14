@@ -10,6 +10,7 @@ use crate::Result;
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The package name to scan
+    #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::all_apps))]
     package: String,
 
     /// VirusTotal API key (or set VIRUSTOTAL_API_KEY env var)
@@ -33,7 +34,7 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
     };
 
     let config = session.config();
-    let cache_dir = PathBuf::from(config.root_path()).join("cache");
+    let cache_dir = PathBuf::from(config.cache_path());
     drop(config);
 
     if !cache_dir.exists() {
@@ -49,15 +50,12 @@ pub fn execute(args: Args, session: &scoop_rs::Session) -> Result<()> {
             let path = entry.path();
             let name = path.file_name().unwrap().to_string_lossy().to_string();
 
-            // Cache files follow pattern: app#version#hash.ext
-            if name
-                .to_lowercase()
-                .starts_with(&format!("{}-", args.package.to_lowercase()))
-                || name.contains(&args.package)
-            {
-                if path.is_file() {
-                    matching_files.push(path);
-                }
+            // Cache files follow pattern: app#version#hash.ext — match
+            // the app segment exactly (a `contains` sweep also scans
+            // `git-lfs` for `git`).
+            let owner = name.split('#').next().unwrap_or("");
+            if path.is_file() && owner.eq_ignore_ascii_case(&args.package) {
+                matching_files.push(path);
             }
         }
     }

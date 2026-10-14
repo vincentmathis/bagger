@@ -71,7 +71,7 @@ impl MultiProgressUI {
                     ProgressStyle::default_bar()
                         .template(BAR_FMT)
                         .unwrap()
-                        .progress_chars("#> "),
+                        .progress_chars("=> "),
                 );
                 bar
             });
@@ -152,12 +152,19 @@ impl BucketUpdateUI {
 }
 
 /// Prompt user to continue or not.
+///
+/// A closed stdin (EOF) or unreadable input counts as "no" instead of
+/// looping forever: non-interactive runs without `-y` must abort, not hang.
 pub fn prompt_yes_no() -> bool {
     loop {
         print!("\nDo you want to continue? [y/N]: ");
         std::io::stdout().flush().unwrap();
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).unwrap();
+        match std::io::stdin().read_line(&mut input) {
+            Ok(0) => return false,
+            Err(_) => return false,
+            Ok(_) => {}
+        }
         let c = input.trim_end();
         if c.chars().count() == 1 {
             let ch: char = c.chars().next().unwrap();

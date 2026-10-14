@@ -34,8 +34,10 @@ extern crate serde;
 
 mod bucket;
 mod cache;
+pub mod complete;
 mod config;
 mod constant;
+pub mod diagnostic;
 mod env;
 mod error;
 mod event;
@@ -47,10 +49,19 @@ mod psmodule;
 mod session;
 mod shim;
 mod shortcut;
+#[cfg(test)]
+pub(crate) mod test_support;
 
+pub mod arch;
 pub mod operation;
 
 pub use error::Error;
 pub use event::Event;
+pub use internal::fs::{remove_symlink, symlink_dir};
+pub use internal::os::running_apps as running_apps_under;
+pub use package::{has_install_metadata, install_info_path, installed_manifest_path};
 pub use package::{Package, QueryOption, SyncOption, Transaction};
+pub use persist::unlink_links as persist_unlink_links;
 pub use session::Session;
+pub use shim::refresh as shim_refresh;
+pub use shim::target_of as shim_target_of;

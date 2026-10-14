@@ -113,14 +113,16 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bagger"
-version = "0.1.0-beta.8"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "clap 4.6.7",
  "clap-verbosity-flag",
  "clap_complete",
  "crossterm",
+ "dirs",
  "indicatif",
+ "junction",
  "regex",
  "remove_dir_all",
  "scoop-rs",
@@ -131,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "bagger-hash"
-version = "0.1.0-beta.8"
+version = "1.2.1"
 dependencies = [
  "criterion",
  "md-5",
@@ -282,6 +284,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037e2a1a92236d0aff7e845093f64661d6df4c02c9fcc61a60e9e1d736fa392f"
 dependencies = [
  "clap 4.6.7",
+ "clap_lex 1.1.1",
+ "is_executable",
+ "shlex",
 ]
 
 [[package]]
@@ -531,9 +536,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.18.0"
+version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
+checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "encode_unicode"
@@ -948,6 +953,15 @@ dependencies = [
  "portable-atomic",
  "unicode-width",
  "web-time",
+]
+
+[[package]]
+name = "is_executable"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82cb6a9f675da968c63b6208c641b9dca58fc0133ae53375736b1767b0cab8bd"
+dependencies = [
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1547,6 +1561,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
 name = "rusqlite"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1612,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "scoop-rs"
-version = "0.1.0-beta.8"
+version = "1.2.1"
 dependencies = [
  "bagger-hash",
  "chrono",
@@ -1627,6 +1647,7 @@ dependencies = [
  "rayon",
  "regex",
  "remove_dir_all",
+ "roxmltree",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2505,18 +2526,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.59"
+version = "0.8.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
+checksum = "879fb705ce98c32e41ebdb970fbe1204f8492423b314c6ab0354c3e7b5542866"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.59"
+version = "0.8.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
+checksum = "708882a28301d604fa039cc7727607a98d04c4b86dc76ec9cc683f805d709759"
 dependencies = [
  "proc-macro2",
  "quote",

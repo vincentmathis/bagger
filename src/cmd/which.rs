@@ -8,6 +8,7 @@ use crate::Result;
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The command name to look for
+    #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::shims))]
     command: String,
 }
 
@@ -82,7 +83,17 @@ fn parse_shim(content: &str, _shim_path: &PathBuf) -> (Option<String>, Option<Pa
                 let target_path = PathBuf::from(target);
 
                 // Find app name from path structure: .../apps/<app>/...
+                // (the version dir may be the `current` junction).
                 if let Some(parent) = target_path.parent() {
+                    if parent.file_name().and_then(|n| n.to_str()) == Some("current") {
+                        if let Some(app) = parent
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                        {
+                            return (Some(app.to_string()), Some(target_path));
+                        }
+                    }
                     if let Some(grandparent) = parent.parent() {
                         let dir_name = grandparent.file_name().and_then(|n| n.to_str());
                         if dir_name == Some("apps") {

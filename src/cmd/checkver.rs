@@ -9,7 +9,7 @@ use crate::Result;
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The package name (or "all" for all installed apps)
-    #[arg(required = true)]
+    #[arg(required = true, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::checkver_targets))]
     package: String,
 
     /// Show all versions, not just the latest
@@ -36,7 +36,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
             let result = operation::checkver(session, pkg)?;
 
             if let Some(latest) = &result.latest_version {
-                if latest != &result.current_version.as_deref().unwrap_or("") {
+                if latest.as_str() != result.current_version.as_deref().unwrap_or("") {
                     if args.all {
                         println!(
                             "  {}: {} -> {}",
@@ -86,7 +86,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
 
     let pkg = &result[0];
 
-    if pkg.manifest().checkver().is_none() && !args.force {
+    if pkg.manifest().effective_checkver().is_none() && !args.force {
         eprintln!("Package '{}' has no checkver definition.", pkg.name());
         eprintln!("Use --force to check anyway using the homepage.");
         return Ok(());

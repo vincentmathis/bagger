@@ -11,7 +11,7 @@ pub struct CacheFile {
 
 impl CacheFile {
     pub fn from(path: PathBuf) -> Fallible<CacheFile> {
-        let text = path.file_name().unwrap().to_str().unwrap();
+        let text = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         match REGEX_CACHE_FILE.is_match(text) {
             false => Err(Error::InvalidCacheFile { path }),
             true => Ok(CacheFile { path }),
@@ -40,5 +40,22 @@ impl CacheFile {
     #[inline]
     pub fn version(&self) -> &str {
         self.file_name().splitn(3, '#').collect::<Vec<_>>()[1]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_cache_filenames() {
+        // Garbage names must error, never panic (file_name/package_name/
+        // version accessors are only safe because from() validates).
+        assert!(CacheFile::from(PathBuf::from("README.md")).is_err());
+        assert!(CacheFile::from(PathBuf::from("nohashes")).is_err());
+
+        let valid = CacheFile::from(PathBuf::from("app#1.0#abc1234.zip")).unwrap();
+        assert_eq!(valid.package_name(), "app");
+        assert_eq!(valid.version(), "1.0");
     }
 }

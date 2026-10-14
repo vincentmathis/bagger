@@ -5,7 +5,9 @@ use crossterm::{
 use std::{fmt::Display, io};
 
 mod cmd;
+mod complete;
 mod cui;
+mod flavor;
 mod util;
 
 type Result<T> = anyhow::Result<T>;

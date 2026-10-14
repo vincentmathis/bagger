@@ -1,6 +1,6 @@
 use clap::Parser;
 use crossterm::style::Stylize;
-use scoop_rs::{operation, Session};
+use scoop_rs::{operation, QueryOption, Session};
 
 use crate::Result;
 
@@ -11,11 +11,15 @@ pub struct Args {}
 pub fn execute(_args: Args, session: &Session) -> Result<()> {
     println!("Checking for app updates...");
 
-    let installed = operation::package_query(session, vec![], vec![], true)?;
+    let installed = operation::package_query(session, vec![], vec![QueryOption::Upgradable], true)?;
 
     let mut upgradable: Vec<_> = Vec::new();
     let mut held: Vec<_> = Vec::new();
     let mut running: Vec<_> = Vec::new();
+
+    // Stale nightly builds compare Equal, so the version check below
+    // misses them; they count as upgradable explicitly.
+    let stale = operation::stale_nightlies(session).unwrap_or_default();
 
     for pkg in &installed {
         if pkg.is_held() {
@@ -23,7 +27,7 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
             continue;
         }
 
-        if pkg.upgradable_version().is_some() {
+        if pkg.upgradable_version().is_some() || stale.iter().any(|n| n == pkg.name()) {
             upgradable.push(pkg);
         }
 
@@ -63,7 +67,15 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
     if !upgradable.is_empty() {
         println!("{}", "Apps with updates:".green().bold());
         for pkg in &upgradable {
-            let new_ver = pkg.upgradable_version().unwrap_or("");
+            // Stale nightlies have no upgradable ref; show today's stamp.
+            let nightly;
+            let new_ver = match pkg.upgradable_version() {
+                Some(v) => v,
+                None => {
+                    nightly = operation::nightly_stamp();
+                    &nightly
+                }
+            };
             println!(
                 "  {} {} -> {}",
                 pkg.name().green(),
@@ -85,11 +97,32 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
         if let Ok(entries) = std::fs::read_dir(&shims_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "exe")
-                    && path.is_symlink()
-                    && std::fs::read_link(&path).is_err()
-                {
-                    broken_shims.push(path.file_name().unwrap().to_string_lossy().to_string());
+                if !path.is_file() {
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                // Only assess recognized shim files: bare shims have no
+                // extension; anything else must be a shim flavor. Stray
+                // files (e.g. a `.txt` dropped in the directory) are not
+                // shims and would only produce nonsense targets.
+                let is_shim = match path.extension().and_then(|e| e.to_str()) {
+                    None => !name.contains('.'),
+                    Some(ext) => matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "exe" | "cmd" | "ps1" | "bat" | "sh"
+                    ),
+                };
+                if !is_shim {
+                    continue;
+                }
+                match scoop_rs::shim_target_of(&path) {
+                    Some(target) if !target.exists() => {
+                        broken_shims.push(format!("{} (missing target {})", name, target.display()))
+                    }
+                    _ => {}
                 }
             }
         }
@@ -99,6 +132,19 @@ pub fn execute(_args: Args, session: &Session) -> Result<()> {
         println!("\n{}", "WARNING: Broken shims found:".yellow().bold());
         for shim in &broken_shims {
             println!("  {}", shim.clone().yellow());
+        }
+    }
+
+    // System diagnostics (Defender exclusion, main bucket, long paths,
+    // developer mode), mirroring upstream's diagnostic checks.
+    let diagnostics = scoop_rs::diagnostic::system_diagnostics(session);
+    if !diagnostics.is_empty() {
+        println!("\n{}", "WARNING: System issues found:".yellow().bold());
+        for check in &diagnostics {
+            println!("  {}", check.title.clone().yellow());
+            for line in &check.fix {
+                println!("    {}", line.clone().dark_grey());
+            }
         }
     }
 

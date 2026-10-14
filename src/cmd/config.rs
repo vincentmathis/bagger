@@ -22,6 +22,7 @@ pub enum Command {
     #[clap(arg_required_else_help = true)]
     Set {
         /// The key of the config
+        #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::config_keys))]
         key: String,
         /// The value of the setting
         value: String,
@@ -30,6 +31,7 @@ pub enum Command {
     #[clap(arg_required_else_help = true)]
     Unset {
         /// The key of the setting
+        #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::config_keys))]
         key: String,
     },
 }
@@ -46,7 +48,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         }
         Command::List => {
             let config_json = operation::config_list(session)?;
-            println!("{}:", &session.config().path.display().to_string().green());
+            println!("{}:", session.config().path.display().to_string().green());
             println!("{}", config_json);
             Ok(())
         }

@@ -1,19 +1,15 @@
 use clap::{ArgAction, Parser};
 use scoop_rs::{operation, Session, SyncOption};
 
-use crate::Result;
+use crate::{flavor, Result};
 
 /// Download a package without installing it
 #[derive(Debug, Parser)]
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The package(s) to download
-    #[arg(required = true, action = ArgAction::Append)]
+    #[arg(required = true, action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::known_apps))]
     package: Vec<String>,
-
-    /// Download specific version(s)
-    #[arg(short = 'v', long, action = ArgAction::Append)]
-    version: Vec<String>,
 
     /// Assume yes to all prompts
     #[arg(short = 'y', long, action = ArgAction::SetTrue)]
@@ -26,9 +22,15 @@ pub struct Args {
     /// Download for offline use (implies no hash check)
     #[arg(long, action = ArgAction::SetTrue)]
     offline: bool,
+
+    /// Target architecture (32bit, 64bit or arm64; default: host arch)
+    #[arg(long)]
+    arch: Option<String>,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    crate::util::apply_arch_flag(args.arch.as_deref(), session)?;
+
     let queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     let mut options = vec![SyncOption::DownloadOnly];
 
@@ -51,15 +53,21 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     let handle = std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
             match event {
-                scoop_rs::Event::PackageResolveStart => println!("Resolving packages..."),
+                scoop_rs::Event::PackageResolveStart => println!("{}", flavor::progress("resolve")),
                 scoop_rs::Event::PackageDownloadSizingStart => {
-                    println!("Calculating download size...")
+                    println!("{}", flavor::progress("sizing"))
                 }
-                scoop_rs::Event::PackageDownloadStart => println!("Downloading packages..."),
-                scoop_rs::Event::PackageDownloadDone => println!("Download complete."),
-                scoop_rs::Event::PackageIntegrityCheckStart => println!("Verifying hashes..."),
+                scoop_rs::Event::PackageDownloadStart => {
+                    println!("{}", flavor::progress("download"))
+                }
+                scoop_rs::Event::PackageDownloadDone => {
+                    println!("{}", flavor::progress("download_complete"))
+                }
+                scoop_rs::Event::PackageIntegrityCheckStart => {
+                    println!("{}", flavor::progress("verifying"))
+                }
                 scoop_rs::Event::PackageIntegrityCheckDone => {
-                    println!("Hash verification complete.")
+                    println!("{}", flavor::progress("verified"))
                 }
                 scoop_rs::Event::PackageSyncDone => break,
                 _ => {}

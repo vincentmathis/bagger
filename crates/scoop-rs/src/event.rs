@@ -1,7 +1,7 @@
 use flume::{bounded, Receiver, Sender};
 
 use crate::{
-    bucket::BucketUpdateProgressContext,
+    bucket::{BucketUpdateLogContext, BucketUpdateProgressContext},
     constant::EVENT_BUS_CAPACITY,
     package::{download::PackageDownloadProgressContext, sync::Transaction},
 };
@@ -72,11 +72,32 @@ pub enum Event {
     /// Bucket update has finished.
     BucketUpdateDone,
 
+    /// Bucket update pulled new commits.
+    BucketUpdateLog(BucketUpdateLogContext),
+
     /// Package has started to be committed.
     PackageCommitStart(String),
 
     /// Package has been committed.
     PackageCommitDone(String),
+
+    /// An explicitly requested package was skipped: already installed.
+    PackageAlreadyInstalled {
+        /// Package name.
+        name: String,
+        /// Installed version.
+        version: String,
+    },
+
+    /// A committed package carries install notes and/or suggestions.
+    PackageInstalledNotes {
+        /// Package identifier (`bucket/name`).
+        ident: String,
+        /// `notes` lines from the manifest.
+        notes: Vec<String>,
+        /// Flattened `suggest` entries (`"scope: app1, app2"`).
+        suggest: Vec<String>,
+    },
 
     /// Calculating download size has started.
     PackageDownloadSizingStart,
@@ -131,6 +152,18 @@ pub enum Event {
 
     /// Package resolving has finished.
     PackageResolveDone,
+
+    /// A package was skipped because it has running processes.
+    ///
+    /// Emitted for bulk operations (e.g. `upgrade` with no arguments) so the
+    /// rest of the transaction can proceed; explicitly requested packages
+    /// still fail with an error instead.
+    PackageRunningSkipped {
+        /// Package name.
+        name: String,
+        /// Comma-separated running process names.
+        processes: String,
+    },
 
     /// Package shim removal has started.
     PackageShimRemoveStart,

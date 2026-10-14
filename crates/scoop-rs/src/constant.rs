@@ -62,7 +62,7 @@ pub static REGEX_CACHE_FILE: Lazy<Regex> = Lazy::new(|| {
 /// - **sha256**: `^(sha256:)?[a-fA-F0-9]{64}$`
 /// - **sha512**: `^sha512:[a-fA-F0-9]{128}$`
 pub static REGEX_HASH: Lazy<Regex> = Lazy::new(|| {
-    let pattern = r"^md5:[a-fA-F0-9]{32}|sha1:[a-fA-F0-9]{40}|(sha256:)?[a-fA-F0-9]{64}|sha512:[a-fA-F0-9]{128}$";
+    let pattern = r"^(?:md5:[a-fA-F0-9]{32}|sha1:[a-fA-F0-9]{40}|(?:sha256:)?[a-fA-F0-9]{64}|sha512:[a-fA-F0-9]{128})$";
     RegexBuilder::new(pattern).build().unwrap()
 });
 

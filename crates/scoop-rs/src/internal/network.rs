@@ -3,29 +3,8 @@ use crate::constant::DEFAULT_USER_AGENT;
 use curl::easy::Easy;
 use std::time::Duration;
 
-pub fn get_content_length(url: &str, proxy: Option<&str>) -> Option<f64> {
-    let mut easy = Easy::new();
-    easy.get(true).unwrap();
-    easy.url(url).unwrap();
-    if let Some(proxy) = proxy {
-        easy.proxy(proxy).unwrap();
-    }
-    easy.nobody(true).unwrap();
-    easy.follow_location(true).unwrap();
-    easy.connect_timeout(Duration::from_secs(30)).unwrap();
-    println!("get_content_length of: {}", url);
-    easy.perform().unwrap();
-    easy.content_length_download().ok()
-}
-
-/// Fetch the content from a URL as a string, with extra request headers.
-///
-/// Returns the HTTP status code and the response body on success.
-pub fn fetch_url_with_headers(
-    url: &str,
-    proxy: Option<&str>,
-    headers: &[(&str, &str)],
-) -> Option<(u32, String)> {
+/// Fetch the content from a URL as raw bytes plus the HTTP status code.
+fn fetch_raw(url: &str, proxy: Option<&str>, headers: &[(&str, &str)]) -> Option<(u32, Vec<u8>)> {
     use curl::easy::List;
 
     let mut easy = Easy::new();
@@ -57,20 +36,37 @@ pub fn fetch_url_with_headers(
     }
 
     let code = easy.response_code().unwrap_or(0);
-    String::from_utf8(content).ok().map(|body| (code, body))
+    Some((code, content))
 }
 
-/// Fetch the content from a URL as a string.
-pub fn fetch_url(url: &str, proxy: Option<&str>) -> Option<String> {
+/// Fetch the content from a URL as a string, with extra request headers.
+///
+/// Returns the HTTP status code and the response body on success.
+pub fn fetch_url_with_headers(
+    url: &str,
+    proxy: Option<&str>,
+    headers: &[(&str, &str)],
+) -> Option<(u32, String)> {
+    let (code, raw) = fetch_raw(url, proxy, headers)?;
+    String::from_utf8(raw).ok().map(|body| (code, body))
+}
+
+/// POST a JSON body, returning the HTTP status code and response text.
+pub fn post_json(url: &str, proxy: Option<&str>, body: &str) -> Option<(u32, String)> {
+    use curl::easy::List;
+
     let mut easy = Easy::new();
-    easy.get(true).unwrap();
-    easy.url(url).unwrap();
+    easy.url(url).ok()?;
     if let Some(proxy) = proxy {
-        easy.proxy(proxy).unwrap();
+        easy.proxy(proxy).ok()?;
     }
-    easy.follow_location(true).unwrap();
-    easy.connect_timeout(Duration::from_secs(30)).unwrap();
-    easy.useragent(DEFAULT_USER_AGENT).unwrap();
+    easy.follow_location(true).ok()?;
+    easy.connect_timeout(Duration::from_secs(30)).ok()?;
+    easy.useragent(DEFAULT_USER_AGENT).ok()?;
+    let mut headers = List::new();
+    headers.append("Content-Type: application/json").ok()?;
+    easy.http_headers(headers).ok()?;
+    easy.post_fields_copy(body.as_bytes()).ok()?;
 
     let mut content = Vec::new();
     {
@@ -80,9 +76,52 @@ pub fn fetch_url(url: &str, proxy: Option<&str>) -> Option<String> {
                 content.extend_from_slice(data);
                 Ok(data.len())
             })
-            .unwrap();
+            .ok()?;
         transfer.perform().ok()?;
     }
 
-    String::from_utf8(content).ok()
+    let code = easy.response_code().unwrap_or(0);
+    String::from_utf8(content).ok().map(|body| (code, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_url_get_returns_body() {
+        let dir = std::env::temp_dir().join("bagger-probe-net");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("hello.txt"), b"hi").unwrap();
+        let url = format!(
+            "file:///{}/hello.txt",
+            dir.to_string_lossy().replace('\\', "/")
+        );
+        let got = fetch_url(&url, None);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(got.as_deref(), Some("hi"));
+    }
+}
+
+/// Fetch the content from a URL as a string.
+///
+/// Non-2xx HTTP responses yield `None` instead of a regex-able error page
+/// (a 404 body fed to checkver produced phantom versions). Code 0 covers
+/// non-HTTP schemes like `file://`, which carry no status.
+pub fn fetch_url(url: &str, proxy: Option<&str>) -> Option<String> {
+    fetch_url_with_headers(url, proxy, &[]).and_then(|(code, body)| {
+        if code == 0 || (200..300).contains(&code) {
+            Some(body)
+        } else {
+            None
+        }
+    })
+}
+
+/// Fetch the content from a URL as raw bytes.
+///
+/// Unlike [`fetch_url`], this works for non-UTF8 payloads such as
+/// archives, making it suitable for hashing downloads.
+pub fn fetch_bytes(url: &str, proxy: Option<&str>) -> Option<Vec<u8>> {
+    fetch_raw(url, proxy, &[]).map(|(_, body)| body)
 }
