@@ -127,7 +127,7 @@ mod tests {
     /// `uninstall neo` must offer `neovim` from the fabricated root.
     #[test]
     fn engine_completes_installed_app_names() {
-        let _guard = scoop_rs_test_guard();
+        let _guard = crate::util::lock_test_env();
         let base = std::env::temp_dir().join(format!("bagger-test-engine-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root = base.join("root");
@@ -169,15 +169,5 @@ mod tests {
         std::env::remove_var("SCOOP_GLOBAL");
         std::env::remove_var("SCOOP_CACHE");
         std::fs::remove_dir_all(&base).ok();
-    }
-
-    /// `scoop_rs::test_support` is crate-private to scoop-rs; serialize on
-    /// our own mutex for the env-mutating engine test.
-    fn scoop_rs_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static GUARD: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        GUARD
-            .get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap()
     }
 }
