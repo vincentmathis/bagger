@@ -696,10 +696,10 @@ pub fn invoke_script(
         )));
     }
 
-    if let Some(tx) = session.emitter() {
-        let _ = tx.send(crate::Event::PackageCommitDone(package.name().to_owned()));
-    }
-
+    // NOTE: no PackageCommitDone here. Hook scripts are a mid-transaction
+    // step; the owning transaction (install/remove) reports completion.
+    // Sending it here printed the green "'x' was uninstalled." line once
+    // per script on top of the real commit event.
     Ok(())
 }
 

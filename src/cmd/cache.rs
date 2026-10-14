@@ -16,6 +16,7 @@ pub enum Command {
     #[clap(alias = "ls")]
     List {
         /// List caches matching the query
+        #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::all_apps))]
         query: Option<String>,
     },
     /// Remove download caches
@@ -23,6 +24,7 @@ pub enum Command {
     #[clap(arg_required_else_help = true)]
     Remove {
         /// Remove caches matching the query
+        #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::all_apps))]
         query: Option<String>,
         /// Remove all caches
         #[arg(short, long, action = ArgAction::SetTrue, conflicts_with = "query")]

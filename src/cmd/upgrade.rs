@@ -13,7 +13,7 @@ use crate::{cui, flavor, util, Result};
 #[derive(Debug, Parser)]
 pub struct Args {
     /// The package(s) to be upgraded (default: all except held)
-    #[arg(action = ArgAction::Append)]
+    #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     package: Vec<String>,
     /// Ignore failures to ensure a complete transaction
     #[arg(short = 'f', long, action = ArgAction::SetTrue)]
@@ -257,15 +257,19 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         }
     });
 
-    let did_work = operation::package_sync(session, queries, options)?;
+    // Restore the cursor before propagating errors: `?` below must not
+    // leave the terminal without a cursor.
+    let did_work = operation::package_sync(session, queries, options);
 
     handle.join().unwrap();
+
+    let _ = stdout.execute(cursor::Show);
+
+    let did_work = did_work?;
 
     if !did_work {
         println!("Latest versions for all apps are installed.");
     }
-
-    let _ = stdout.execute(cursor::Show);
 
     Ok(())
 }

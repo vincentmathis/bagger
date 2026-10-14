@@ -9,7 +9,7 @@ use crate::{cui, flavor, Result};
 pub struct Args {
     /// The app(s) to upgrade (forwards to `upgrade`, like upstream
     /// `scoop update <app>`); empty updates buckets
-    #[arg(action = ArgAction::Append)]
+    #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     package: Vec<String>,
     /// Assume yes to all prompts and run non-interactively
     #[arg(short = 'y', long, action = ArgAction::SetTrue)]
@@ -73,11 +73,15 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     let mut stdout = std::io::stdout();
     let _ = stdout.execute(cursor::Hide);
 
-    operation::bucket_update(session)?;
+    // Restore the cursor before propagating errors: `?` below must not
+    // leave the terminal without a cursor.
+    let result = operation::bucket_update(session);
 
     handle.join().unwrap();
 
     let _ = stdout.execute(cursor::Show);
+
+    result?;
 
     Ok(())
 }

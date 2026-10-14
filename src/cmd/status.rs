@@ -1,15 +1,20 @@
 use clap::Parser;
 use crossterm::style::Stylize;
-use scoop_rs::{operation, Session};
+use scoop_rs::{operation, QueryOption, Session};
 
 use crate::Result;
 
 /// Show status of installed apps: held, upgradable, running processes
 #[derive(Debug, Parser)]
-pub struct Args {}
+pub struct Args {
+    /// Show status of globally installed apps (requires admin rights)
+    #[arg(short = 'g', long, action = clap::ArgAction::SetTrue)]
+    global: bool,
+}
 
-pub fn execute(_args: Args, session: &Session) -> Result<()> {
-    let packages = operation::package_query(session, vec![], vec![], true)?;
+pub fn execute(args: Args, session: &Session) -> Result<()> {
+    crate::util::apply_global_flag(args.global, session)?;
+    let packages = operation::package_query(session, vec![], vec![QueryOption::Upgradable], true)?;
 
     if packages.is_empty() {
         println!("No apps installed.");

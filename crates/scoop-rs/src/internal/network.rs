@@ -104,8 +104,18 @@ mod tests {
 }
 
 /// Fetch the content from a URL as a string.
+///
+/// Non-2xx HTTP responses yield `None` instead of a regex-able error page
+/// (a 404 body fed to checkver produced phantom versions). Code 0 covers
+/// non-HTTP schemes like `file://`, which carry no status.
 pub fn fetch_url(url: &str, proxy: Option<&str>) -> Option<String> {
-    fetch_url_with_headers(url, proxy, &[]).map(|(_, body)| body)
+    fetch_url_with_headers(url, proxy, &[]).and_then(|(code, body)| {
+        if code == 0 || (200..300).contains(&code) {
+            Some(body)
+        } else {
+            None
+        }
+    })
 }
 
 /// Fetch the content from a URL as raw bytes.

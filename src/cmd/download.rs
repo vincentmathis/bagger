@@ -8,7 +8,7 @@ use crate::{flavor, Result};
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The package(s) to download
-    #[arg(required = true, action = ArgAction::Append)]
+    #[arg(required = true, action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::known_apps))]
     package: Vec<String>,
 
     /// Assume yes to all prompts

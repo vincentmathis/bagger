@@ -35,6 +35,19 @@ pub fn add(session: &Session, package: &Package) -> Fallible<()> {
 
         internal::fs::symlink_dir(&app_path, &module_path)?;
 
+        // The modules directory itself must be on PSModulePath, or the
+        // linked modules are not importable (upstream parity). Appended
+        // once, never duplicated; removal leaves the entry (harmless).
+        let modules_dir = config.root_path().join("modules");
+        let global = config.is_global_scope();
+        let mut entries = internal::env::get_path_like_env_scoped("PSModulePath", global)?;
+        if !entries.contains(&modules_dir) {
+            entries.push(modules_dir);
+            let updated = internal::env::join_path_list(&entries)?;
+            internal::env::set_scoped("PSModulePath", Some(&updated), global)?;
+            internal::env::broadcast_env_change();
+        }
+
         if let Some(tx) = session.emitter() {
             let _ = tx.send(Event::PackagePsModuleRemoveDone);
         }

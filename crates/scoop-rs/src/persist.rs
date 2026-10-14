@@ -48,10 +48,14 @@ pub fn link(session: &Session, package: &Package) -> Fallible<()> {
         for persist in persists {
             assert!(!persist.is_empty());
 
-            // The persist entry can be either a file or directory path
+            // A persist entry is either a lone path or a `[source,
+            // target]` pair (e.g. php's `["php.ini-production",
+            // "cli\\php.ini"]`): the app side is always `persist[0]`,
+            // while the store side honors `persist[1]` when present.
             let rel_path = &persist[0];
+            let store_rel = persist.get(1).unwrap_or(rel_path);
             let app_path_item = app_version_path.join(rel_path);
-            let persist_path_item = persist_root.join(rel_path);
+            let persist_path_item = persist_root.join(store_rel);
 
             // Mirror upstream `persist_data`: existing store data always
             // wins (e.g. upgrading over a previous install); fresh app
@@ -251,6 +255,41 @@ mod tests {
             std::fs::read_to_string(app_item.join("fresh.txt")).unwrap(),
             "fresh"
         );
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A `[source, target]` entry stores under the target name (e.g. php's
+    /// `["php.ini-production", "cli\\php.ini"]`) while the app side keeps
+    /// the source name.
+    #[test]
+    fn link_honors_pair_target() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-persist-pair");
+        let _ = std::fs::remove_dir_all(&base);
+        let session = test_session(&base);
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "2.0", "homepage": "https://example.com", "license": "MIT",
+                "persist": [["app.ini", "renamed/app.ini"]]}"#,
+            std::path::Path::new("persist-pair.json"),
+        )
+        .expect("fixture manifest should parse");
+        let pkg = Package::from("persistapp", "main", manifest);
+
+        let app_item = base.join("root/apps/persistapp/current/app.ini");
+        std::fs::create_dir_all(app_item.parent().unwrap()).unwrap();
+        std::fs::write(&app_item, "settings").unwrap();
+
+        link(&session, &pkg).expect("link should succeed");
+
+        // Stored under the target name…
+        let stored = base.join("root/persist/persistapp/renamed/app.ini");
+        assert_eq!(std::fs::read_to_string(&stored).unwrap(), "settings");
+        // …linked back at the source name.
+        assert_eq!(std::fs::read_to_string(&app_item).unwrap(), "settings");
 
         std::env::remove_var("SCOOP");
         std::env::remove_var("SCOOP_GLOBAL");

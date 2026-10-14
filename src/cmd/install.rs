@@ -16,7 +16,7 @@ use crate::{cui, flavor, util, Result};
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The package(s) to install (name, manifest URL, or local manifest file)
-    #[arg(required = true, action = ArgAction::Append)]
+    #[arg(required = true, action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::known_apps))]
     package: Vec<String>,
     /// Download package(s) without performing installation
     #[arg(short = 'd', long, action = ArgAction::SetTrue)]
@@ -326,12 +326,16 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     });
 
     let queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
-    operation::package_sync(session, queries, options)?;
+    // Restore the cursor before propagating errors: `?` below must not
+    // leave the terminal without a cursor.
+    let result = operation::package_sync(session, queries, options);
 
     handle.join().unwrap();
 
     let mut stdout = std::io::stdout();
     let _ = stdout.execute(cursor::Show);
+
+    result?;
 
     Ok(())
 }

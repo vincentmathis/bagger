@@ -51,16 +51,23 @@ pub enum ShimType {
 }
 
 impl<'a> Shim<'a> {
+    /// Display name for a bin definition, mirroring [`Shim::new`] without
+    /// constructing one: lone entries resolve to the target's basename
+    /// without extension (`bin/tool.exe` → `tool`), pairs use the alias.
+    pub(crate) fn name_of(def: &[&'a str]) -> &'a str {
+        if def.len() == 1 {
+            internal::path::leaf_base(def[0]).unwrap_or(def[0])
+        } else {
+            def[1]
+        }
+    }
+
     pub fn new(def: Vec<&'a str>) -> Shim<'a> {
         let length = def.len();
         assert_ne!(length, 0);
 
         let real_name = def[0];
-        let name = if length == 1 {
-            internal::path::leaf_base(real_name).unwrap_or(real_name)
-        } else {
-            def[1]
-        };
+        let name = Self::name_of(&def);
 
         let args = if length < 2 {
             None
@@ -136,7 +143,13 @@ pub fn add(session: &Session, package: &Package) -> Fallible<()> {
             }
 
             for (filename, content_kind) in shim_files(&shim) {
-                create_shim(&shims_dir.join(&filename), &target, &shim, content_kind)?;
+                create_shim(
+                    &shims_dir.join(&filename),
+                    &target,
+                    &shim,
+                    content_kind,
+                    pkg_name,
+                )?;
             }
         }
     }
@@ -210,28 +223,82 @@ enum ShimContent {
 }
 
 /// Create a shim file that forwards execution to the target binary.
-fn create_shim(shim_path: &Path, target: &Path, shim: &Shim, content: ShimContent) -> Fallible<()> {
+///
+/// On collision with a *different* shim, the existing file is displaced
+/// aside (suffixed with its owner's name, discovered from its target)
+/// instead of overwritten: that is what the restore pass in [`remove`]
+/// revives on uninstall. Identical content just overwrites (reinstalls
+/// and junction-targeted upgrades must not spam backups).
+fn create_shim(
+    shim_path: &Path,
+    target: &Path,
+    shim: &Shim,
+    content: ShimContent,
+    pkg_name: &str,
+) -> Fallible<()> {
+    let content = create_shim_content(target, shim, content)?;
+    displace_on_collision(shim_path, &content, pkg_name)?;
+    // Clear any leftover (e.g. readonly) file before writing.
+    let _ = std::fs::remove_file(shim_path);
     // On Windows, create a batch file as a simple shim
     // A proper implementation would embed the shim.exe binary
     #[cfg(windows)]
     {
-        let _ = std::fs::remove_file(shim_path);
-        let content = create_shim_content(target, shim, content)?;
         std::fs::write(shim_path, &content)?;
     }
 
     #[cfg(unix)]
     {
-        let _ = std::fs::remove_file(shim_path);
-        let content = create_shim_content(target, shim, content)?;
-        use std::os::unix::fs::PermissionsExt;
         std::fs::write(shim_path, &content)?;
+        use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(shim_path)?.permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(shim_path, perms)?;
     }
 
     Ok(())
+}
+
+/// Rename an existing, differing shim aside so [`remove`] can restore it.
+///
+/// Returns the backup path, if one was made.
+fn displace_on_collision(shim_path: &Path, content: &str, pkg_name: &str) -> Fallible<()> {
+    let existing = match std::fs::read_to_string(shim_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if existing == content {
+        return Ok(());
+    }
+    // The backup is suffixed with the displaced shim's owner so removal
+    // deletes exactly its own remnants and restores the right file.
+    let owner = shim_target_owner(shim_path).unwrap_or_else(|| pkg_name.to_owned());
+    let backup = shim_path.with_file_name(format!(
+        "{}.{}",
+        shim_path.file_name().unwrap().to_string_lossy(),
+        owner
+    ));
+    // Never stack backups: an existing one is the older generation.
+    if !backup.exists() {
+        std::fs::rename(shim_path, &backup)?;
+    }
+    Ok(())
+}
+
+/// Best-effort owner of an existing shim: the app directory its target
+/// points into (`…/apps/<name>/…`). Foreign shims yield `None`.
+fn shim_target_owner(shim_path: &Path) -> Option<String> {
+    let target = target_of(shim_path)?;
+    let mut parts = target.components().peekable();
+    while let Some(part) = parts.next() {
+        if part.as_os_str() == "apps" {
+            if let Some(name) = parts.next() {
+                return name.as_os_str().to_str().map(|s| s.to_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Generate shim script content for the given target.
@@ -481,6 +548,51 @@ fn shim_target_path(session: &Session, pkg_name: &str, real_name: &str) -> PathB
     apps_dir.join(pkg_name).join(version).join(real_name)
 }
 
+/// Remove shims by name (upgrade finalization): the stale set a new
+/// manifest no longer declares. Matches the plain file plus anything
+/// suffixed under it (`name.cmd.other`), with the same dot boundary the
+/// restore scan uses, so `git` never takes `gitui.cmd` with it. Native
+/// `.exe` files are never ours: only batch-content poison (our old bug)
+/// is removed, real binaries are left alone.
+pub(crate) fn remove_stale(
+    session: &Session,
+    stale: &std::collections::HashSet<String>,
+) -> Fallible<()> {
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let shims_dir = session.config().root_path().join("shims");
+    let entries = match shims_dir.read_dir() {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.filter_map(|de| de.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let hit = stale
+            .iter()
+            .any(|s| name == *s || name.starts_with(&format!("{s}.")));
+        if !hit {
+            continue;
+        }
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+            && !is_poisoned_exe(&path)
+        {
+            continue;
+        }
+        if let Some(tx) = session.emitter() {
+            let _ = tx.send(Event::PackageShimRemoveProgress(name.clone()));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(())
+}
+
 /// Remove shims for a package.
 pub fn remove(session: &Session, package: &Package) -> Fallible<()> {
     assert!(package.is_installed());
@@ -500,45 +612,58 @@ pub fn remove(session: &Session, package: &Package) -> Fallible<()> {
         }
 
         for shim in bins.into_iter().map(Shim::new) {
-            let mut shim_path = shims_dir.join(shim.name);
             let exts = match shim.ty {
                 ShimType::Exe => vec!["cmd", "exe", "shim"],
                 ShimType::PowerShell => vec!["cmd", "ps1", ""],
                 _ => vec!["cmd", ""],
             };
 
-            for ext in exts.into_iter() {
-                let alt_ext = format!("{}.{}", ext, pkg_name);
-                shim_path.set_extension(alt_ext);
+            // File names are built by appending, never `set_extension`:
+            // that truncates dotted shim names (`python3.12` would address
+            // `python3.cmd` — possibly another app's shim).
+            let plain_name = |ext: &str| {
+                if ext.is_empty() {
+                    shim.name.to_owned()
+                } else {
+                    format!("{}.{ext}", shim.name)
+                }
+            };
+            let suffixed_name = |ext: &str| {
+                if ext.is_empty() {
+                    format!("{}.{pkg_name}", shim.name)
+                } else {
+                    format!("{}.{ext}.{pkg_name}", shim.name)
+                }
+            };
 
-                if shim_path.exists() {
+            for ext in exts.into_iter() {
+                let suffixed = shims_dir.join(suffixed_name(ext));
+
+                if suffixed.exists() {
                     if let Some(tx) = session.emitter() {
-                        let shim_name =
-                            shim_path.file_name().unwrap().to_string_lossy().to_string();
+                        let shim_name = suffixed.file_name().unwrap().to_string_lossy().to_string();
                         let _ = tx.send(Event::PackageShimRemoveProgress(shim_name));
                     }
 
-                    std::fs::remove_file(&shim_path)?;
+                    // The file can vanish between the check and the removal
+                    // (concurrent uninstall, AV quarantine); missing is fine.
+                    internal::fs::tolerate_not_found(std::fs::remove_file(&suffixed))?;
                 } else {
-                    // this is for removing the `pkg_name` suffix added by the
-                    // `alt_ext` above
-                    shim_path.set_extension("");
-
-                    shim_path.set_extension(ext);
+                    let plain = shims_dir.join(plain_name(ext));
 
                     // Only announce files that actually exist.
-                    if shim_path.exists() {
+                    if plain.exists() {
                         if let Some(tx) = session.emitter() {
                             let shim_name =
-                                shim_path.file_name().unwrap().to_string_lossy().to_string();
+                                plain.file_name().unwrap().to_string_lossy().to_string();
                             let _ = tx.send(Event::PackageShimRemoveProgress(shim_name));
                         }
 
-                        let _ = std::fs::remove_file(&shim_path);
+                        let _ = std::fs::remove_file(&plain);
                     }
 
                     // restore alter shim
-                    let fname = shim_path.file_name().unwrap().to_str().unwrap();
+                    let fname = plain.file_name().unwrap().to_str().unwrap();
                     let mut alt_shims = shims_dir_entries
                         .iter()
                         .flat_map(|entry| {
@@ -558,17 +683,30 @@ pub fn remove(session: &Session, package: &Package) -> Fallible<()> {
                     }
 
                     // sort by modified time, so the latest one will be used
-                    // when there are multiple alter shims for the same shim
+                    // when there are multiple alter shims for the same shim.
+                    // Unreadable metadata sorts oldest instead of panicking.
                     if alt_shims.len() > 1 {
                         alt_shims.sort_by_key(|de| {
-                            std::cmp::Reverse(de.metadata().unwrap().modified().unwrap())
+                            std::cmp::Reverse(
+                                de.metadata()
+                                    .and_then(|m| m.modified())
+                                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                            )
                         });
                     }
 
                     let alt_shim = alt_shims.first().unwrap();
                     let alt_path = alt_shim.path();
                     let alt_path_new = alt_path.with_file_name(fname);
-                    std::fs::rename(&alt_path, &alt_path_new)?;
+                    // A stale alter shim must not wedge the uninstall; warn
+                    // loudly and continue instead.
+                    if let Err(e) = std::fs::rename(&alt_path, &alt_path_new) {
+                        eprintln!(
+                            "warning: could not restore alternate shim '{}' for '{}': {e}",
+                            alt_path.display(),
+                            pkg_name,
+                        );
+                    }
                 }
             }
         }
@@ -704,6 +842,97 @@ mod tests {
         std::env::remove_var("SCOOP_GLOBAL");
         std::env::remove_var("SCOOP_CACHE");
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn remove_tolerates_missing_shims_and_restores_alters() {
+        // Regression test: uninstalling after a partial failure (shims
+        // already gone) must converge, not abort with os error 2.
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-shim-remove");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let current = root.join("apps/unshim/current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(
+            current.join("manifest.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT",
+                "bin": [["unshim.exe"], ["ghost.exe"], ["altapp.exe"]]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            current.join("install.json"),
+            r#"{"architecture": "64bit", "bucket": "fake"}"#,
+        )
+        .unwrap();
+        let shims = root.join("shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::write(shims.join("unshim.cmd"), "@echo off\n").unwrap();
+        // ghost.cmd deliberately absent (vanished between installs).
+        std::fs::write(shims.join("altapp.cmd"), "old\n").unwrap();
+        std::fs::write(shims.join("altapp.cmd.other"), "restored\n").unwrap();
+
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        let session = Session::new();
+        let pkgs = crate::package::query::query_installed(&session, &["*"], &[]).unwrap();
+        let pkg = pkgs.iter().find(|p| p.name() == "unshim").unwrap();
+        remove(&session, pkg).unwrap();
+
+        assert!(!shims.join("unshim.cmd").exists());
+        // The overlapped alternate shim is restored under its plain name.
+        assert_eq!(
+            std::fs::read_to_string(shims.join("altapp.cmd")).unwrap(),
+            "restored\n"
+        );
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn collision_displaces_for_restore() {
+        // A colliding install renames the existing shim aside (suffixed
+        // with its discovered owner) instead of overwriting it; identical
+        // content is left alone.
+        let dir =
+            std::env::temp_dir().join(format!("bagger-test-shim-collide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("tool.cmd");
+        std::fs::write(
+            &shim,
+            "@echo off\n\"C:\\apps\\oldapp\\current\\tool.exe\" %*\n",
+        )
+        .unwrap();
+
+        displace_on_collision(
+            &shim,
+            "@echo off\n\"C:\\apps\\newapp\\current\\tool.exe\" %*\n",
+            "newapp",
+        )
+        .unwrap();
+        assert!(!shim.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tool.cmd.oldapp")).unwrap(),
+            "@echo off\n\"C:\\apps\\oldapp\\current\\tool.exe\" %*\n"
+        );
+
+        // Same content: no backup, file untouched.
+        std::fs::write(&shim, "same\n").unwrap();
+        displace_on_collision(&shim, "same\n", "newapp").unwrap();
+        assert!(std::fs::read_to_string(&shim).unwrap() == "same\n");
+        assert!(!dir.join("tool.cmd.newapp").exists());
+
+        // Foreign target (no apps/ segment): suffix the installing package.
+        std::fs::write(&shim, "foreign\n").unwrap();
+        displace_on_collision(&shim, "different\n", "newapp").unwrap();
+        assert!(dir.join("tool.cmd.newapp").is_file());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

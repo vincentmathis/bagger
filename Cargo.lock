@@ -113,7 +113,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bagger"
-version = "1.1.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "clap 4.6.7",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "bagger-hash"
-version = "1.1.0"
+version = "1.2.1"
 dependencies = [
  "criterion",
  "md-5",
@@ -284,6 +284,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037e2a1a92236d0aff7e845093f64661d6df4c02c9fcc61a60e9e1d736fa392f"
 dependencies = [
  "clap 4.6.7",
+ "clap_lex 1.1.1",
+ "is_executable",
+ "shlex",
 ]
 
 [[package]]
@@ -943,6 +946,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "is_executable"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82cb6a9f675da968c63b6208c641b9dca58fc0133ae53375736b1767b0cab8bd"
+dependencies = [
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1553,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "scoop-rs"
-version = "1.1.0"
+version = "1.2.1"
 dependencies = [
  "bagger-hash",
  "chrono",
