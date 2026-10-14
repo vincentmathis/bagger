@@ -2,10 +2,9 @@
 use once_cell::sync::Lazy;
 use std::path::Path;
 use std::sync::Mutex;
-use sysinfo::ProcessExt;
 use sysinfo::ProcessRefreshKind;
+use sysinfo::ProcessesToUpdate;
 use sysinfo::System;
-use sysinfo::SystemExt;
 
 use crate::error::{Error, Fallible};
 
@@ -61,17 +60,21 @@ pub fn running_apps(path: &Path) -> Fallible<Vec<String>> {
     // });
     let mut sys = SYSINFO.lock().map_err(|e| Error::Custom(e.to_string()))?;
 
-    sys.refresh_processes_specifics(ProcessRefreshKind::new());
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
 
     // Find all running processes of installed Scoop apps.
     let mut proc_names = sys
         .processes()
         .values()
         .filter_map(|p| {
-            let exe_path = p.exe();
+            let exe_path = p.exe()?;
 
             if exe_path.starts_with(path) {
-                Some(p.name().to_owned())
+                Some(p.name().to_string_lossy().into_owned())
             } else {
                 None
             }
