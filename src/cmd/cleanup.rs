@@ -1,7 +1,9 @@
 use crate::util::is_admin;
 use crate::Result;
 use clap::{ArgAction, Parser};
-use scoop_rs::{operation, Session};
+use scoop_rs::{
+    has_install_metadata, install_info_path, installed_manifest_path, operation, Session,
+};
 use std::{
     collections::HashSet,
     fs,
@@ -13,7 +15,7 @@ use std::{
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// Given named app(s) to be cleaned up
-    #[arg(action = ArgAction::Append)]
+    #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     app: Vec<String>,
     /// Clean up all installed apps
     #[arg(short = 'a', long, action = ArgAction::SetTrue)]
@@ -86,7 +88,26 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                 }
             }
             if !found {
-                println!("{} was not installed.", requested);
+                if args.cache {
+                    // The app is gone but its downloads may linger: clear
+                    // them like upstream does before touching version
+                    // directories, so a reinstall fetches fresh files.
+                    let files = operation::cache_list(session, "*")?;
+                    let mut removed = 0;
+                    for file in files {
+                        if file.package_name().eq_ignore_ascii_case(name) {
+                            fs::remove_file(file.path())?;
+                            removed += 1;
+                        }
+                    }
+                    if removed > 0 {
+                        println!("Removed {removed} cached file(s) for '{requested}'.");
+                    } else {
+                        println!("{requested} was not installed.");
+                    }
+                } else {
+                    println!("{} was not installed.", requested);
+                }
             }
         }
     }
@@ -170,7 +191,7 @@ fn cleanup(
             continue;
         }
         let version_name = entry.file_name().to_string_lossy().into_owned();
-        if version_name == "current" || version_name == active_version.directory_name {
+        if !is_cleanable_version(&version_name, &active_version.directory_name) {
             continue;
         }
         old_versions.push((version_name, entry.path()));
@@ -181,18 +202,48 @@ fn cleanup(
             println!("{} is already clean", app);
         }
     } else {
+        // Report metadata-less directories first (stderr): they survive no
+        // matter what, so the `Removing` header below only names versions
+        // that actually go away.
+        let (removable, skipped): (Vec<_>, Vec<_>) = old_versions
+            .into_iter()
+            .partition(|(_, path)| has_install_metadata(path));
+        for (version, _) in &skipped {
+            eprintln!("\nSkipping {app} {version}: no install metadata (leaving it alone).");
+        }
+        if removable.is_empty() {
+            return Ok(());
+        }
         print!("Removing {}{}:", app, if global { " (global)" } else { "" });
-        for (version, version_path) in old_versions {
-            unlink_persist_links(&version_path).map_err(|error| {
-                anyhow::anyhow!("failed to unlink persist paths for {app} {version}: {error}")
-            })?;
-            remove_dir_all::remove_dir_all(&version_path).map_err(|error| {
-                anyhow::anyhow!(
-                    "failed to remove old version {}: {error}",
-                    version_path.display()
-                )
-            })?;
-            print!(" {}", version);
+        for (version, version_path) in removable {
+            let removal = unlink_persist_links(&version_path)
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to unlink persist paths for {app} {version}: {error}")
+                })
+                .and_then(|()| {
+                    remove_dir_all::remove_dir_all(&version_path).map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to remove old version {}: {error}",
+                            version_path.display()
+                        )
+                    })
+                });
+            match removal {
+                Ok(()) => print!(" {}", version),
+                // Keep cleaning the rest: a locked old version (e.g. its
+                // files are still loaded by a running process) must not
+                // abort the whole run. Say who holds it when known.
+                Err(error) => {
+                    let mut hint = String::new();
+                    if let Ok(procs) = scoop_rs::running_apps_under(app_path) {
+                        if !procs.is_empty() {
+                            hint =
+                                format!(" (in use by: {}; quit them and retry)", procs.join(", "));
+                        }
+                    }
+                    eprintln!("\nCouldn't remove {app} {version}: {error}{hint}");
+                }
+            }
         }
         println!();
     }
@@ -200,10 +251,27 @@ fn cleanup(
     if cache {
         let files = operation::cache_list(session, "*")?;
         for file in files {
-            if file.package_name().eq_ignore_ascii_case(app)
-                && file.version() != active_version.manifest_version
-            {
+            // Without a known active manifest version (dangling `current`),
+            // keep every cache file rather than risk pruning the live one.
+            let stale = match &active_version.manifest_version {
+                Some(active) => file.version() != *active,
+                None => false,
+            };
+            if file.package_name().eq_ignore_ascii_case(app) && stale {
                 fs::remove_file(file.path())?;
+            }
+        }
+        // Upstream drops partial transfers with `-k`; stale aria2 control
+        // files go with them (a killed run's litter, never resumed).
+        if let Ok(entries) = fs::read_dir(session.config().cache_path()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .extension()
+                    .is_some_and(|e| e == "download" || e == "aria2")
+                {
+                    let _ = fs::remove_file(&path);
+                }
             }
         }
     }
@@ -213,12 +281,37 @@ fn cleanup(
 
 struct ActiveVersion {
     directory_name: String,
-    manifest_version: String,
+    manifest_version: Option<String>,
+}
+
+/// Whether a version directory is cleanup-eligible: everything except
+/// `current` and the active version — including `_<version>.old*`
+/// force-reinstall backups, which upstream removes like any old version.
+fn is_cleanable_version(name: &str, active: &str) -> bool {
+    name != "current" && name != active
 }
 
 fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
     let current_path = app_path.join("current");
-    let current_manifest = current_path.join("manifest.json");
+
+    // The `current` link target is sacred: whatever it points at is the
+    // live version and must never be treated as an old version — even when
+    // its directory lacks install metadata (e.g. a failed upgrade left a
+    // manifest-less dir behind and repointed the link). Only fall back to
+    // manifest scanning when there is no `current` link at all.
+    if let Ok(target) = fs::read_link(&current_path) {
+        let directory_name = target.file_name().map(|n| n.to_string_lossy().into_owned());
+        if let Some(directory_name) = directory_name {
+            let current_manifest = installed_manifest_path(&current_path);
+            let manifest_version = read_manifest_version(&current_manifest).ok();
+            return Ok(Some(ActiveVersion {
+                directory_name,
+                manifest_version,
+            }));
+        }
+    }
+
+    let current_manifest = installed_manifest_path(&current_path);
     if current_manifest.is_file() {
         let active_path = fs::canonicalize(&current_path)?;
         for entry in fs::read_dir(app_path)? {
@@ -230,7 +323,7 @@ fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
             if fs::canonicalize(entry.path())? == active_path {
                 return Ok(Some(ActiveVersion {
                     directory_name: entry.file_name().to_string_lossy().into_owned(),
-                    manifest_version: read_manifest_version(&current_manifest)?,
+                    manifest_version: Some(read_manifest_version(&current_manifest)?),
                 }));
             }
         }
@@ -250,12 +343,12 @@ fn active_version(app_path: &Path) -> Result<Option<ActiveVersion>> {
             continue;
         }
         let version_path = entry.path();
-        let manifest = version_path.join("manifest.json");
-        let install_info = version_path.join("install.json");
+        let manifest = installed_manifest_path(&version_path);
+        let install_info = install_info_path(&version_path);
         if manifest.is_file() && install_info.is_file() {
             candidates.push(ActiveVersion {
                 directory_name: entry.file_name().to_string_lossy().into_owned(),
-                manifest_version: read_manifest_version(&manifest)?,
+                manifest_version: Some(read_manifest_version(&manifest)?),
             });
         }
     }
@@ -283,7 +376,7 @@ fn read_manifest_version(manifest_path: &Path) -> Result<String> {
 }
 
 fn unlink_persist_links(version_path: &Path) -> Result<()> {
-    let manifest_path = version_path.join("manifest.json");
+    let manifest_path = installed_manifest_path(version_path);
     if !manifest_path.is_file() {
         return Ok(());
     }
@@ -317,30 +410,9 @@ fn unlink_persist_links(version_path: &Path) -> Result<()> {
             ));
         }
 
-        let link_path = version_path.join(relative);
-        let metadata = match fs::symlink_metadata(&link_path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        if !metadata.file_type().is_symlink() {
-            continue;
-        }
-
-        #[cfg(windows)]
-        {
-            if link_path
-                .metadata()
-                .map(|target| target.is_dir())
-                .unwrap_or(false)
-            {
-                fs::remove_dir(link_path)?;
-            } else {
-                fs::remove_file(link_path)?;
-            }
-        }
-        #[cfg(not(windows))]
-        fs::remove_file(link_path)?;
+        // Unlink via the hardened helper: raw remove_dir fails on
+        // junctions with os error 5.
+        scoop_rs::persist_unlink_links(version_path, &[source])?;
     }
 
     Ok(())
@@ -377,4 +449,104 @@ fn is_safe_app_name(name: &str) -> bool {
         && !name.contains('/')
         && !name.contains(':')
         && !name.contains("..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_manifest(dir: &std::path::Path, version: &str) {
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!(r#"{{"version": "{version}"}}"#),
+        )
+        .unwrap();
+        std::fs::write(dir.join("install.json"), "{}").unwrap();
+    }
+
+    /// The `current` target is sacred: even when it lacks install metadata
+    /// (failed upgrade), it must be reported as active — never deleted as
+    /// old. This is the regression test for cleanup eating pending upgrades.
+    #[test]
+    #[cfg(windows)]
+    fn active_version_prefers_current_target() {
+        let base = std::env::temp_dir().join("bagger-test-cleanup-active");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let old = app.join("1.0");
+        let pending = app.join("2.0");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&pending).unwrap();
+        write_manifest(&old, "1.0");
+        // 2.0 has no manifests (failed upgrade), yet `current` points at it.
+        junction::create(&pending, app.join("current")).unwrap();
+
+        let active = active_version(&app).unwrap().expect("active expected");
+        assert_eq!(active.directory_name, "2.0");
+        assert_eq!(active.manifest_version, None);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A healthy layout still resolves through manifests.
+    #[test]
+    #[cfg(windows)]
+    fn active_version_resolves_healthy_layout() {
+        let base = std::env::temp_dir().join("bagger-test-cleanup-healthy");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let old = app.join("1.0");
+        let new = app.join("2.0");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        write_manifest(&old, "1.0");
+        write_manifest(&new, "2.0");
+        junction::create(&new, app.join("current")).unwrap();
+
+        let active = active_version(&app).unwrap().expect("active expected");
+        assert_eq!(active.directory_name, "2.0");
+        assert_eq!(active.manifest_version.as_deref(), Some("2.0"));
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Force-reinstall backups (`_<version>.old*`) clean up like any
+    /// other non-active version (upstream removes them too).
+    #[test]
+    fn cleanable_version_removes_backups() {
+        assert!(!is_cleanable_version("current", "1.0"));
+        assert!(!is_cleanable_version("1.0", "1.0"));
+        assert!(is_cleanable_version("0.9", "1.0"));
+        assert!(is_cleanable_version("_1.0.old", "1.0"));
+        assert!(is_cleanable_version("_1.0.old(1)", "1.0"));
+    }
+
+    /// Old versions with metadata clean up; metadata-less directories and
+    /// the live version survive (the FanControl case: app-managed dirs
+    /// without any install metadata must never be touched).
+    #[test]
+    #[cfg(windows)]
+    fn cleanup_spares_metadata_less_dirs() {
+        let base = std::env::temp_dir().join("bagger-test-cleanup-mixed");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("mixapp");
+        let live = app.join("2.0");
+        let old = app.join("1.0");
+        let stray = app.join("0.9");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&stray).unwrap();
+        write_manifest(&old, "1.0");
+        write_manifest(&live, "2.0");
+        junction::create(&live, app.join("current")).unwrap();
+
+        let session = Session::new();
+        cleanup("mixapp", &app, false, false, false, &session).unwrap();
+
+        assert!(!app.join("1.0").exists());
+        assert!(app.join("0.9").is_dir());
+        assert!(app.join("2.0").is_dir());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
 }

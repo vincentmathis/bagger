@@ -26,7 +26,13 @@ pub fn extract_name_and_bucket(path: &Path) -> Fallible<(String, String)> {
         let p = r".*?[\\/]buckets[\\/](?P<bucket>[a-zA-Z0-9-_]+).*?[\\/](?P<name>[a-zA-Z0-9-_@.]+).json$";
         RegexBuilder::new(p).build().unwrap()
     });
-    match RE.captures(path.to_str().unwrap()) {
+    let Some(text) = path.to_str() else {
+        return Err(Error::Custom(format!(
+            "unsupported manifest path {}",
+            path.display()
+        )));
+    };
+    match RE.captures(text) {
         None => {}
         Some(caps) => {
             let name = caps.name("name").map(|m| m.as_str().to_string());

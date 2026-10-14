@@ -71,7 +71,7 @@ impl MultiProgressUI {
                     ProgressStyle::default_bar()
                         .template(BAR_FMT)
                         .unwrap()
-                        .progress_chars("#> "),
+                        .progress_chars("=> "),
                 );
                 bar
             });
@@ -152,12 +152,19 @@ impl BucketUpdateUI {
 }
 
 /// Prompt user to continue or not.
+///
+/// A closed stdin (EOF) or unreadable input counts as "no" instead of
+/// looping forever: non-interactive runs without `-y` must abort, not hang.
 pub fn prompt_yes_no() -> bool {
     loop {
         print!("\nDo you want to continue? [y/N]: ");
         std::io::stdout().flush().unwrap();
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input).unwrap();
+        match std::io::stdin().read_line(&mut input) {
+            Ok(0) => return false,
+            Err(_) => return false,
+            Ok(_) => {}
+        }
         let c = input.trim_end();
         if c.chars().count() == 1 {
             let ch: char = c.chars().next().unwrap();
@@ -166,4 +173,43 @@ pub fn prompt_yes_no() -> bool {
             }
         }
     }
+}
+
+/// Display the manifest content(s) of packages in a transaction for review.
+///
+/// Shows the manifest spec (JSON) for each package being installed, upgraded,
+/// or replaced, so the user can review what will be installed.
+pub fn show_manifests(transaction: &scoop_rs::Transaction) {
+    let mut all_pkgs = vec![];
+
+    if let Some(install) = transaction.install_view() {
+        all_pkgs.extend(install.iter().map(|p| ("install", p)));
+    }
+    if let Some(upgrade) = transaction.upgrade_view() {
+        all_pkgs.extend(upgrade.iter().map(|p| ("upgrade", p)));
+    }
+    if let Some(replace) = transaction.replace_view() {
+        all_pkgs.extend(replace.iter().map(|p| ("replace", p)));
+    }
+
+    for (action, pkg) in all_pkgs {
+        let manifest_json = serde_json::to_string_pretty(pkg.manifest().inner());
+        match manifest_json {
+            Ok(json) => {
+                println!("\nManifest for {} ({}):", pkg.ident(), action);
+                for line in json.lines() {
+                    println!("  {}", line);
+                }
+            }
+            Err(_) => {
+                println!(
+                    "\nManifest for {} ({}): <unable to display>",
+                    pkg.ident(),
+                    action
+                );
+            }
+        }
+    }
+
+    println!();
 }

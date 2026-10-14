@@ -8,6 +8,7 @@ use crate::Result;
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The query string (regex supported)
+    #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::all_apps))]
     query: String,
 }
 
@@ -52,6 +53,22 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                         .map(|v| v.join(","))
                         .unwrap_or("<no shims>".to_owned())
                 );
+                // Dependencies (includes runtime deps)
+                let deps = pkg.dependencies();
+                println!(
+                    "Dependencies: {}",
+                    if deps.is_empty() {
+                        "<none>".to_owned()
+                    } else {
+                        deps.join(", ")
+                    }
+                );
+                // Explicit runtime deps
+                if let Some(runtime) = pkg.manifest().runtime() {
+                    if !runtime.is_empty() {
+                        println!("Runtime: {}", runtime.join(", "));
+                    }
+                }
 
                 if idx != (length - 1) {
                     println!();

@@ -1,18 +1,37 @@
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use crossterm::{cursor, ExecutableCommand};
 use scoop_rs::{operation, Event, Session};
 
-use crate::{cui, Result};
+use crate::{cui, flavor, Result};
 
-/// Fetch and update subscribed buckets
+/// Fetch and update subscribed buckets (or upgrade named apps)
 #[derive(Debug, Parser)]
-pub struct Args {}
+pub struct Args {
+    /// The app(s) to upgrade (forwards to `upgrade`, like upstream
+    /// `scoop update <app>`); empty updates buckets
+    #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
+    package: Vec<String>,
+    /// Assume yes to all prompts and run non-interactively
+    #[arg(short = 'y', long, action = ArgAction::SetTrue)]
+    assume_yes: bool,
+}
 
-pub fn execute(_: Args, session: &Session) -> Result<()> {
+pub fn execute(args: Args, session: &Session) -> Result<()> {
+    if !args.package.is_empty() {
+        println!(
+            "Forwarding to 'bagger upgrade {}' (upstream 'scoop update <app>' upgrades apps).",
+            args.package.join(" ")
+        );
+        let upgrade_args = super::upgrade::Args::from_packages(args.package, args.assume_yes);
+        return super::upgrade::execute(upgrade_args, session);
+    }
+
     let rx = session.event_bus().receiver();
+    let show_log = session.config().show_update_log();
 
     let handle = std::thread::spawn(move || {
         let mut progress = cui::BucketUpdateUI::new();
+        let mut logs: Vec<(String, Vec<String>)> = Vec::new();
 
         while let Ok(event) = rx.recv() {
             match event {
@@ -26,6 +45,9 @@ pub fn execute(_: Args, session: &Session) -> Result<()> {
                         progress.fail(ctx.name(), err_msg);
                     }
                 }
+                Event::BucketUpdateLog(ctx) => {
+                    logs.push((ctx.name().to_owned(), ctx.commits().to_vec()));
+                }
                 Event::BucketUpdateDone => break,
                 _ => {}
             }
@@ -35,18 +57,31 @@ pub fn execute(_: Args, session: &Session) -> Result<()> {
         let mut stdout = std::io::stdout();
         let step = (progress.data.len() - progress.cursor) as u16;
         let _ = stdout.execute(cursor::MoveToNextLine(step)).unwrap();
+
+        if show_log {
+            for (bucket, commits) in &logs {
+                println!("\n{bucket}:");
+                for commit in commits {
+                    println!("  {commit}");
+                }
+            }
+        }
     });
 
-    println!("Updating buckets");
+    println!("{}", flavor::progress("buckets"));
 
     let mut stdout = std::io::stdout();
     let _ = stdout.execute(cursor::Hide);
 
-    operation::bucket_update(session)?;
+    // Restore the cursor before propagating errors: `?` below must not
+    // leave the terminal without a cursor.
+    let result = operation::bucket_update(session);
 
     handle.join().unwrap();
 
     let _ = stdout.execute(cursor::Show);
+
+    result?;
 
     Ok(())
 }

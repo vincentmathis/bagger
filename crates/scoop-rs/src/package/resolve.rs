@@ -12,7 +12,11 @@ use crate::{
 ///
 /// This function ensures that packages are unique and sorted in dependency first
 /// order.
-pub(crate) fn resolve_dependencies(session: &Session, packages: &mut Vec<Package>) -> Fallible<()> {
+pub(crate) fn resolve_dependencies(
+    session: &Session,
+    packages: &mut Vec<Package>,
+    auto_select: bool,
+) -> Fallible<()> {
     let mut graph = DepGraph::<String>::new();
     let mut to_resolve = packages.clone();
 
@@ -45,23 +49,15 @@ pub(crate) fn resolve_dependencies(session: &Session, packages: &mut Vec<Package
                                 query.split_once('/').unwrap_or(("", query));
                             let bucket_matched =
                                 query_bucket.is_empty() || p.bucket() == query_bucket;
-                            let name_matched = p.name() == query_name;
+                            let name_matched = p.name().eq_ignore_ascii_case(query_name);
                             bucket_matched && name_matched
                         })
                         .cloned()
                         .collect::<Vec<_>>();
 
-                    match matched.len() {
+                    let chosen = match matched.len() {
                         0 => return Err(Error::PackageNotFound(query.to_owned())),
-                        1 => {
-                            let p = matched.pop().unwrap();
-                            if !(resolved.contains(&p)
-                                || to_resolve.contains(&p)
-                                || packages.contains(&p))
-                            {
-                                resolved.push(p);
-                            }
-                        }
+                        1 => matched.pop().unwrap(),
                         _ => {
                             let (installed_candidate, mut matched) = matched
                                 .into_iter()
@@ -74,25 +70,28 @@ pub(crate) fn resolve_dependencies(session: &Session, packages: &mut Vec<Package
                             if !installed_candidate.is_empty() {
                                 matched = installed_candidate;
                             } else {
-                                select_candidate(session, &mut matched)?;
+                                select_candidate(session, &mut matched, auto_select)?;
                             }
 
-                            let p = matched.pop().unwrap();
-                            if !(resolved.contains(&p)
-                                || to_resolve.contains(&p)
-                                || packages.contains(&p))
-                            {
-                                resolved.push(p);
-                            }
+                            matched.pop().unwrap()
                         }
+                    };
+
+                    // Record the edge even when the dep is already queued:
+                    // the graph must see the full DAG, not just the
+                    // frontier, or diamonds misorder (a dep queued via a
+                    // longer chain still constrains its other dependents).
+                    // Self-edges are meaningless and would read as cycles.
+                    if chosen.name() != pkg.name() {
+                        graph.register_dep(pkg.name().to_owned(), chosen.name().to_owned());
+                    }
+                    if !(resolved.contains(&chosen)
+                        || to_resolve.contains(&chosen)
+                        || packages.contains(&chosen))
+                    {
+                        resolved.push(chosen);
                     }
                 }
-
-                let dep_nodes = resolved
-                    .iter()
-                    .map(|p: &Package| p.name().to_owned())
-                    .collect::<Vec<_>>();
-                graph.register_deps(pkg.name().to_owned(), dep_nodes);
             }
             // Cyclic dependency check
             graph.check()?;
@@ -103,19 +102,47 @@ pub(crate) fn resolve_dependencies(session: &Session, packages: &mut Vec<Package
         packages.extend(to_resolve.clone());
     }
 
-    // dependencies need to be installed before dependents
-    packages.reverse();
+    // Dependencies install before dependents, ordered by the graph (Kahn),
+    // not reversed BFS: the BFS frontier order misplaces nodes whose edges
+    // were already queued (e.g. installing C before D in A→B→C, A→D).
+    // Ties (independent packages) break by name for determinism.
+    let order = graph.walk_flatten().map_err(Error::from)?;
+    let rank: std::collections::HashMap<&str, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect();
+    packages.sort_by_key(|p| {
+        (
+            rank.get(p.name()).copied().unwrap_or(usize::MAX),
+            p.name().to_owned(),
+        )
+    });
 
     Ok(())
 }
 
 /// Select one from multiple package candidates, interactively if possible.
-pub(crate) fn select_candidate(session: &Session, candidates: &mut Vec<Package>) -> Fallible<()> {
-    let name = candidates[0].name().to_owned();
+pub(crate) fn select_candidate(
+    session: &Session,
+    candidates: &mut Vec<Package>,
+    auto_select: bool,
+) -> Fallible<()> {
+    // Sort candidates by bucket priority first (known buckets in
+    // `BUCKET_PRIORITY` order, unknown buckets alphabetically after),
+    // then by package ident for stability.
+    candidates.sort_by(|a, b| {
+        bucket_priority_rank(a.bucket())
+            .cmp(&bucket_priority_rank(b.bucket()))
+            .then_with(|| a.ident().cmp(&b.ident()))
+    });
 
-    // Sort candidates by package ident, in other words, by alphabetical order
-    // of bucket name.
-    candidates.sort_by_key(|p| p.ident());
+    // With auto-select (e.g. `AssumeYes`), or when no frontend can answer,
+    // take the highest-priority candidate instead of prompting.
+    if auto_select {
+        candidates.truncate(1);
+        return Ok(());
+    }
 
     // Only we can ask user/frontend to select one from multiple candidates
     // when the outbound tx is available for us to do an interactive q&a.
@@ -145,8 +172,18 @@ pub(crate) fn select_candidate(session: &Session, candidates: &mut Vec<Package>)
         }
     }
 
-    // TODO: handle this case smartly using pre-defined bucket priority
-    Err(Error::PackageMultipleCandidates(name))
+    // No frontend to ask: fall back to bucket priority instead of failing.
+    candidates.truncate(1);
+    Ok(())
+}
+
+/// Rank of a bucket in `BUCKET_PRIORITY`; unknown buckets sort after all
+/// known ones, alphabetically (handled by the caller via ident order).
+fn bucket_priority_rank(bucket: &str) -> usize {
+    crate::constant::BUCKET_PRIORITY
+        .iter()
+        .position(|b| *b == bucket)
+        .unwrap_or(usize::MAX)
 }
 
 /// Resolve unneeded dependencies of the given packages.
@@ -248,4 +285,88 @@ pub(crate) fn resolve_cascade(
     packages.dedup();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::manifest::Manifest;
+    use crate::Session;
+
+    fn test_package(name: &str, bucket: &str) -> Package {
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+            std::path::Path::new("candidate.json"),
+        )
+        .expect("fixture should parse");
+        Package::from(name, bucket, manifest)
+    }
+
+    #[test]
+    fn auto_select_prefers_bucket_priority() {
+        let session = Session::new();
+        let mut candidates = vec![
+            test_package("app", "zzz"),
+            test_package("app", "extras"),
+            test_package("app", "main"),
+        ];
+        select_candidate(&session, &mut candidates, true).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].ident(), "main/app");
+    }
+
+    #[test]
+    fn auto_select_orders_unknown_buckets_alphabetically() {
+        let session = Session::new();
+        let mut candidates = vec![test_package("app", "zzz"), test_package("app", "aaa")];
+        select_candidate(&session, &mut candidates, true).unwrap();
+        assert_eq!(candidates[0].ident(), "aaa/app");
+    }
+
+    #[test]
+    fn no_frontend_falls_back_to_priority() {
+        // A fresh session has no event bus, so no interactive prompt is
+        // possible: priority selection applies without auto_select too.
+        let session = Session::new();
+        let mut candidates = vec![test_package("app", "extras"), test_package("app", "main")];
+        select_candidate(&session, &mut candidates, false).unwrap();
+        assert_eq!(candidates[0].ident(), "main/app");
+    }
+
+    /// Diamond with a long edge (A→B→C, A→D, C→D): reversed BFS installed
+    /// C before D; the graph order puts every dependency first.
+    #[test]
+    fn diamond_orders_dependencies_first() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-resolve-diamond");
+        let _ = std::fs::remove_dir_all(&base);
+        let bucket = base.join("root/buckets/qbuk/bucket");
+        std::fs::create_dir_all(&bucket).unwrap();
+        let manifest = |version: &str, depends: &str| {
+            format!(
+                r#"{{"version": "{version}", "homepage": "https://example.com",
+                    "license": "MIT", "depends": {depends}}}"#
+            )
+        };
+        std::fs::write(bucket.join("a.json"), manifest("1.0", r#"["b", "d"]"#)).unwrap();
+        std::fs::write(bucket.join("b.json"), manifest("1.0", r#"["c"]"#)).unwrap();
+        std::fs::write(bucket.join("c.json"), manifest("1.0", r#"["d"]"#)).unwrap();
+        std::fs::write(bucket.join("d.json"), manifest("1.0", r#"[]"#)).unwrap();
+        std::env::set_var("SCOOP", base.join("root"));
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        let session = Session::new();
+
+        let synced = query::query_synced(&session, &["qbuk/a"], &[]).unwrap();
+        assert_eq!(synced.len(), 1);
+        let mut packages = synced;
+        resolve_dependencies(&session, &mut packages, true).unwrap();
+        let names: Vec<&str> = packages.iter().map(|p| p.name()).collect();
+        assert_eq!(names, vec!["d", "c", "b", "a"]);
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
 }

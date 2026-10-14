@@ -8,7 +8,7 @@ use crate::Result;
 #[derive(Debug, Parser)]
 pub struct Args {
     /// The query string (regex supported by default)
-    #[arg(action = ArgAction::Append)]
+    #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     query: Vec<String>,
     /// Turn regex off and use explicit matching
     #[arg(short = 'e', long, action = ArgAction::SetTrue)]
@@ -19,9 +19,13 @@ pub struct Args {
     /// List held package(s)
     #[arg(short = 'H', long, action = ArgAction::SetTrue)]
     held: bool,
+    /// List globally installed app(s) (requires admin rights)
+    #[arg(short = 'g', long, action = ArgAction::SetTrue)]
+    global: bool,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    crate::util::apply_global_flag(args.global, session)?;
     let queries = args.query.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     let mut options = vec![];
 
@@ -36,6 +40,25 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     match operation::package_query(session, queries, options, true) {
         Err(e) => Err(e.into()),
         Ok(packages) => {
+            // Stale nightly builds are filtered out by the Upgradable
+            // query (they compare Equal); union them back in explicitly.
+            let mut packages = packages;
+            let stale = if args.upgradable {
+                operation::stale_nightlies(session).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if !stale.is_empty() {
+                let names: Vec<&str> = stale.iter().map(String::as_str).collect();
+                if let Ok(extra) = operation::package_query(session, names, vec![], true) {
+                    for pkg in extra {
+                        if !packages.iter().any(|p| p.name() == pkg.name()) {
+                            packages.push(pkg);
+                        }
+                    }
+                    packages.sort_by_key(|p| p.name().to_owned());
+                }
+            }
             for pkg in packages {
                 let mut output = String::new();
                 output.push_str(
@@ -48,8 +71,14 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                 }
 
                 let upgradable = pkg.upgradable_version();
-                if args.upgradable && upgradable.is_some() {
-                    output.push_str(format!(" -> {}", upgradable.unwrap().blue()).as_str());
+                if args.upgradable {
+                    if let Some(version) = upgradable {
+                        output.push_str(format!(" -> {}", version.blue()).as_str());
+                    } else if stale.iter().any(|n| n == pkg.name()) {
+                        output.push_str(
+                            format!(" -> {}", operation::nightly_stamp().blue()).as_str(),
+                        );
+                    }
                 }
 
                 if held {

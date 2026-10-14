@@ -7,17 +7,21 @@ use crossterm::{
 };
 use scoop_rs::{operation, Event, Session, SyncOption};
 
-use crate::{cui, util, Result};
+use crate::{cui, flavor, util, Result};
 
 /// Upgrade installed package(s)
 #[derive(Debug, Parser)]
 pub struct Args {
     /// The package(s) to be upgraded (default: all except held)
-    #[arg(action = ArgAction::Append)]
+    #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     package: Vec<String>,
     /// Ignore failures to ensure a complete transaction
     #[arg(short = 'f', long, action = ArgAction::SetTrue)]
     ignore_failure: bool,
+    /// Force reinstall even when the installed version is current
+    /// (previous install rotated aside to `_<version>.old`)
+    #[arg(long, action = ArgAction::SetTrue)]
+    force: bool,
     /// Leverage cache and suppress network access
     #[arg(short = 'o', long, action = ArgAction::SetTrue)]
     offline: bool,
@@ -30,9 +34,35 @@ pub struct Args {
     /// Skip package integrity check
     #[arg(long, action = ArgAction::SetTrue)]
     no_hash_check: bool,
+    /// Upgrade globally installed app(s) (requires admin rights)
+    #[arg(short = 'g', long, action = ArgAction::SetTrue)]
+    global: bool,
+    /// Target architecture (32bit, 64bit or arm64; default: host arch)
+    #[arg(long)]
+    arch: Option<String>,
+}
+
+impl Args {
+    /// Build args for programmatic upgrades (e.g. `update <app>` forwarding).
+    pub(crate) fn from_packages(package: Vec<String>, assume_yes: bool) -> Self {
+        Self {
+            package,
+            ignore_failure: false,
+            offline: false,
+            assume_yes,
+            escape_hold: false,
+            no_hash_check: false,
+            global: false,
+            arch: None,
+            force: false,
+        }
+    }
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    crate::util::apply_global_flag(args.global, session)?;
+    crate::util::apply_arch_flag(args.arch.as_deref(), session)?;
+
     let mut queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     if queries.is_empty() {
         queries.push("*");
@@ -51,6 +81,10 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         options.push(SyncOption::IgnoreFailure);
     }
 
+    if args.force || session.config().force_update() {
+        options.push(SyncOption::Force);
+    }
+
     if args.offline {
         options.push(SyncOption::Offline);
     }
@@ -62,6 +96,8 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     let rx = session.event_bus().receiver();
     let tx = session.event_bus().sender();
 
+    let show_manifest = session.config().show_manifest();
+
     let mut stdout = std::io::stdout();
     let _ = stdout.execute(cursor::Hide);
 
@@ -70,9 +106,12 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     let handle = std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
             match event {
-                Event::PackageResolveStart => println!("Resolving packages..."),
-                Event::PackageDownloadSizingStart => println!("Calculating download size..."),
-                Event::PackageDownloadStart => println!("Downloading packages..."),
+                Event::PackageResolveStart => println!("{}", flavor::progress("resolve")),
+                Event::PackageRunningSkipped { name, processes } => {
+                    println!("Skipping '{name}' (running: {processes}). Quit it and retry to include it.");
+                }
+                Event::PackageDownloadSizingStart => println!("{}", flavor::progress("sizing")),
+                Event::PackageDownloadStart => println!("{}", flavor::progress("download")),
                 Event::PackageDownloadProgress(ctx) => {
                     let ident = ctx.ident.to_owned();
                     let url = ctx.url.to_owned();
@@ -83,7 +122,9 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                     dlprogress.update(ident, url, filename, dltotal, dlnow);
                 }
                 Event::PackageDownloadDone => {}
-                Event::PackageIntegrityCheckStart => println!("Checking package integrity..."),
+                Event::PackageIntegrityCheckStart => {
+                    println!("{}", flavor::progress("integrity"))
+                }
                 Event::PackageIntegrityCheckProgress(ctx) => {
                     let mut stdout = std::io::stdout();
                     stdout
@@ -91,7 +132,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                         .unwrap()
                         .execute(Clear(ClearType::CurrentLine))
                         .unwrap();
-                    println!("Checking package integrity...{}", ctx.dark_grey());
+                    println!("{}{}", flavor::progress("integrity"), ctx.dark_grey());
                 }
                 Event::PackageIntegrityCheckDone => {
                     let mut stdout = std::io::stdout();
@@ -100,9 +141,12 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                         .unwrap()
                         .execute(Clear(ClearType::CurrentLine))
                         .unwrap();
-                    println!("Checking package integrity...{}", "Ok".green());
+                    println!("{}{}", flavor::progress("integrity"), "Ok".green());
                 }
                 Event::PromptTransactionNeedConfirm(transaction) => {
+                    if show_manifest {
+                        cui::show_manifests(&transaction);
+                    }
                     if let Some(install) = transaction.install_view() {
                         println!("The following packages will be INSTALLED:");
                         let output = install
@@ -132,7 +176,11 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                                     "{}{}{}",
                                     p.ident(),
                                     "-".dark_grey(),
-                                    p.upgradable_version().unwrap().dark_grey(),
+                                    // Force reinstalls target the current
+                                    // version, which has no "upgradable" ref.
+                                    p.upgradable_version()
+                                        .unwrap_or_else(|| p.version())
+                                        .dark_grey(),
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -175,7 +223,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                                 println!("\nTotal download size: {}", out);
                             }
                         } else {
-                            println!("\nNothing to download, all cached.");
+                            println!("\n{}", flavor::progress("cached"));
                         }
                     }
 
@@ -185,17 +233,43 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                     let _ = tx.send(Event::PromptTransactionNeedConfirmResult(answer));
                     let _ = stdout.execute(cursor::Hide);
                 }
+                Event::PackageInstalledNotes {
+                    ident,
+                    notes,
+                    suggest,
+                } => {
+                    if !notes.is_empty() {
+                        println!("\nNotes for {}:", ident);
+                        for note in &notes {
+                            println!("  {}", note);
+                        }
+                    }
+                    if !suggest.is_empty() {
+                        println!("Suggestions for {}:", ident);
+                        for entry in &suggest {
+                            println!("  {}", entry);
+                        }
+                    }
+                }
                 Event::PackageSyncDone => break,
                 _ => {}
             }
         }
     });
 
-    operation::package_sync(session, queries, options)?;
+    // Restore the cursor before propagating errors: `?` below must not
+    // leave the terminal without a cursor.
+    let did_work = operation::package_sync(session, queries, options);
 
     handle.join().unwrap();
 
     let _ = stdout.execute(cursor::Show);
+
+    let did_work = did_work?;
+
+    if !did_work {
+        println!("Latest versions for all apps are installed.");
+    }
 
     Ok(())
 }

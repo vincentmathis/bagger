@@ -89,3 +89,41 @@ where
     let remote = repo.find_remote(remote.as_ref())?;
     Ok(remote.url().map(|s| s.to_owned()))
 }
+
+/// Short id of the current HEAD target, if the repo has one.
+pub fn head_rev<P>(path: P) -> Fallible<Option<String>>
+where
+    P: AsRef<Path>,
+{
+    let repo = Repository::open(path.as_ref())?;
+    let head = repo.head()?;
+    Ok(head.target().map(|id| id.to_string()))
+}
+
+/// One-line log entries (`<short-id> <summary>`) for `old..new`, newest
+/// first, capped at `limit`. Used for update logs.
+pub fn log_range<P>(path: P, old: &str, new: &str, limit: usize) -> Fallible<Vec<String>>
+where
+    P: AsRef<Path>,
+{
+    let repo = Repository::open(path.as_ref())?;
+    let (old, new) = (git2::Oid::from_str(old)?, git2::Oid::from_str(new)?);
+    if old == new {
+        return Ok(Vec::new());
+    }
+    let mut walk = repo.revwalk()?;
+    walk.push(new)?;
+    walk.hide(old)?;
+    walk.set_sorting(git2::Sort::TIME)?;
+    let mut out = Vec::new();
+    for id in walk.take(limit) {
+        let id = id?;
+        let commit = repo.find_commit(id)?;
+        out.push(format!(
+            "{} {}",
+            &id.to_string()[..7],
+            commit.summary().unwrap_or("")
+        ));
+    }
+    Ok(out)
+}

@@ -35,8 +35,25 @@ impl ConfigBuilder {
 
         std::fs::File::open(&path)?.read_to_end(&mut buf)?;
 
-        let inner = serde_json::from_slice(&buf)?;
-        let config = Config { path, inner };
+        // Tolerate a UTF-8 BOM like the manifest parser does.
+        let buf = buf.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&buf);
+        let mut inner: ConfigInner = serde_json::from_slice(buf)?;
+        // Location keys are environment-derived upstream: `SCOOP`,
+        // `SCOOP_CACHE` and `SCOOP_GLOBAL` always beat file values.
+        if std::env::var_os("SCOOP").is_some() {
+            inner.root_path = default::root_path();
+        }
+        if std::env::var_os("SCOOP_CACHE").is_some() {
+            inner.cache_path = default::cache_path();
+        }
+        if std::env::var_os("SCOOP_GLOBAL").is_some() {
+            inner.global_path = default::global_path();
+        }
+        let config = Config {
+            path,
+            inner,
+            root_override: None,
+        };
         Ok(config)
     }
 }
@@ -54,6 +71,11 @@ pub struct Config {
 
     /// Inner config data.
     inner: ConfigInner,
+
+    /// Runtime root directory override (e.g. for `--global` installs).
+    ///
+    /// This is never serialized; it only affects [`Config::root_path`].
+    root_override: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -96,6 +118,11 @@ pub struct ConfigInner {
     #[serde(skip_serializing_if = "Option::is_none")]
     aria2_warning_enabled: Option<bool>,
 
+    #[serde(alias = "aria2_fallback_enabled")]
+    #[serde(rename = "aria2-fallback-enabled")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aria2_fallback_enabled: Option<bool>,
+
     #[serde(alias = "cachePath")]
     #[serde(default = "default::cache_path")]
     #[serde(skip_serializing_if = "default::is_default_cache_path")]
@@ -104,8 +131,9 @@ pub struct ConfigInner {
     #[serde(skip_serializing_if = "Option::is_none")]
     cat_style: Option<String>,
 
+    #[serde(alias = "deafult_architecture")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    deafult_architecture: Option<String>,
+    default_architecture: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     debug: Option<bool>,
@@ -144,6 +172,12 @@ pub struct ConfigInner {
     /// This config was introduced in Scoop v0.5.0 (Jul, 2024)
     #[serde(skip_serializing_if = "Option::is_none")]
     use_sqlite_cache: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    use_git_history: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_nightly: Option<bool>,
 
     /// Disable `current` version junction creation.
     ///
@@ -207,6 +241,21 @@ pub struct PrivateHosts {
     headers: String,
 }
 
+impl PrivateHosts {
+    /// The URL pattern (upstream `$url -match`, i.e. regex) selecting
+    /// requests that carry these headers.
+    #[inline]
+    pub fn matcher(&self) -> &str {
+        &self.match_
+    }
+
+    /// Extra headers in PowerShell `StringData` form (`Name=Value` lines).
+    #[inline]
+    pub fn headers(&self) -> &str {
+        &self.headers
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum IsolatedPath {
@@ -260,9 +309,23 @@ impl Config {
     /// This is the root directory of a Scoop installation, by default the value
     /// is `$HOME/scoop`. It may be changed by setting the `SCOOP` environment
     /// variable.
+    ///
+    /// When a runtime root override is set (e.g. via `--global` installs),
+    /// the override is returned instead.
     #[inline]
     pub fn root_path(&self) -> &Path {
-        self.root_path.as_path()
+        self.root_override
+            .as_deref()
+            .unwrap_or_else(|| self.root_path.as_path())
+    }
+
+    /// Set or clear the runtime root directory override.
+    ///
+    /// This is crate-internal state used to scope an operation (such as a
+    /// `--global` install) at the global root. It is never persisted to the
+    /// config file.
+    pub(crate) fn set_root_override<P: AsRef<Path>>(&mut self, path: Option<P>) {
+        self.root_override = path.map(|p| p.as_ref().to_owned());
     }
 
     /// Get the global Scoop installation directory.
@@ -275,6 +338,34 @@ impl Config {
     #[inline]
     pub fn no_junction(&self) -> bool {
         self.no_junction.unwrap_or_default()
+    }
+
+    /// Whether operations are currently scoped to the global root.
+    ///
+    /// True when a runtime root override points at the global path
+    /// (e.g. after `Session::set_global(true)` for `--global` installs).
+    /// Hook scripts observe this as `$global`, mirroring upstream Scoop.
+    #[inline]
+    pub fn is_global_scope(&self) -> bool {
+        self.root_path() == self.global_path()
+    }
+
+    /// Get the `use_external_7zip` config.
+    ///
+    /// When enabled, `Expand-7zipArchive` resolves `7z` from `PATH`
+    /// instead of the Scoop `7zip` app.
+    #[inline]
+    pub fn use_external_7zip(&self) -> bool {
+        self.use_external_7zip.unwrap_or_default()
+    }
+
+    /// Get the `use_lessmsi` config.
+    ///
+    /// When enabled, `Expand-MsiArchive` extracts with the Scoop `lessmsi`
+    /// app; otherwise the system `msiexec.exe` is used.
+    #[inline]
+    pub fn use_lessmsi(&self) -> bool {
+        self.use_lessmsi.unwrap_or_default()
     }
 
     /// Get the `proxy` config.
@@ -295,14 +386,164 @@ impl Config {
         self.use_isolated_path.as_ref()
     }
 
+    /// Get the `show_manifest` (manifest_review) config.
+    ///
+    /// When enabled, the manifest content of each package will be displayed
+    /// in the transaction confirmation prompt before installation/upgrade.
+    #[inline]
+    pub fn show_manifest(&self) -> bool {
+        self.show_manifest.unwrap_or_default()
+    }
+
+    /// Get the `aria2_enabled` config (upstream default is on; the curl
+    /// backend remains as the missing-binary and failure fallback).
+    #[inline]
+    pub fn aria2_enabled(&self) -> bool {
+        self.aria2_enabled.unwrap_or(true)
+    }
+
+    /// Get the `aria2_warning_enabled` config.
+    ///
+    /// When disabled, aria2 availability warnings will be suppressed.
+    #[inline]
+    pub fn aria2_warning_enabled(&self) -> bool {
+        self.aria2_warning_enabled.unwrap_or_default()
+    }
+
+    /// Get the `aria2_split` config.
+    #[inline]
+    pub fn aria2_split(&self) -> u32 {
+        self.aria2_split.unwrap_or(5)
+    }
+
+    /// Get the `aria2_max_connection_per_server` config.
+    #[inline]
+    pub fn aria2_max_connection_per_server(&self) -> u32 {
+        self.aria2_max_connection_per_server.unwrap_or(8)
+    }
+
+    /// Get the `aria2_min_split_size` config.
+    #[inline]
+    pub fn aria2_min_split_size(&self) -> &str {
+        self.aria2_min_split_size.as_deref().unwrap_or("10M")
+    }
+
+    /// Get the `aria2_retry_wait` config.
+    #[inline]
+    pub fn aria2_retry_wait(&self) -> u32 {
+        self.aria2_retry_wait.unwrap_or(5)
+    }
+
+    /// Get the `aria2_options` config as a string.
+    #[inline]
+    pub fn aria2_options(&self) -> Option<&str> {
+        self.aria2_options.as_deref()
+    }
+
+    /// Get the `ignore_running_processes` config.
+    #[inline]
+    pub fn ignore_running_processes(&self) -> bool {
+        self.ignore_running_processes.unwrap_or_default()
+    }
+
+    /// Get the `use_sqlite_cache` config.
+    ///
+    /// When enabled, bucket manifests are cached in a SQLite database to
+    /// speed up queries.
+    #[inline]
+    pub fn use_sqlite_cache(&self) -> bool {
+        self.use_sqlite_cache.unwrap_or_default()
+    }
+
+    /// Get the `update_nightly` config (nightly apps update when a new day
+    /// dawned; otherwise only `--force` reinstalls them).
+    #[inline]
+    pub fn update_nightly(&self) -> bool {
+        self.update_nightly.unwrap_or_default()
+    }
+
+    /// Get the `use_git_history` config (search bucket git history for
+    /// pinned `@version` manifests; upstream default is on).
+    #[inline]
+    pub fn use_git_history(&self) -> bool {
+        self.use_git_history.unwrap_or(true)
+    }
+
+    /// Get the `gh_token` config (GitHub API token for authenticated
+    /// requests, easing rate limits and private-repo access).
+    #[inline]
+    pub fn gh_token(&self) -> Option<&str> {
+        self.gh_token.as_deref()
+    }
+
+    /// Get the `private_hosts` config (per-host match/headers for
+    /// additional download authentication).
+    #[inline]
+    pub fn private_hosts(&self) -> Option<&[PrivateHosts]> {
+        self.private_hosts.as_deref()
+    }
+
+    /// Get the `force_update` config (upgrade behaves as `--force`).
+    #[inline]
+    pub fn force_update(&self) -> bool {
+        self.force_update.unwrap_or_default()
+    }
+
+    /// Get the `show_update_log` config (display bucket commit logs on
+    /// update; upstream default is shown).
+    #[inline]
+    pub fn show_update_log(&self) -> bool {
+        self.show_update_log.unwrap_or(true)
+    }
+
+    /// Get the `last_update` config (timestamp of the last bucket update).
+    #[inline]
+    pub fn last_update(&self) -> Option<&str> {
+        self.last_update.as_deref()
+    }
+
+    /// Get the `debug` config (additional detailed output).
+    #[inline]
+    pub fn debug(&self) -> bool {
+        self.debug.unwrap_or_default()
+    }
+
+    /// Get the `default_architecture` config (preferred install
+    /// architecture when no `--arch`/`SCOOP_ARCH` override is given).
+    #[inline]
+    pub fn default_architecture(&self) -> Option<&str> {
+        self.default_architecture.as_deref()
+    }
+
+    /// Get the `aria2-fallback-enabled` config (fall back to the default
+    /// downloader when an aria2c download fails; upstream default is on).
+    #[inline]
+    pub fn aria2_fallback_enabled(&self) -> bool {
+        self.aria2_fallback_enabled.unwrap_or(true)
+    }
+
     /// Update config key with new value.
     pub(crate) fn set(&mut self, key: &str, value: &str) -> Fallible<()> {
         let is_unset = value.is_empty();
         match key {
-            "use_external_7zip" => match is_unset {
+            "use_external_7zip" | "7zipextract_use_external" => match is_unset {
                 true => self.inner.use_external_7zip = None,
                 false => match value.parse::<bool>() {
                     Ok(value) => self.inner.use_external_7zip = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "manifest_review" | "show_manifest" => match is_unset {
+                true => self.inner.show_manifest = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.show_manifest = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "ignore_running_processes" => match is_unset {
+                true => self.inner.ignore_running_processes = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.ignore_running_processes = Some(value),
                     Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
                 },
             },
@@ -310,6 +551,13 @@ impl Config {
                 true => self.inner.aria2_enabled = None,
                 false => match value.parse::<bool>() {
                     Ok(value) => self.inner.aria2_enabled = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "aria2_warning_enabled" | "aria2-warning-enabled" => match is_unset {
+                true => self.inner.aria2_warning_enabled = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.aria2_warning_enabled = Some(value),
                     Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
                 },
             },
@@ -325,6 +573,13 @@ impl Config {
                     false => Some(value.to_string()),
                 }
             }
+            "alias" => match is_unset {
+                true => self.inner.alias = None,
+                false => match serde_json::from_str::<HashMap<String, String>>(value) {
+                    Ok(value) => self.inner.alias = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
             "last_update" => {
                 self.inner.last_update = match is_unset {
                     true => None,
@@ -352,10 +607,134 @@ impl Config {
                     Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
                 },
             },
+            "update_nightly" => match is_unset {
+                true => self.inner.update_nightly = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.update_nightly = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "use_git_history" => match is_unset {
+                true => self.inner.use_git_history = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.use_git_history = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
             "proxy" => match value {
                 "" | "none" => self.inner.proxy = None,
                 _ => self.inner.proxy = Some(value.to_string()),
             },
+            "debug" => match is_unset {
+                true => self.inner.debug = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.debug = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "force_update" => match is_unset {
+                true => self.inner.force_update = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.force_update = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "show_update_log" => match is_unset {
+                true => self.inner.show_update_log = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.show_update_log = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "private_hosts" => match is_unset {
+                true => self.inner.private_hosts = None,
+                false => match serde_json::from_str::<Vec<PrivateHosts>>(value) {
+                    Ok(value) => self.inner.private_hosts = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "default_architecture" => {
+                self.inner.default_architecture = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            "aria2_fallback_enabled" | "aria2-fallback-enabled" => match is_unset {
+                true => self.inner.aria2_fallback_enabled = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.aria2_fallback_enabled = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "aria2_split" | "aria2-split" => match is_unset {
+                true => self.inner.aria2_split = None,
+                false => match value.parse::<u32>() {
+                    Ok(value) => self.inner.aria2_split = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "aria2_max_connection_per_server" | "aria2-max-connection-per-server" => {
+                match is_unset {
+                    true => self.inner.aria2_max_connection_per_server = None,
+                    false => match value.parse::<u32>() {
+                        Ok(value) => self.inner.aria2_max_connection_per_server = Some(value),
+                        Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                    },
+                }
+            }
+            "aria2_min_split_size" | "aria2-min-split-size" => {
+                self.inner.aria2_min_split_size = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            "aria2_retry_wait" | "aria2-retry-wait" => match is_unset {
+                true => self.inner.aria2_retry_wait = None,
+                false => match value.parse::<u32>() {
+                    Ok(value) => self.inner.aria2_retry_wait = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "aria2_options" | "aria2-options" => {
+                self.inner.aria2_options = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            "no_junction" | "no_junctions" => match is_unset {
+                true => self.inner.no_junction = None,
+                false => match value.parse::<bool>() {
+                    Ok(value) => self.inner.no_junction = Some(value),
+                    Err(_) => return Err(Error::ConfigValueInvalid(value.to_owned())),
+                },
+            },
+            "scoop_branch" => {
+                self.inner.scoop_branch = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            "scoop_repo" => {
+                self.inner.scoop_repo = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            "shim" => {
+                self.inner.shim = match is_unset {
+                    true => None,
+                    false => Some(value.to_string()),
+                }
+            }
+            // Location keys are derived from the environment
+            // (`SCOOP`/`SCOOP_CACHE`/`SCOOP_GLOBAL`), which always wins:
+            // setting them here would be silently ignored.
+            "root_path" | "rootPath" | "cache_path" | "cachePath" | "global_path"
+            | "globalPath" => {
+                return Err(Error::Custom(format!(
+                    "'{key}' is derived from the SCOOP/SCOOP_CACHE/SCOOP_GLOBAL environment, use those instead"
+                )))
+            }
             key => return Err(Error::ConfigKeyInvalid(key.to_owned())),
         }
 
@@ -384,10 +763,11 @@ impl Default for Config {
             aria2_retry_wait: Default::default(),
             aria2_split: Default::default(),
             aria2_warning_enabled: Default::default(),
+            aria2_fallback_enabled: Default::default(),
             // default_cache_path: default::cache_path(),
             cache_path: default::cache_path(),
             cat_style: Default::default(),
-            deafult_architecture: Default::default(),
+            default_architecture: Default::default(),
             debug: Default::default(),
             force_update: Default::default(),
             gh_token: Default::default(),
@@ -399,6 +779,8 @@ impl Default for Config {
             use_isolated_path: Default::default(),
             use_lessmsi: Default::default(),
             use_sqlite_cache: Default::default(),
+            use_git_history: Default::default(),
+            update_nightly: Default::default(),
             no_junction: Default::default(),
             private_hosts: Default::default(),
             proxy: Default::default(),
@@ -413,6 +795,7 @@ impl Default for Config {
         Config {
             path: default::config_path(),
             inner,
+            root_override: None,
         }
     }
 }
@@ -567,5 +950,74 @@ mod default {
     #[inline]
     pub(super) fn is_default_global_path<P: AsRef<Path>>(path: P) -> bool {
         is_default(global_path().as_path(), path.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_config(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let path = dir.join("config.json");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn set_covers_numeric_and_flag_keys() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-config-set");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SCOOP", dir.join("root"));
+        let path = write_config(&dir, "{}");
+        let mut config = ConfigBuilder::new().path(&path).load().unwrap();
+
+        config.set("aria2-split", "8").unwrap();
+        assert_eq!(config.inner.aria2_split, Some(8));
+        config.set("aria2-max-connection-per-server", "16").unwrap();
+        assert_eq!(config.inner.aria2_max_connection_per_server, Some(16));
+        config.set("aria2-min-split-size", "5M").unwrap();
+        assert_eq!(config.inner.aria2_min_split_size.as_deref(), Some("5M"));
+        config.set("aria2-retry-wait", "3").unwrap();
+        assert_eq!(config.inner.aria2_retry_wait, Some(3));
+        config.set("aria2-options", "--quiet").unwrap();
+        assert_eq!(config.inner.aria2_options.as_deref(), Some("--quiet"));
+        config.set("no_junction", "true").unwrap();
+        assert_eq!(config.inner.no_junction, Some(true));
+        config.set("scoop_branch", "develop").unwrap();
+        assert_eq!(config.inner.scoop_branch.as_deref(), Some("develop"));
+        // Rejects non-numeric values for numeric keys.
+        assert!(config.set("aria2-split", "many").is_err());
+        // Location keys are env-derived, never settable.
+        let err = config.set("root_path", "C:\\x").unwrap_err();
+        assert!(err.to_string().contains("SCOOP"), "{err}");
+
+        std::env::remove_var("SCOOP");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn env_beats_file_locations() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-config-precedence");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_config(
+            &dir,
+            r#"{"root_path": "C:\\file-root", "cache_path": "C:\\file-cache", "global_path": "C:\\file-global"}"#,
+        );
+        std::env::set_var("SCOOP", dir.join("env-root"));
+        std::env::set_var("SCOOP_CACHE", dir.join("env-cache"));
+        std::env::set_var("SCOOP_GLOBAL", dir.join("env-global"));
+        let config = ConfigBuilder::new().path(&path).load().unwrap();
+        assert_eq!(config.inner.root_path, dir.join("env-root").as_path());
+        assert_eq!(config.inner.cache_path, dir.join("env-cache").as_path());
+        assert_eq!(config.inner.global_path, dir.join("env-global").as_path());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_CACHE");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

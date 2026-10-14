@@ -2,8 +2,8 @@
 name = "bagger"
 description = "Bagger is a CLI implementation of Scoop in Rust"
 repository = "https://github.com/vincentmathis/bagger"
-version = "0.1.0-beta.8"
-authors = ["Chawye Hsu <su+cratesio@chawyehsu.com>"]
+version = "1.2.1"
+authors = ["Chawye Hsu <su+cratesio@chawyehsu.com>", "Vincent Mathis <vincentmathis@protonmail.com>"]
 license = "Apache-2.0"
 edition = "2021"
 readme = "README.md"
@@ -20,8 +20,9 @@ clap = { version = "4.5", features = ["wrap_help", "cargo", "derive"] }
 clap-verbosity-flag = { version = "3.0.1", features = [
   "tracing",
 ], default-features = false }
-clap_complete = "4.5.38"
+clap_complete = { version = "4.5.38", features = ["unstable-dynamic"] }
 crossterm = "0.28"
+dirs = "5.0.1"
 indicatif = "0.17.9"
 regex = "1.5.3"
 remove_dir_all = "0.7.0"
@@ -34,9 +35,12 @@ windows = { version = "0.58.0", features = [
 ] }
 
 [dependencies.scoop-rs]
-version = "0.1.0-beta.8"
+version = "1.2.1"
 features = ["rustcrypto-hash"]
 path = "./crates/scoop-rs"
+
+[dev-dependencies]
+junction = "1.2.0"
 
 [profile.release]
 debug = false

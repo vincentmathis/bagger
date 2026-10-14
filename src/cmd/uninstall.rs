@@ -2,14 +2,14 @@ use clap::{ArgAction, Parser};
 use crossterm::style::Stylize;
 use scoop_rs::{operation, Event, Session, SyncOption};
 
-use crate::{cui, Result};
+use crate::{cui, flavor, Result};
 
 /// Uninstall package(s)
 #[derive(Debug, Parser)]
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The package(s) to uninstall
-    #[arg(required = true, action = ArgAction::Append)]
+    #[arg(required = true, action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     package: Vec<String>,
     /// Remove unneeded dependencies as well
     #[arg(short = 'c', long, action = ArgAction::SetTrue)]
@@ -26,9 +26,14 @@ pub struct Args {
     /// Escape hold to allow to uninstall held package(s)
     #[arg(short = 'S', long, action = ArgAction::SetTrue)]
     escape_hold: bool,
+    /// Uninstall globally installed app(s) (requires admin rights)
+    #[arg(short = 'g', long, action = ArgAction::SetTrue)]
+    global: bool,
 }
 
 pub fn execute(args: Args, session: &Session) -> Result<()> {
+    crate::util::apply_global_flag(args.global, session)?;
+
     let queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     let mut options = vec![SyncOption::Remove];
 
@@ -58,7 +63,10 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     let handle = std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
             match event {
-                Event::PackageResolveStart => println!("Resolving packages..."),
+                Event::PackageResolveStart => println!("{}", flavor::progress("resolve")),
+                Event::PackageRunningSkipped { name, processes } => {
+                    println!("Skipping '{name}' (running: {processes}). Quit it and retry to include it.");
+                }
                 Event::PromptTransactionNeedConfirm(transaction) => {
                     if let Some(remove) = transaction.remove_view() {
                         println!("The following packages will be REMOVED:");

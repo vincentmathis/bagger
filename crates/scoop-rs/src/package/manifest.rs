@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-use crate::constant::{REGEX_HASH, SPDX_LIST};
+use crate::constant::{REGEX_ARCHIVE_7Z, REGEX_HASH, SPDX_LIST};
 use crate::error::Fallible;
 use crate::internal;
 
@@ -123,6 +123,13 @@ pub struct ManifestSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggest: Option<HashMap<String, Vectorized<String>>>,
 
+    /// Runtime dependencies (e.g. `python`, `vcpp-redist`).
+    ///
+    /// Like `depends`, each entry is either `name` or `bucket/name`.
+    /// Runtime deps are resolved and installed like regular dependencies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<Vectorized<String>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkver: Option<Checkver>,
 
@@ -201,6 +208,8 @@ pub struct Uninstaller {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    keep: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub script: Option<Vectorized<String>>,
 }
 
@@ -217,6 +226,10 @@ pub struct Sourceforge {
 
     pub path: String,
 }
+
+/// Default version regex for GitHub checkver shorthands (`"checkver":
+/// `"github"` and `{"github": …}`): matches `/releases/tag/vX.Y` links.
+pub const GITHUB_CHECKVER_REGEX: &str = "/releases/tag/(?:v|V)?([\\d.]+)";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Checkver {
@@ -388,6 +401,8 @@ pub enum HashExtractionMode {
     Download,
     #[serde(rename = "extract")]
     Extract,
+    #[serde(rename = "github")]
+    Github,
     #[serde(rename = "json")]
     Json,
     #[serde(rename = "xpath")]
@@ -468,11 +483,12 @@ impl<T: Serialize> Serialize for Vectorized<T> {
     where
         S: Serializer,
     {
-        match self.0.len() {
-            0 => serializer.serialize_none(),
-            1 => serializer.serialize_some(&self.0[0]),
-            _ => serializer.collect_seq(self.0.iter()),
-        }
+        // Always write the true shape. Collapsing a single element to its
+        // bare form corrupts nested fields on re-read: `[["a.exe","alias"]]`
+        // would come back as two bins `["a.exe","alias"]`, breaking shim
+        // removal and refresh for aliased shims. The deserializer accepts
+        // both forms, so plain singles stay readable everywhere.
+        serializer.collect_seq(self.0.iter())
     }
 }
 
@@ -630,7 +646,7 @@ impl<'de> Deserialize<'de> for Checkver {
                 E: de::Error,
             {
                 let regex = match s {
-                    "github" => Some("/releases/tag/(?:v|V)?([\\d.]+)".to_owned()),
+                    "github" => Some(GITHUB_CHECKVER_REGEX.to_owned()),
                     _ => Some(s.to_owned()),
                 };
 
@@ -664,9 +680,15 @@ impl<'de> Deserialize<'de> for Checkver {
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "github" => {
+                            // Explicit `url`/`regex` keys always win,
+                            // regardless of key order in the file.
                             let prefix = map.next_value::<String>()?;
-                            url = Some(format!("{}/releases/latest", prefix));
-                            regex = Some("/releases/tag/(?:v|V)?([\\d.]+)".to_owned());
+                            if url.is_none() {
+                                url = Some(format!("{}/releases/latest", prefix));
+                            }
+                            if regex.is_none() {
+                                regex = Some(GITHUB_CHECKVER_REGEX.to_owned());
+                            }
                         }
                         "re" | "regex" => regex = Some(map.next_value()?),
                         "url" => url = Some(map.next_value()?),
@@ -708,34 +730,37 @@ impl<'de> Deserialize<'de> for Checkver {
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Macro to generate architecture-specific fields.
+///
+/// The selected section follows [`crate::arch::selected`]: the `--arch`
+/// override when set, otherwise the host architecture. Without an override
+/// this behaves exactly like the previous compile-time `cfg!` dispatch.
 macro_rules! arch_specific_field {
     ($self:ident, $field:ident) => {{
         let mut ret = $self.inner.$field.as_ref();
 
         if let Some(arch) = $self.inner.architecture.as_ref() {
-            if cfg!(target_arch = "x86") {
-                if let Some(ia32) = &arch.ia32 {
-                    let $field = ia32.$field.as_ref();
-                    if $field.is_some() {
-                        ret = $field;
-                    }
+            let section = |which: crate::arch::Arch| match which {
+                crate::arch::Arch::Ia32 => arch.ia32.as_ref(),
+                crate::arch::Arch::Amd64 => arch.amd64.as_ref(),
+                crate::arch::Arch::Aarch64 => arch.aarch64.as_ref(),
+            };
+            // An explicit `--arch` selects exactly; otherwise walk the
+            // host fallback chain. The first section carrying the field
+            // wins, so a 32bit-only manifest still resolves on 64-bit.
+            let override_chain;
+            let chain: &[crate::arch::Arch] = match crate::arch::override_arch() {
+                Some(exact) => {
+                    override_chain = [exact];
+                    &override_chain
                 }
-            }
-
-            if cfg!(target_arch = "x86_64") {
-                if let Some(amd64) = &arch.amd64 {
-                    let $field = amd64.$field.as_ref();
+                None => crate::arch::fallback_chain(),
+            };
+            for which in chain {
+                if let Some(spec) = section(*which) {
+                    let $field = spec.$field.as_ref();
                     if $field.is_some() {
                         ret = $field;
-                    }
-                }
-            }
-
-            if cfg!(target_arch = "aarch64") {
-                if let Some(aarch64) = &arch.aarch64 {
-                    let $field = aarch64.$field.as_ref();
-                    if $field.is_some() {
-                        ret = $field;
+                        break;
                     }
                 }
             }
@@ -765,16 +790,39 @@ impl Manifest {
         let mut bytes = Vec::new();
         File::open(path)?.read_to_end(&mut bytes)?;
 
+        Self::parse_bytes(&bytes, path)
+    }
+
+    /// Create a [`Manifest`] from in-memory JSON bytes.
+    ///
+    /// `origin` records where the manifest came from: a bucket file, a local
+    /// path, or the source URL for a remote manifest. Remote origins are
+    /// kept verbatim (never path-normalized). It is not required to exist
+    /// on disk.
+    ///
+    /// [1]: #method.path
+    pub fn parse_bytes(bytes: &[u8], origin: &Path) -> Fallible<Manifest> {
         // Parsing manifest files is the key bottleneck of the entire
         // project. We use `serde_json` because it's well documented and easy
         // to integrate. But I believe there should be an alternative to
         // `serde_json` which can parse JSON files much *faster*. Perhaps
         // `simd_json` can be the one. See https://github.com/serde-rs/json-benchmark
-        let inner: ManifestSpec = serde_json::from_slice(&bytes).inspect_err(|e| {
-            warn!("failed to parse manifest {} (err: {})", path.display(), e);
+        //
+        // `serde_json` rejects a UTF-8 BOM, but manifests saved by Windows
+        // editors (and `config.json` alike) may carry one — strip it so
+        // such files parse instead of vanishing from queries.
+        let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+        let inner: ManifestSpec = serde_json::from_slice(bytes).inspect_err(|e| {
+            warn!("failed to parse manifest {} (err: {})", origin.display(), e);
         })?;
-        let path = internal::path::normalize_path(path);
-        // let mut checksum = scoop_hash::Checksum::new("sha256");
+        // Remote origins (`https://…`) are not filesystem paths: normalizing
+        // would mangle the separators, so keep them verbatim.
+        let path = if origin.to_string_lossy().contains("://") {
+            origin.to_owned()
+        } else {
+            internal::path::normalize_path(origin)
+        };
+        // let mut checksum = bagger_hash::Checksum::new("sha256");
         // checksum.consume(&bytes);
         // let hash = checksum.result();
         let hash = String::from("0");
@@ -800,6 +848,12 @@ impl Manifest {
         self.inner.version.as_str()
     }
 
+    /// Clone this manifest with a different `version` (nightly stamping).
+    pub fn with_version(&self, version: &str) -> Manifest {
+        let mut stamped = self.clone();
+        stamped.inner.version = version.to_owned();
+        stamped
+    }
     /// Return the `description` of this manifest.
     #[inline]
     pub fn description(&self) -> Option<&str> {
@@ -840,6 +894,17 @@ impl Manifest {
         self.inner.depends.as_ref().map(|v| v.devectorize())
     }
 
+    /// Return the `runtime` dependencies of this manifest.
+    ///
+    /// Same format as [`depends`][1]: entries are either `name` or
+    /// `bucket/name` (e.g. `python` or `main/vc-redist`).
+    ///
+    /// [1]: #method.depends
+    #[inline]
+    pub fn runtime(&self) -> Option<Vec<&str>> {
+        self.inner.runtime.as_ref().map(|v| v.devectorize())
+    }
+
     #[inline]
     pub fn architecture(&self) -> Option<&Architecture> {
         self.inner.architecture.as_ref()
@@ -854,6 +919,23 @@ impl Manifest {
     #[inline]
     pub fn checkver(&self) -> Option<&Checkver> {
         self.inner.checkver.as_ref()
+    }
+
+    /// Return the effective `checkver` spec for the current architecture.
+    ///
+    /// This is the top-level `checkver` if present, otherwise the
+    /// architecture-specific one (`architecture.<arch>.checkver`).
+    pub fn effective_checkver(&self) -> Option<&Checkver> {
+        self.inner
+            .checkver
+            .as_ref()
+            .or_else(|| arch_specific_field!(self, checkver))
+    }
+
+    /// Return the `autoupdate` spec of this manifest, if any.
+    #[inline]
+    pub fn autoupdate(&self) -> Option<&Autoupdate> {
+        self.inner.autoupdate.as_ref()
     }
 
     /// Returns `cookie` defined in this manifest.
@@ -893,6 +975,11 @@ impl Manifest {
     #[inline]
     pub fn suggest(&self) -> Option<&HashMap<String, Vectorized<String>>> {
         self.inner.suggest.as_ref()
+    }
+
+    /// Return the `notes` of this manifest.
+    pub fn notes(&self) -> Option<Vec<&str>> {
+        self.inner.notes.as_ref().map(|v| v.devectorize())
     }
 
     pub fn pre_install(&self) -> Option<Vec<&str>> {
@@ -986,8 +1073,23 @@ impl Manifest {
             deps.extend(raw_depends.into_iter().map(|s| s.to_owned()));
         }
 
+        if let Some(raw_runtime) = self.runtime() {
+            deps.extend(raw_runtime.into_iter().map(|s| s.to_owned()));
+        }
+
         if self.innosetup() {
             deps.insert("main/innounp".to_owned());
+        }
+
+        // Non-zip archives need 7z to extract (like upstream `depends`,
+        // which keys off the URL extension rather than hook contents).
+        // `.zip` is excluded: it extracts without 7zip.
+        let needs_7z = self.url().iter().any(|u| {
+            let clean = u.split(['#', '?']).next().unwrap_or(u);
+            REGEX_ARCHIVE_7Z.is_match(&clean.to_ascii_lowercase())
+        });
+        if needs_7z {
+            deps.insert("7zip".to_owned());
         }
 
         let hook_scripts = [
@@ -1022,7 +1124,11 @@ impl Manifest {
             }
         });
 
-        deps.into_iter().collect()
+        // Sorted for determinism: HashSet iteration order used to shuffle
+        // dependency resolution (and install order) run to run.
+        let mut deps: Vec<String> = deps.into_iter().collect();
+        deps.sort();
+        deps
     }
 
     /// Get shims defined in this manifest.
@@ -1203,8 +1309,26 @@ impl Uninstaller {
     }
 
     #[inline]
+    pub fn keep(&self) -> bool {
+        self.keep.unwrap_or(false)
+    }
+
+    #[inline]
     pub fn script(&self) -> Option<Vec<&str>> {
         self.script.as_ref().map(|v| v.devectorize())
+    }
+}
+
+impl<T> Vectorized<T> {
+    /// Iterate over the vectorized values.
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+}
+
+impl Vectorized<HashExtraction> {
+    pub fn devectorize(&self) -> Vec<&HashExtraction> {
+        self.0.iter().collect()
     }
 }
 
@@ -1300,5 +1424,165 @@ impl InstallInfo {
     #[inline]
     pub fn url(&self) -> Option<&str> {
         self.url.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(json: &str) -> Manifest {
+        Manifest::parse_bytes(json.as_bytes(), std::path::Path::new("schema-test.json"))
+            .expect("fixture should parse")
+    }
+
+    #[test]
+    fn hash_string_rejects_unanchored_junk() {
+        // Alternation-precedence regression: `^`/`$` must anchor every
+        // alternative, not just the first/last.
+        let good = [
+            "md5:d41d8cd98f00b204e9800998ecf8427e",
+            "sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ];
+        for h in good {
+            assert!(HashString::new(h).is_ok(), "{h}");
+        }
+        let bad = [
+            "xxsha1:da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "sha1:da39a3ee5e6b4b0d3255bfef95601890afd80709yy",
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855garbage",
+            "junk",
+            "sha256:xyz",
+        ];
+        for h in bad {
+            assert!(HashString::new(h).is_err(), "{h}");
+        }
+    }
+
+    #[test]
+    fn bom_prefixed_manifest_parses() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+        );
+        let m = Manifest::parse_bytes(&bytes, std::path::Path::new("bom.json"))
+            .expect("BOM-prefixed manifest should parse");
+        assert_eq!(m.version(), "1.0");
+    }
+
+    #[test]
+    fn nested_vectorized_round_trips_shape() {
+        // An aliased bin must survive a write/re-read cycle as one entry,
+        // not two: `[["a.exe","alias"]]` collapsing to `["a.exe","alias"]`
+        // used to double the bins (breaking shim removal/refresh).
+        let m = manifest(&base(
+            r#""bin": [["a.exe", "alias"]], "persist": [["src", "target"]]"#,
+        ));
+        let json = serde_json::to_string_pretty(m.inner()).unwrap();
+        let again = Manifest::parse_bytes(json.as_bytes(), std::path::Path::new("rt.json"))
+            .expect("re-serialized manifest should parse");
+        assert_eq!(m.bin().map(|b| b.len()), again.bin().map(|b| b.len()));
+        assert_eq!(again.bin().unwrap().len(), 1);
+        assert_eq!(
+            again
+                .persist()
+                .map(|p| p.into_iter().map(|e| e.join(",")).collect::<Vec<_>>()),
+            Some(vec!["src,target".to_string()])
+        );
+    }
+
+    fn base(extra: &str) -> String {
+        format!(
+            r#"{{"version": "1.0", "homepage": "https://example.com",
+                "license": "MIT", {extra}}}"#
+        )
+    }
+
+    #[test]
+    fn checkver_string_form() {
+        let m = manifest(&base(r#""checkver": "v([\\d.]+)""#));
+        let checkver = m.checkver().expect("checkver");
+        assert_eq!(checkver.regex.as_deref(), Some("v([\\d.]+)"));
+    }
+
+    #[test]
+    fn checkver_github_shorthand() {
+        let m = manifest(&base(
+            r#""checkver": {"github": "https://github.com/owner/repo"}"#,
+        ));
+        let checkver = m.checkver().expect("checkver");
+        assert_eq!(
+            checkver.url.as_deref(),
+            Some("https://github.com/owner/repo/releases/latest")
+        );
+        assert!(checkver.regex.is_some());
+        // Effective checkver exposes the synthesized pair.
+        assert!(m.effective_checkver().is_some());
+    }
+
+    #[test]
+    fn checkver_github_explicit_keys_win_in_any_order() {
+        // `{"github": …, "regex": …}` must keep the explicit regex no
+        // matter which key comes first.
+        for json in [
+            r#""checkver": {"github": "https://github.com/owner/repo", "regex": "v([\\d.]+)"}"#,
+            r#""checkver": {"regex": "v([\\d.]+)", "github": "https://github.com/owner/repo"}"#,
+        ] {
+            let m = manifest(&base(json));
+            let checkver = m.checkver().expect("checkver");
+            assert_eq!(
+                checkver.url.as_deref(),
+                Some("https://github.com/owner/repo/releases/latest")
+            );
+            assert_eq!(checkver.regex.as_deref(), Some("v([\\d.]+)"));
+        }
+    }
+
+    #[test]
+    fn archive_urls_pull_7zip_dependency() {
+        let seven = manifest(&base(
+            r#""url": "https://example.com/a.7z", "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855""#,
+        ));
+        assert!(seven.dependencies().contains(&"7zip".to_string()));
+
+        let zip = manifest(&base(
+            r#""url": "https://example.com/a.zip", "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855""#,
+        ));
+        assert!(!zip.dependencies().contains(&"7zip".to_string()));
+
+        // Deterministic order across calls.
+        let multi = manifest(&base(
+            r#""depends": ["zebra", "apple"], "url": "https://example.com/a.7z", "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855""#,
+        ));
+        let deps = multi.dependencies();
+        let mut sorted = deps.clone();
+        sorted.sort();
+        assert_eq!(deps, sorted);
+    }
+
+    #[test]
+    fn sourceforge_string_form() {
+        let m = manifest(&base(r#""checkver": {"sourceforge": "myproj"}"#));
+        let sourceforge = m
+            .checkver()
+            .and_then(|c| c.sourceforge.as_ref())
+            .expect("sourceforge");
+        assert_eq!(sourceforge.path, "myproj");
+    }
+
+    #[test]
+    fn hash_extraction_github_mode() {
+        let m = manifest(&base(
+            r#""autoupdate": {"url": "https://example.com/$version/a.zip",
+                "hash": {"mode": "github"}}"#,
+        ));
+        let mode = m
+            .autoupdate()
+            .and_then(|a| a.hash.as_ref())
+            .map(|h| h.devectorize())
+            .and_then(|v| v.into_iter().next().and_then(|h| h.mode.clone()));
+        assert!(matches!(mode, Some(HashExtractionMode::Github)));
     }
 }
