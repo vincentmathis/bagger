@@ -48,7 +48,7 @@ pub enum Error {
     HashMismatch(HashMismatchContext),
 
     /// Invalid cache file error
-    #[error("error")]
+    #[error("cache file not found or unreadable: {}", .path.display())]
     InvalidCacheFile { path: PathBuf },
 
     /// Throw when receiving an invalid answer from the frontend.
@@ -83,9 +83,23 @@ pub enum Error {
     #[error("package '{0}' is broken")]
     PackageHoldBrokenInstall(String),
 
+    /// Thrown when a package has running processes and the
+    /// `ignore_running_processes` config is not enabled.
+    #[error("package '{0}' has running process(es): {1}\nStop them or set 'ignore_running_processes' to true to proceed")]
+    PackageRunningProcesses(String, String),
+
     /// A custom error.
     #[error("{0}")]
     Custom(String),
+
+    /// An aria2c download failure, carrying the exit code so callers can
+    /// report it (upstream `aria_exit_code`) and fall back to curl.
+    #[error("aria2c failed to download '{url}' (Error {code}): {stderr}")]
+    Aria2 {
+        url: String,
+        code: i32,
+        stderr: String,
+    },
 
     /// Cycle dependency error
     #[error(transparent)]
@@ -118,4 +132,8 @@ pub enum Error {
     /// Serde error
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
+
+    /// SQLite error
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
 }

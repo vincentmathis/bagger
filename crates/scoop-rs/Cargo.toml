@@ -3,8 +3,8 @@ name = "scoop-rs"
 description = "Rust library implementation of Scoop"
 repository = "https://github.com/vincentmathis/bagger"
 documentation = "https://docs.rs/scoop-rs"
-version = "0.1.0-beta.8"
-authors = ["Chawye Hsu <su+cratesio@chawyehsu.com>"]
+version = "1.2.1"
+authors = ["Chawye Hsu <su+cratesio@chawyehsu.com>", "Vincent Mathis <vincentmathis@protonmail.com>"]
 categories = ["command-line-utilities"]
 keywords = ["package-manager", "windows", "scoop"]
 license = "MIT OR Apache-2.0"
@@ -22,6 +22,8 @@ once_cell = "1.18.0"
 rayon = "1.7.0"
 regex = "1.5.3"
 remove_dir_all = "0.7.0"
+roxmltree = "0.20"
+rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sysinfo = "0.29"
@@ -33,7 +35,7 @@ tracing = "0.1.41"
 # zip = "0.6.2"
 
 [dependencies.bagger-hash]
-version = "0.1.0-beta.8"
+version = "1.2.1"
 path = "../scoop_hash"
 
 [target.'cfg(windows)'.dependencies]

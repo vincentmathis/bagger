@@ -10,6 +10,7 @@ use crate::Result;
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// Name of the package to be inspected
+    #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::all_apps))]
     package: String,
 }
 

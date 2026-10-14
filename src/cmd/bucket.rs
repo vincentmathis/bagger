@@ -18,6 +18,7 @@ pub enum Command {
     #[clap(arg_required_else_help = true)]
     Add {
         /// The bucket name
+        #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::known_buckets))]
         name: String,
         /// The bucket repository url (optional for known buckets)
         repo: Option<String>,
@@ -34,7 +35,7 @@ pub enum Command {
     #[clap(arg_required_else_help = true)]
     Remove {
         /// The bucket name(s)
-        #[arg(required = true, action = ArgAction::Append)]
+        #[arg(required = true, action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::buckets))]
         name: Vec<String>,
     },
 }
@@ -66,7 +67,7 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
                     Ok(buckets) => {
                         for bucket in buckets {
                             println!(
-                                "{}\n ├─manifests: {}\n └─source: {}",
+                                "{}\n |-manifests: {}\n `-source: {}",
                                 bucket.name().green(),
                                 bucket.manifest_count(),
                                 bucket.source(),

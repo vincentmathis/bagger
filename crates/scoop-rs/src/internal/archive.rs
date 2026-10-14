@@ -10,7 +10,7 @@ pub enum Format {
     Gzip,
     /// .rar
     Rar,
-    /// .7z, .xz, .tar
+    /// .7z, .xz, .tar, .msi (all handled by 7z)
     XZip,
     /// .zip
     Zip,
@@ -30,7 +30,7 @@ impl Format {
             Some("gz") | Some("tgz") => Some(Format::Gzip),
             Some("rar") => Some(Format::Rar),
             Some("7z") | Some("xz") | Some("lzma") | Some("iso") | Some("lzh") | Some("nupkg")
-            | Some("tar") => Some(Format::XZip),
+            | Some("tar") | Some("msi") => Some(Format::XZip),
             Some("zip") => Some(Format::Zip),
             Some("zst") => Some(Format::Zst),
             _ => None,
@@ -39,38 +39,43 @@ impl Format {
 }
 
 /// Find the path to the 7z executable.
-fn find_7z_exe() -> Option<PathBuf> {
-    // Try 7z.exe on PATH
-    if crate::internal::os::is_program_available("7z.exe") {
-        return Some(PathBuf::from("7z.exe"));
-    }
-    if crate::internal::os::is_program_available("7z") {
-        return Some(PathBuf::from("7z"));
-    }
-
-    // Try Scoop's own bundled 7z at <scoop_root>\apps\7zip\current\7z.exe
-    let scoop_root = std::env::var_os("SCOOP")?;
-    let candidate = PathBuf::from(&scoop_root)
-        .join("apps")
-        .join("7zip")
-        .join("current")
-        .join("7z.exe");
-    if candidate.exists() {
-        return Some(candidate);
+///
+/// Probes `PATH` first (`7z.exe`, then bare `7z`, then `7z.cmd` — batch
+/// shims execute fine via process spawn), then the Scoop `7zip` app under
+/// the `$SCOOP` environment root, an explicitly given root, and finally
+/// next to the current executable.
+fn find_7z_exe(scoop_root: Option<&Path>) -> Option<PathBuf> {
+    // Try 7z on PATH (including .cmd shims, which spawn fine)
+    for probe in ["7z.exe", "7z", "7z.cmd"] {
+        if crate::internal::os::is_program_available(probe) {
+            return Some(PathBuf::from(probe));
+        }
     }
 
-    // Try relative to Scoop's shims: <shim_dir>\..\apps\7zip\current\7z.exe
+    // Try Scoop's own 7zip app at <root>\apps\7zip\current\7z.exe
+    let mut roots: Vec<PathBuf> = vec![];
+    if let Some(root) = std::env::var_os("SCOOP") {
+        roots.push(PathBuf::from(&root));
+    }
+    if let Some(root) = scoop_root {
+        roots.push(root.to_owned());
+    }
+
+    // Try relative to the current executable: <exe>\..\apps\7zip\current\7z.exe
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
-            let candidate = parent
-                .join("..")
-                .join("apps")
-                .join("7zip")
-                .join("current")
-                .join("7z.exe");
-            if candidate.exists() {
-                return Some(candidate);
-            }
+            roots.push(parent.join(".."));
+        }
+    }
+
+    for root in roots {
+        let candidate = root
+            .join("apps")
+            .join("7zip")
+            .join("current")
+            .join("7z.exe");
+        if candidate.exists() {
+            return Some(candidate);
         }
     }
 
@@ -88,16 +93,118 @@ fn is_7z_sfx(path: &Path) -> bool {
     false
 }
 
+/// Extract an MSI package to the given destination directory.
+///
+/// Mirrors upstream `Expand-MsiArchive`: with `use_lessmsi` (and the Scoop
+/// `lessmsi` app present) extraction goes through lessmsi, otherwise the
+/// system `msiexec.exe` administrative install is used and its `SourceDir`
+/// output is promoted to the destination.
+pub fn extract_msi<P: AsRef<Path>, Q: AsRef<Path>>(
+    src: P,
+    dst: Q,
+    use_lessmsi: bool,
+    lessmsi_exe: Option<PathBuf>,
+) -> crate::error::Fallible<()> {
+    let src = src.as_ref();
+    let dst = dst.as_ref();
+    crate::internal::fs::ensure_dir(dst)?;
+
+    if use_lessmsi {
+        let exe = lessmsi_exe.ok_or_else(|| {
+            crate::Error::Custom(
+                "cannot extract MSI: 'use_lessmsi' is set but the lessmsi app is not installed"
+                    .to_string(),
+            )
+        })?;
+        let output = std::process::Command::new(&exe)
+            .arg("x")
+            .arg(src)
+            .arg(format!("{}\\", dst.to_string_lossy()))
+            .output()?;
+        if !output.status.success() {
+            return Err(crate::Error::Custom(format!(
+                "lessmsi failed to extract '{}': {}",
+                src.display(),
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        return Ok(());
+    }
+
+    let source_dir = dst.join("SourceDir");
+    let _ = std::fs::remove_dir_all(&source_dir);
+    let status = std::process::Command::new("msiexec.exe")
+        .arg("/a")
+        .arg(src)
+        .arg("/qn")
+        .arg(format!(
+            "TARGETDIR={}\\SourceDir",
+            dst.to_string_lossy().trim_end_matches('\\')
+        ))
+        .status()?;
+    if !status.success() {
+        return Err(crate::Error::Custom(format!(
+            "msiexec failed to extract '{}' ({})",
+            src.display(),
+            status
+        )));
+    }
+    if source_dir.is_dir() {
+        move_dir_contents(&source_dir, dst)?;
+        let _ = std::fs::remove_dir_all(&source_dir);
+    }
+    Ok(())
+}
+
+/// Move the contents of `src` into `dst`, merging directories recursively.
+fn move_dir_contents(src: &Path, dst: &Path) -> crate::error::Fallible<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            if to.is_dir() {
+                move_dir_contents(&from, &to)?;
+                let _ = std::fs::remove_dir(&from);
+            } else {
+                if to.exists() {
+                    let _ = std::fs::remove_file(&to);
+                }
+                std::fs::rename(&from, &to)?;
+            }
+        } else {
+            if to.is_dir() {
+                continue;
+            }
+            if to.exists() {
+                let _ = std::fs::remove_file(&to);
+            }
+            std::fs::rename(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 /// Extract an archive to the given destination directory using 7z.
 ///
 /// This function supports the following archive formats: `.zip`, `.7z`, `.gz`,
 /// `.bz2`, `.rar`, `.tar`, `.xz`, `.lzh`, `.iso`, `.zst`, `.nupkg`.
 pub fn extract<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dst: Q) -> crate::error::Fallible<()> {
+    extract_with_root(src, dst, None)
+}
+
+/// Extract an archive, additionally probing the Scoop `7zip` app under the
+/// given root when `7z` is not on `PATH`.
+pub fn extract_with_root<P: AsRef<Path>, Q: AsRef<Path>>(
+    src: P,
+    dst: Q,
+    scoop_root: Option<&Path>,
+) -> crate::error::Fallible<()> {
     let src = src.as_ref();
     let dst = dst.as_ref();
     crate::internal::fs::ensure_dir(dst)?;
 
-    let exe = find_7z_exe().ok_or_else(|| {
+    let exe = find_7z_exe(scoop_root).ok_or_else(|| {
         crate::Error::Custom(
             "7z executable not found. Please install the 7zip package via Scoop or add 7z to PATH."
                 .to_string(),

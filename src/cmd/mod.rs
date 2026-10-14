@@ -1,26 +1,41 @@
-use clap::{crate_description, crate_name, crate_version, Parser, Subcommand};
+use clap::{crate_description, crate_name, crate_version, CommandFactory, Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 use scoop_rs::Session;
 use tracing_subscriber::{
     filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
 
+mod alias;
+mod autofetch;
 mod bucket;
 mod cache;
 mod cat;
+mod checkup;
+mod checkver;
 mod cleanup;
 mod completions;
 mod config;
+mod create;
+mod depends;
+mod download;
+mod export;
 mod hold;
 mod home;
+mod import;
 mod info;
 mod install;
 mod list;
+mod prefix;
+mod reset;
 mod search;
+mod shim;
+mod status;
 mod unhold;
 mod uninstall;
 mod update;
 mod upgrade;
+mod virustotal;
+mod which;
 
 use crate::Result;
 
@@ -52,54 +67,99 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    Alias(alias::Args),
+    Autofetch(autofetch::Args),
     Bucket(bucket::Args),
     Cache(cache::Args),
     Cat(cat::Args),
+    Checkup(checkup::Args),
+    Checkver(checkver::Args),
     Cleanup(cleanup::Args),
     Completions(completions::Args),
     Config(config::Args),
+    Create(create::Args),
+    Depends(depends::Args),
+    Download(download::Args),
+    Export(export::Args),
     Hold(hold::Args),
     Home(home::Args),
+    Import(import::Args),
     Info(info::Args),
     #[clap(alias = "i")]
     Install(install::Args),
     List(list::Args),
+    Prefix(prefix::Args),
+    Reset(reset::Args),
     #[clap(alias = "s")]
     Search(search::Args),
+    Shim(shim::Args),
     Unhold(unhold::Args),
     #[clap(alias = "rm", alias = "remove")]
     Uninstall(uninstall::Args),
     #[clap(alias = "u")]
     Update(update::Args),
     Upgrade(upgrade::Args),
+    Virustotal(virustotal::Args),
+    Which(which::Args),
+    Status(status::Args),
 }
 
 /// CLI entry point
 pub fn start() -> Result<()> {
-    let args = Cli::parse();
-    setup_logger(args.verbose.tracing_level_filter())?;
+    // Dynamic shell completion (COMPLETE=<shell>): answer the shell hook
+    // and exit. Must run before anything touches stdout (including the
+    // logger) or parses args — stdout is the candidate protocol here.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
+    // User aliases (`bagger alias add ll "list -u"`) expand before parsing;
+    // builtins always win over aliases.
+    let args = Cli::try_parse_from(alias::expand_argv(std::env::args_os().collect()))
+        .unwrap_or_else(|e| e.exit());
 
     let session = Session::default();
+    // The `debug` config raises the log floor, mirroring upstream's
+    // "additional and detailed output" setting.
+    let mut level = args.verbose.tracing_level_filter();
+    if session.config().debug() {
+        level = level.max(LevelFilter::DEBUG);
+    }
+    setup_logger(level)?;
+
     let user_agent = format!("Scoop/1.0 (+https://scoop.sh/) bagger/{}", crate_version!());
     let _ = session.set_user_agent(&user_agent);
 
     match args.command {
+        Command::Alias(args) => alias::execute(args, &session),
+        Command::Autofetch(args) => autofetch::execute(args, &session),
         Command::Bucket(args) => bucket::execute(args, &session),
         Command::Cache(args) => cache::execute(args, &session),
         Command::Cat(args) => cat::execute(args, &session),
+        Command::Checkup(args) => checkup::execute(args, &session),
+        Command::Checkver(args) => checkver::execute(args, &session),
         Command::Cleanup(args) => cleanup::execute(args, &session),
         Command::Completions(args) => completions::execute(args),
         Command::Config(args) => config::execute(args, &session),
+        Command::Create(args) => create::execute(args, &session),
+        Command::Depends(args) => depends::execute(args, &session),
+        Command::Download(args) => download::execute(args, &session),
+        Command::Export(args) => export::execute(args, &session),
         Command::Hold(args) => hold::execute(args, &session),
         Command::Home(args) => home::execute(args, &session),
+        Command::Import(args) => import::execute(args, &session),
         Command::Info(args) => info::execute(args, &session),
         Command::Install(args) => install::execute(args, &session),
         Command::List(args) => list::execute(args, &session),
+        Command::Prefix(args) => prefix::execute(args, &session),
+        Command::Reset(args) => reset::execute(args, &session),
         Command::Search(args) => search::execute(args, &session),
+        Command::Shim(args) => shim::execute(args, &session),
         Command::Unhold(args) => unhold::execute(args, &session),
         Command::Uninstall(args) => uninstall::execute(args, &session),
         Command::Update(args) => update::execute(args, &session),
         Command::Upgrade(args) => upgrade::execute(args, &session),
+        Command::Virustotal(args) => virustotal::execute(args, &session),
+        Command::Which(args) => which::execute(args, &session),
+        Command::Status(args) => status::execute(args, &session),
     }
 }
 
@@ -118,9 +178,9 @@ fn setup_logger(level_filter: LevelFilter) -> Result<()> {
         .with_default_directive(level_filter.into())
         .from_env()?;
 
-    // The custom `HOK_LOG_LEVEL` environment variable was introduced to set the
+    // The custom `BAGGER_LOG_LEVEL` environment variable was introduced to set the
     // log level for bagger since the first version.
-    if let Ok(level) = std::env::var("HOK_LOG_LEVEL") {
+    if let Ok(level) = std::env::var("BAGGER_LOG_LEVEL") {
         layer_env_filter = layer_env_filter.add_directive(format!("scoop_rs={level}").parse()?);
     }
 

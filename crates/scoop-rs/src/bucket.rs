@@ -47,8 +47,9 @@ impl Bucket {
         let path = path.to_owned();
         let name = path
             .file_name()
-            .map(|n| n.to_str().unwrap().to_string())
-            .unwrap();
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| Error::BucketNotFound(path.display().to_string()))?
+            .to_string();
 
         if !path.exists() {
             return Err(Error::BucketNotFound(name));
@@ -105,7 +106,8 @@ impl Bucket {
     /// Either the remote url of the bucket or the local path of the bucket.
     #[inline]
     pub fn source(&self) -> &str {
-        self.remote_url().unwrap_or(self.path().to_str().unwrap())
+        self.remote_url()
+            .unwrap_or_else(|| self.path().to_str().unwrap_or(""))
     }
 
     /// Get the manifest path of the given package name.
@@ -164,7 +166,7 @@ impl Bucket {
 
         let iter = if let Ok(entries) = par_read_dir(&path) {
             let (dirs, files): (Vec<DirEntry>, Vec<DirEntry>) =
-                entries.partition(|de| de.file_type().unwrap().is_dir());
+                entries.partition(|de| de.file_type().map(|t| t.is_dir()).unwrap_or(false));
 
             // If the inner `bucket` directory contains subdirectories then it
             // is considered as a bucket with categories and we need to search
@@ -200,8 +202,10 @@ fn par_read_dir(path: &Path) -> std::io::Result<impl ParallelIterator<Item = Dir
 /// Helper function to check if a directory entry is a manifest file.
 fn is_manifest(dir_entry: &DirEntry) -> bool {
     let filename = dir_entry.file_name();
-    let name = filename.to_str().unwrap();
-    let is_file = dir_entry.file_type().unwrap().is_file();
+    let Some(name) = filename.to_str() else {
+        return false;
+    };
+    let is_file = dir_entry.file_type().map(|t| t.is_file()).unwrap_or(false);
     // Ignore npm package config file, that said, there will
     // be no package named `package`, it's a reserved name.
     is_file && name.ends_with(".json") && name != "package.json"
@@ -225,8 +229,11 @@ pub fn bucket_added(session: &Session) -> Fallible<Vec<Bucket>> {
                 .par_bridge()
                 .filter_map(|entry| {
                     if let Ok(entry) = entry {
-                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
                         let path = entry.path();
+                        // `file_type` does not follow reparse points, so a
+                        // junctioned bucket directory would be skipped;
+                        // `is_dir` follows links (broken ones fail closed).
+                        let is_dir = path.is_dir();
 
                         if is_dir {
                             match Bucket::from(&path) {
@@ -317,5 +324,83 @@ impl BucketUpdateState {
             BucketUpdateState::Failed(msg) => Some(msg),
             _ => None,
         }
+    }
+}
+
+/// New commits pulled by a bucket update (shown when `show_update_log`).
+#[derive(Clone)]
+pub struct BucketUpdateLogContext {
+    /// The name of the bucket.
+    name: String,
+
+    /// One-line commit entries (`<short-id> <summary>`), newest first.
+    commits: Vec<String>,
+}
+
+impl BucketUpdateLogContext {
+    pub fn new(name: &str, commits: Vec<String>) -> BucketUpdateLogContext {
+        BucketUpdateLogContext {
+            name: name.to_owned(),
+            commits,
+        }
+    }
+
+    /// Get the name of the bucket associated with this log.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the pulled commit entries.
+    pub fn commits(&self) -> &[String] {
+        &self.commits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Junctioned bucket directories resolve like real ones (`file_type`
+    /// does not follow reparse points, so the naive check skips them).
+    #[test]
+    #[cfg(windows)]
+    fn junctioned_buckets_are_discovered() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-bucket-junction");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let target = base.join("real");
+        std::fs::create_dir_all(target.join("bucket")).unwrap();
+        std::fs::write(
+            target.join("bucket/j.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+        )
+        .unwrap();
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+
+        // A real bucket plus a junction pointing at a second one.
+        std::fs::create_dir_all(root.join("buckets/realb/bucket")).unwrap();
+        std::fs::write(
+            root.join("buckets/realb/bucket/a.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+        )
+        .unwrap();
+        crate::internal::fs::symlink_dir(&target, &root.join("buckets/jlinked")).unwrap();
+
+        let session = crate::Session::new();
+        let names: Vec<String> = bucket_added(&session)
+            .unwrap()
+            .iter()
+            .map(|b| b.name().to_owned())
+            .collect();
+        assert!(names.contains(&"realb".to_owned()), "got: {names:?}");
+        assert!(names.contains(&"jlinked".to_owned()), "got: {names:?}");
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
     }
 }

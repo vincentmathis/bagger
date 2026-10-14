@@ -122,6 +122,7 @@ pub fn bucket_update(session: &Session) -> Fallible<()> {
     let mut tasks = Vec::new();
     let pool = ThreadPool::builder().create()?;
     let proxy = config.proxy().map(|s| s.to_owned());
+    let show_log = config.show_update_log();
     let emitter = session.emitter();
 
     for bucket in buckets.iter() {
@@ -137,6 +138,7 @@ pub fn bucket_update(session: &Session) -> Fallible<()> {
         let flag = Arc::clone(&any_bucket_updated);
         let proxy = proxy.clone();
         let emitter = emitter.clone();
+        let before = internal::git::head_rev(&repo).ok().flatten();
 
         let task = pool
             .spawn_with_handle(async move {
@@ -146,13 +148,32 @@ pub fn bucket_update(session: &Session) -> Fallible<()> {
                     let _ = tx.send(Event::BucketUpdateProgress(ctx.clone()));
                 }
 
-                match internal::git::reset_head(repo, proxy) {
+                match internal::git::reset_head(&repo, proxy) {
                     Ok(_) => {
                         *flag.lock().unwrap() = true;
 
                         if let Some(tx) = emitter {
                             ctx.set_succeeded();
                             let _ = tx.send(Event::BucketUpdateProgress(ctx));
+                            // Upstream `show_update_log`: report pulled
+                            // commits (capped) when the HEAD moved.
+                            if show_log {
+                                let after = internal::git::head_rev(&repo).ok().flatten();
+                                if let (Some(old), Some(new)) = (before, after) {
+                                    if let Ok(commits) =
+                                        internal::git::log_range(&repo, &old, &new, 25)
+                                    {
+                                        if !commits.is_empty() {
+                                            let _ = tx.send(Event::BucketUpdateLog(
+                                                crate::bucket::BucketUpdateLogContext::new(
+                                                    name.as_str(),
+                                                    commits,
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(err) => {
@@ -188,6 +209,20 @@ pub fn bucket_update(session: &Session) -> Fallible<()> {
 /// This method will return an error if the bucket does not exist. I/O errors
 /// will be returned if the bucket directory is unable to be removed.
 pub fn bucket_remove(session: &Session, name: &str) -> Fallible<()> {
+    // The name is joined onto the buckets dir and the whole tree is
+    // deleted, so it must be a plain bucket name: anything else (`..`,
+    // separators, absolute paths) could wipe the Scoop root or worse.
+    let valid = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':'])
+        && std::path::Path::new(name)
+            .file_name()
+            .is_some_and(|n| n == name);
+    if !valid {
+        return Err(Error::Custom(format!("invalid bucket name '{name}'")));
+    }
+
     let mut path = session.config().root_path().to_owned();
     path.push("buckets");
     path.push(name);
@@ -260,7 +295,28 @@ pub fn cache_remove(session: &Session, query: &str) -> Fallible<()> {
     match query {
         "*" => {
             let config = session.config();
-            Ok(internal::fs::empty_dir(config.cache_path())?)
+            // The manifest cache database lives in the cache dir; wiping
+            // it forces a full bucket rescan, so it is spared.
+            let db = config.cache_path().join("manifests.db");
+            let mut spared = false;
+            if let Ok(entries) = config.cache_path().read_dir() {
+                for entry in entries.filter_map(|de| de.ok()) {
+                    let path = entry.path();
+                    if path == db {
+                        spared = true;
+                        continue;
+                    }
+                    if path.is_dir() {
+                        let _ = remove_dir_all::remove_dir_all(&path);
+                    } else {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+            if spared {
+                debug!("spared manifest cache database during cache clear");
+            }
+            Ok(())
         }
         query => {
             let files = cache_list(session, query)?;
@@ -269,6 +325,2957 @@ pub fn cache_remove(session: &Session, query: &str) -> Fallible<()> {
             }
             Ok(())
         }
+    }
+}
+
+/// Get a list of running process names that belong to a package's app directory.
+///
+/// # Errors
+///
+/// I/O errors will be returned if the process enumeration fails.
+pub fn running_processes(session: &Session, package: &Package) -> Fallible<Vec<String>> {
+    let config = session.config();
+    let apps_dir = config.root_path().join("apps");
+    let app_path = apps_dir.join(package.name());
+    internal::os::running_apps(&app_path)
+}
+
+/// Get the installation directory of a package.
+///
+/// # Returns
+///
+/// The path to the package's install directory. If `no_junction` is set,
+/// this is `<root>/apps/<name>/<version>`. Otherwise, it is
+/// `<root>/apps/<name>/current`.
+pub fn install_dir(session: &Session, package: &Package) -> std::path::PathBuf {
+    let config = session.config();
+    let apps_dir = std::path::PathBuf::from(config.root_path()).join("apps");
+
+    if config.no_junction() {
+        apps_dir
+            .join(package.name())
+            .join(package.installed_version().unwrap_or(package.version()))
+    } else {
+        apps_dir.join(package.name()).join("current")
+    }
+}
+
+/// Resolve the architecture string for a package (`32bit`/`64bit`/`arm64`).
+///
+/// Honors the process-wide override (`--arch`/`SCOOP_ARCH`) first, then the
+/// manifest's architecture table, then the host default. Hook scripts
+/// observe this as `$architecture`, mirroring upstream Scoop.
+pub(crate) fn resolved_arch(pkg: &Package) -> String {
+    if let Some(arch) = crate::arch::override_arch() {
+        return arch.as_str().to_owned();
+    }
+
+    if let Some(arch) = pkg.manifest().architecture() {
+        if cfg!(target_arch = "x86") {
+            return if arch.ia32.is_some() {
+                "32bit".to_string()
+            } else if arch.amd64.is_some() {
+                "64bit".to_string()
+            } else if arch.aarch64.is_some() {
+                "arm64".to_string()
+            } else {
+                runtime_arch()
+            };
+        }
+        if cfg!(target_arch = "x86_64") {
+            return if arch.amd64.is_some() {
+                "64bit".to_string()
+            } else if arch.ia32.is_some() {
+                "32bit".to_string()
+            } else if arch.aarch64.is_some() {
+                "arm64".to_string()
+            } else {
+                runtime_arch()
+            };
+        }
+        if cfg!(target_arch = "aarch64") {
+            return if arch.aarch64.is_some() {
+                "arm64".to_string()
+            } else if arch.amd64.is_some() {
+                "64bit".to_string()
+            } else if arch.ia32.is_some() {
+                "32bit".to_string()
+            } else {
+                runtime_arch()
+            };
+        }
+    }
+    runtime_arch()
+}
+
+/// Determine the runtime architecture string.
+fn runtime_arch() -> String {
+    if cfg!(target_arch = "x86_64") {
+        "64bit".to_string()
+    } else if cfg!(target_arch = "x86") {
+        "32bit".to_string()
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64".to_string()
+    } else {
+        "64bit".to_string()
+    }
+}
+
+/// Result of a checkver operation.
+#[derive(Clone, Debug)]
+pub struct CheckverResult {
+    pub current_version: Option<String>,
+    pub latest_version: Option<String>,
+    /// Regex captures from the version match (`0` = whole match, then
+    /// numbered and named groups), for `replace` templates and autoupdate
+    /// `$match*` variables.
+    pub captures: Vec<(String, String)>,
+}
+
+impl CheckverResult {
+    pub fn is_upgradable(&self) -> bool {
+        self.current_version
+            .as_ref()
+            .zip(self.latest_version.as_ref())
+            .map(|(cur, latest)| cur != latest)
+            .unwrap_or(false)
+    }
+}
+
+/// Resolve the page a checkver run fetches: the explicit `url` when set,
+/// otherwise the homepage — except bare `"checkver": "github"`, which only
+/// carries the default regex and, like upstream, checks the repo's
+/// releases page instead.
+fn checkver_url(checkver: Option<&crate::package::manifest::Checkver>, homepage: &str) -> String {
+    match checkver.and_then(|c| c.url.as_deref()) {
+        Some(url) => url.to_string(),
+        None if checkver.and_then(|c| c.regex.as_deref())
+            == Some(crate::package::manifest::GITHUB_CHECKVER_REGEX)
+            && is_github_repo_url(homepage) =>
+        {
+            format!("{}/releases/latest", homepage.trim_end_matches('/'))
+        }
+        None => homepage.to_string(),
+    }
+}
+
+/// Whether a homepage URL points at a GitHub repository
+/// (`https://github.com/<owner>/<repo>`, optional trailing slash/`.git`).
+fn is_github_repo_url(url: &str) -> bool {
+    let rest = url
+        .trim_end_matches('/')
+        .strip_suffix(".git")
+        .unwrap_or(url)
+        .trim_end_matches('/');
+    let Some(path) = rest.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let mut parts = path.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(owner), Some(repo), None) if !owner.is_empty() && !repo.is_empty()
+    )
+}
+
+/// Check the latest version of a package by fetching its checkver URL.
+///
+/// # Returns
+///
+/// A [`CheckverResult`] containing the current and latest versions.
+///
+/// # Errors
+///
+/// Network errors will be returned if the checkver URL is not fetchable.
+pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult> {
+    let config = session.config();
+    let proxy = config.proxy();
+
+    let manifest = package.manifest();
+    let checkver = manifest.effective_checkver();
+    let current = package
+        .installed_version()
+        .unwrap_or(package.version())
+        .to_string();
+
+    let reverse = checkver.and_then(|c| c.reverse).unwrap_or(false);
+    let replace = checkver.and_then(|c| c.replace.as_deref());
+    let regex = checkver.and_then(|c| c.regex.as_deref());
+
+    // `checkver.script` runs a PowerShell snippet expected to print the
+    // latest version. It replaces page fetching entirely.
+    if let Some(script) = checkver.and_then(|c| c.script.as_ref()) {
+        let lines = script.devectorize();
+        let fallback_cwd = session.config().cache_path().to_owned();
+        let working_dir = manifest.path().parent().unwrap_or(&fallback_cwd);
+        let stdout =
+            internal::ps::invoke_script_capture(session, package, "checkver", &lines, working_dir)?;
+
+        let (latest_version, captures) = match match_version(&stdout, regex, reverse, replace) {
+            Some(m) => (Some(m.text.clone()), m.captures.clone()),
+            None => (
+                stdout
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| line.to_owned()),
+                vec![],
+            ),
+        };
+
+        return Ok(CheckverResult {
+            current_version: Some(current),
+            latest_version,
+            captures,
+        });
+    }
+
+    let homepage = manifest.homepage();
+    let url = checkver_url(checkver, homepage);
+
+    // `checkver.useragent` wins, then the session user agent.
+    let user_agent = checkver
+        .and_then(|c| c.useragent.as_deref())
+        .or_else(|| session.user_agent.get().map(|s| s.as_str()));
+    let content = match user_agent {
+        Some(ua) => internal::network::fetch_url_with_headers(&url, proxy, &[("User-Agent", ua)])
+            .map(|(_, body)| body),
+        None => internal::network::fetch_url(&url, proxy),
+    };
+    let content = match content {
+        Some(c) => c,
+        None => {
+            return Ok(CheckverResult {
+                current_version: Some(current),
+                latest_version: None,
+                captures: vec![],
+            });
+        }
+    };
+
+    // Per Scoop semantics, `jsonpath`/`xpath` first extract a string that
+    // `regex` is then matched against. Without `regex`, the extracted
+    // string itself is the version.
+    let extracted = checkver
+        .and_then(|c| c.jsonpath.as_deref())
+        .and_then(|jsonpath| eval_jsonpath(&content, jsonpath))
+        .or_else(|| {
+            checkver
+                .and_then(|c| c.xpath.as_deref())
+                .and_then(|xpath| eval_xpath(&content, xpath))
+        });
+
+    let haystack = extracted.as_deref().unwrap_or(&content);
+    let (latest_version, captures) = match match_version(haystack, regex, reverse, replace) {
+        Some(m) => (Some(m.text.clone()), m.captures.clone()),
+        // No regex given: the extracted string (if any) is the version.
+        None => (extracted, vec![]),
+    };
+
+    Ok(CheckverResult {
+        current_version: Some(current),
+        latest_version,
+        captures,
+    })
+}
+
+/// A regex version match with its captures retained.
+#[derive(Clone, Debug)]
+pub struct VersionMatch {
+    /// The matched version text (group 1 preferred, else whole match,
+    /// optionally rewritten by the `replace` template).
+    pub text: String,
+    /// Captures as `(name, value)`: `0` is the whole match, then numbered
+    /// groups (`1`, `2`, …) and named groups (`version`, …).
+    pub captures: Vec<(String, String)>,
+}
+
+/// Match `regex` against `haystack`, honoring `reverse` (last match wins)
+/// and applying the `replace` template when given.
+fn match_version(
+    haystack: &str,
+    regex: Option<&str>,
+    reverse: bool,
+    replace: Option<&str>,
+) -> Option<VersionMatch> {
+    let re = regex::Regex::new(regex?).ok()?;
+    let caps = match reverse {
+        true => re.captures_iter(haystack).last()?,
+        false => re.captures(haystack)?,
+    };
+
+    let mut captures = vec![];
+    if let Some(whole) = caps.get(0) {
+        captures.push(("0".to_owned(), whole.as_str().to_owned()));
+    }
+    for (idx, group) in caps.iter().enumerate().skip(1) {
+        if let Some(m) = group {
+            captures.push((idx.to_string(), m.as_str().to_owned()));
+        }
+    }
+    for name in re.capture_names().flatten() {
+        if let Some(m) = caps.name(name) {
+            captures.push((name.to_owned(), m.as_str().to_owned()));
+        }
+    }
+
+    let text = caps
+        .get(1)
+        .or_else(|| caps.get(0))
+        .map(|m| m.as_str().to_owned())?;
+
+    let text = match replace {
+        Some(template) => expand_replace(template, &captures),
+        None => text,
+    };
+
+    Some(VersionMatch { text, captures })
+}
+
+/// Expand a .NET-style replacement template (`$1`, `$name`, `${name}`;
+/// `$$` escapes to `$`) using regex captures.
+fn expand_replace(template: &str, captures: &[(String, String)]) -> String {
+    let lookup = |key: &str| -> &str {
+        captures
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+            .unwrap_or("")
+    };
+
+    let mut out = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '$' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek() {
+            // `$$` escapes to a literal `$`.
+            Some('$') => {
+                out.push('$');
+                chars.next();
+            }
+            // `${name}` form.
+            Some('{') => {
+                chars.next();
+                let name: String = chars.by_ref().take_while(|&c| c != '}').collect();
+                out.push_str(lookup(&name));
+            }
+            // `$1` / `$name` forms.
+            Some(c) if c.is_ascii_alphanumeric() || *c == '_' => {
+                let mut name = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        name.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                out.push_str(lookup(&name));
+            }
+            // Lone `$` stays literal.
+            _ => out.push('$'),
+        }
+    }
+    out
+}
+
+/// Expand autoupdate URL templates.
+///
+/// Supports `$version` plus `$match*` captured variables (`$match1`,
+/// `$matchHead`, …) from the checkver regex match. Longer names are
+/// substituted first so `$match1` never clobbers `$match10`.
+///
+/// For full substitution support (version parts, `$basename`, …) see
+/// [`AutoupdateSubstitutions`].
+pub fn expand_autoupdate_template(
+    template: &str,
+    version: &str,
+    captures: &[(String, String)],
+) -> String {
+    AutoupdateSubstitutions {
+        version,
+        asset_url: "",
+        captures,
+    }
+    .expand(template)
+}
+
+/// Full Scoop substitution set for autoupdate templates.
+///
+/// Covers the variables from upstream `Get-VersionSubstitution` plus the
+/// URL family: `$version`, `$dotVersion`, `$underscoreVersion`,
+/// `$dashVersion`, `$cleanVersion`, `$majorVersion`, `$minorVersion`,
+/// `$patchVersion`, `$buildVersion`, `$preReleaseVersion`, `$matchHead`,
+/// `$matchTail`, `$match<TitleCasedName>` for checkver captures, and
+/// `$url`, `$baseurl`, `$basename`, `$urlNoExt`, `$basenameNoExt` derived
+/// from the expanded asset URL.
+pub struct AutoupdateSubstitutions<'a> {
+    /// The new version.
+    pub version: &'a str,
+    /// The expanded asset URL (fragment stripped for `$basename`).
+    pub asset_url: &'a str,
+    /// Checkver regex captures (`0` = whole match, numbered, named).
+    pub captures: &'a [(String, String)],
+}
+
+impl AutoupdateSubstitutions<'_> {
+    /// Expand all known `$variables` in `template` (longest names first).
+    pub fn expand(&self, template: &str) -> String {
+        let mut vars: Vec<(String, String)> = vec![];
+
+        let version = self.version;
+        vars.push(("version".to_owned(), version.to_owned()));
+        for (sep, name) in [
+            ('.', "dotVersion"),
+            ('_', "underscoreVersion"),
+            ('-', "dashVersion"),
+        ] {
+            vars.push((
+                name.to_owned(),
+                version
+                    .chars()
+                    .map(|c| {
+                        if c == '.' || c == '_' || c == '-' {
+                            sep
+                        } else {
+                            c
+                        }
+                    })
+                    .collect(),
+            ));
+        }
+        vars.push((
+            "cleanVersion".to_owned(),
+            version
+                .chars()
+                .filter(|c| *c != '.' && *c != '_' && *c != '-')
+                .collect(),
+        ));
+
+        let (first_part, pre_release) = match version.split_once('-') {
+            Some((first, _)) => (first, version.rsplit('-').next().unwrap_or("")),
+            None => (version, ""),
+        };
+        let numbered: Vec<&str> = first_part.split('.').collect();
+        for (idx, name) in [
+            "majorVersion",
+            "minorVersion",
+            "patchVersion",
+            "buildVersion",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            vars.push((
+                name.to_owned(),
+                numbered.get(idx).copied().unwrap_or("").to_owned(),
+            ));
+        }
+        vars.push(("preReleaseVersion".to_owned(), pre_release.to_owned()));
+
+        if let Some(caps) = regex::Regex::new(r"(?P<head>\d+\.\d+(?:\.\d+)?)(?P<tail>.*)")
+            .ok()
+            .and_then(|re| re.captures(version))
+        {
+            vars.push((
+                "matchHead".to_owned(),
+                caps.name("head")
+                    .map(|m| m.as_str().to_owned())
+                    .unwrap_or_default(),
+            ));
+            vars.push((
+                "matchTail".to_owned(),
+                caps.name("tail")
+                    .map(|m| m.as_str().to_owned())
+                    .unwrap_or_default(),
+            ));
+        }
+
+        for (name, value) in self.captures {
+            if name == "0" {
+                continue;
+            }
+            vars.push((format!("match{}", title_case(name)), value.clone()));
+        }
+
+        let origin = self.asset_url.split('#').next().unwrap_or(self.asset_url);
+        let basename = percent_decode(origin.rsplit('/').next().unwrap_or(origin));
+        let baseurl = origin
+            .rsplit_once('/')
+            .map(|(base, _)| base.trim_end_matches('/').to_owned())
+            .unwrap_or_default();
+        vars.push(("url".to_owned(), origin.to_owned()));
+        vars.push(("baseurl".to_owned(), baseurl));
+        vars.push(("basename".to_owned(), basename.clone()));
+        vars.push(("urlNoExt".to_owned(), strip_extension(origin)));
+        vars.push(("basenameNoExt".to_owned(), strip_extension(&basename)));
+
+        vars.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
+
+        let mut out = template.to_owned();
+        for (name, value) in &vars {
+            out = out.replace(&format!("${name}"), value);
+        }
+        out
+    }
+}
+
+/// Uppercase the first character (`vversion` → `Vversion`), matching
+/// upstream `Get-Culture.TextInfo.ToTitleCase` for single-word names.
+fn title_case(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Strip the file extension (`app.zip` → `app`).
+fn strip_extension(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, _)) => stem.to_owned(),
+        None => name.to_owned(),
+    }
+}
+
+/// Decode `%XX` sequences in URL segments.
+fn percent_decode(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let bytes = segment.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        // Need bytes[idx + 1] and bytes[idx + 2] to form a hex pair.
+        if bytes[idx] == b'%' && idx + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (
+                (bytes[idx + 1] as char).to_digit(16),
+                (bytes[idx + 2] as char).to_digit(16),
+            ) {
+                out.push((h * 16 + l) as u8 as char);
+                idx += 3;
+                continue;
+            }
+        }
+        out.push(bytes[idx] as char);
+        idx += 1;
+    }
+    out
+}
+
+/// Normalize a discovered hash to manifest form.
+///
+/// Strips a `sha256:` prefix and infers the algorithm from the hex length
+/// (32 → `md5:`, 40 → `sha1:`, 64 → bare sha256, 128 → `sha512:`),
+/// mirroring upstream `format_hash`. Returns `None` for unusable values.
+fn format_hash_value(hash: &str) -> Option<String> {
+    let mut hash = hash.trim().to_lowercase();
+    if let Some(stripped) = hash.strip_prefix("sha256:") {
+        hash = stripped.to_owned();
+    }
+    hash.retain(|c| c.is_ascii_hexdigit());
+    match hash.len() {
+        32 => Some(format!("md5:{hash}")),
+        40 => Some(format!("sha1:{hash}")),
+        64 => Some(hash),
+        128 => Some(format!("sha512:{hash}")),
+        _ => None,
+    }
+}
+
+/// Find a hash in a text (checksum) file, mirroring upstream
+/// `find_hash_in_textfile`.
+///
+/// `regex` supports the `$md5`/`$sha1`/`$sha256`/`$sha512`/`$checksum`
+/// placeholders plus full autoupdate substitutions. With no regex, a bare
+/// hex line is accepted, falling back to a `<hash> <basename>` search.
+fn find_hash_in_textfile(
+    content: &str,
+    basename: &str,
+    regex: Option<&str>,
+    subs: &AutoupdateSubstitutions,
+) -> Option<String> {
+    let templates = [
+        ("$md5", "([a-fA-F0-9]{32})"),
+        ("$sha1", "([a-fA-F0-9]{40})"),
+        ("$sha256", "([a-fA-F0-9]{64})"),
+        ("$sha512", "([a-fA-F0-9]{128})"),
+        ("$checksum", "([a-fA-F0-9]{32,128})"),
+        ("$base64", "([a-zA-Z0-9+\\/=]{24,88})"),
+    ];
+
+    let pattern = match regex {
+        Some(r) if !r.is_empty() => {
+            let mut expanded = r.to_owned();
+            for (placeholder, group) in templates {
+                expanded = expanded.replace(placeholder, group);
+            }
+            subs.expand(&expanded)
+        }
+        _ => r"^\s*([a-fA-F0-9]+)\s*$".to_owned(),
+    };
+
+    if let Ok(re) = regex::RegexBuilder::new(&pattern).multi_line(true).build() {
+        if let Some(caps) = re.captures(content) {
+            if let Some(m) = caps.get(1) {
+                let mut hash: String = m.as_str().chars().filter(|c| !c.is_whitespace()).collect();
+                // Convert base64-encoded hash values (upstream parity):
+                // decode unless already usable hex of a standard length.
+                let is_hex = hash.bytes().all(|b| b.is_ascii_hexdigit());
+                if is_base64_hash(&hash) && !(is_hex && matches!(hash.len(), 32 | 40 | 64 | 128)) {
+                    if let Some(decoded) = decode_base64(&hash) {
+                        hash = decoded.iter().map(|b| format!("{b:02x}")).collect();
+                    }
+                }
+                if let Some(formatted) = format_hash_value(&hash) {
+                    return Some(formatted);
+                }
+            }
+        }
+    }
+
+    // Fall back to `<hash> <basename>` / `<basename> <hash>` lines.
+    let escaped_basename = regex::escape(basename);
+    for pattern in [
+        format!(r"([a-fA-F0-9]{{32,128}})[ \t]+.*{escaped_basename}(?:\s|$)"),
+        format!(r"{escaped_basename}[ \t]+.*?([a-fA-F0-9]{{32,128}})"),
+    ] {
+        if let Ok(re) = regex::Regex::new(&pattern) {
+            if let Some(caps) = re.captures(content) {
+                if let Some(m) = caps.get(1) {
+                    if let Some(formatted) = format_hash_value(m.as_str()) {
+                        return Some(formatted);
+                    }
+                }
+            }
+        }
+    }
+
+    // Final fallback: metalink `<hash>` elements (upstream parity).
+    if let Ok(re) = regex::Regex::new(r"<hash[^>]+>([a-fA-F0-9]{64})") {
+        if let Some(caps) = re.captures(content) {
+            if let Some(m) = caps.get(1) {
+                if let Some(formatted) = format_hash_value(m.as_str()) {
+                    return Some(formatted);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Whether a string has the shape of a base64-encoded hash.
+///
+/// Mirrors the anchored upstream test:
+/// `^(?:[A-Za-z0-9+/]{4})*(?:…{2}==|…{3}=|…{4})$`.
+fn is_base64_hash(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return false;
+    }
+    let sextet = |b: u8| b.is_ascii_alphanumeric() || b == b'+' || b == b'/';
+    let (head, tail) = bytes.split_at(bytes.len() - 4);
+    if !head.iter().all(|&b| sextet(b)) {
+        return false;
+    }
+    match tail {
+        [a, b, c, d] => {
+            sextet(*a)
+                && sextet(*b)
+                && ((*c == b'=' && *d == b'=')
+                    || (sextet(*c) && *d == b'=')
+                    || (sextet(*c) && sextet(*d)))
+        }
+        _ => false,
+    }
+}
+
+/// Decode standard base64 to bytes, or `None` on malformed input.
+fn decode_base64(s: &str) -> Option<Vec<u8>> {
+    fn sextet(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    // Padding (`=`) may only terminate the final quartet (max two).
+    let data_end = bytes.iter().rposition(|&b| b != b'=').map(|i| i + 1)?;
+    if bytes.len() - data_end > 2 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let (chunks, _) = bytes.as_chunks::<4>();
+    for chunk in chunks {
+        let mut n: u32 = 0;
+        let mut pad = 0;
+        for &b in chunk {
+            n <<= 6;
+            if b == b'=' {
+                pad += 1;
+            } else {
+                if pad > 0 {
+                    return None;
+                }
+                n |= sextet(b)? as u32;
+            }
+        }
+        if pad > 2 {
+            return None;
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    // Trailing data-less padding (e.g. `"===="`) decodes empty: reject.
+    if data_end == 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// The effective hash-matching regex for an autoupdate hash section.
+///
+/// Upstream collects `find` first and lets `regex` override it.
+fn hash_regex(spec: &crate::package::manifest::HashExtraction) -> Option<&str> {
+    spec.regex.as_deref().or(spec.find.as_deref())
+}
+
+/// How an asset hash was resolved.
+enum AssetHash {
+    /// Hash resolved from remote metadata; write it directly.
+    Found(String),
+    /// Download the asset and hash it (download mode and fallback).
+    Download,
+}
+
+/// A site-specific hash source auto-detected from the asset URL.
+///
+/// Mirrors the URL-pattern branches of upstream `get_hash_for_app`, which
+/// apply when no hash section is configured.
+enum SiteMode {
+    /// Fosshub download pages embed `"sha256":"…"`.
+    Fosshub { filename: String },
+    /// SourceForge project file listings embed `"basename":"…","sha1":"…"`.
+    Sourceforge { project: String, file: String },
+    /// GitHub release assets expose `digest` via the releases API.
+    Github { owner: String, repo: String },
+}
+
+/// Auto-detect a site-specific hash source from an asset URL.
+fn detect_site_mode(asset_url: &str) -> Option<SiteMode> {
+    let url = asset_url.split('#').next().unwrap_or(asset_url);
+
+    if let Some(caps) = regex::Regex::new(r"^(?:.*fosshub\.com\/).*(?:\/|\?dwl=)(?<filename>.*)$")
+        .ok()?
+        .captures(url)
+    {
+        return Some(SiteMode::Fosshub {
+            filename: caps["filename"].to_owned(),
+        });
+    }
+
+    if let Some(caps) = regex::Regex::new(
+        r"(?:downloads\.)?sourceforge\.net\/projects?\/(?<project>[^\/]+)\/(?:files\/)?(?<file>.*)",
+    )
+    .ok()?
+    .captures(url)
+    {
+        return Some(SiteMode::Sourceforge {
+            project: caps["project"].to_owned(),
+            file: caps["file"].to_owned(),
+        });
+    }
+
+    if let Some(caps) = regex::Regex::new(
+        r"https:\/\/github\.com\/(?<owner>[^\/]+)\/(?<repo>[^\/]+)\/releases\/download\/[^\/]+\/[^\/]+",
+    )
+    .ok()?
+    .captures(url)
+    {
+        return Some(SiteMode::Github {
+            owner: caps["owner"].to_owned(),
+            repo: caps["repo"].to_owned(),
+        });
+    }
+
+    None
+}
+
+/// Resolve the GitHub API token, mirroring upstream `Get-GitHubToken`
+/// precedence: `SCOOP_GH_TOKEN` env, `gh_token` config, `GH_TOKEN` env,
+/// `GITHUB_TOKEN` env.
+pub fn github_token(session: &Session) -> Option<String> {
+    std::env::var("SCOOP_GH_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            session
+                .config()
+                .gh_token()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| std::env::var("GH_TOKEN").ok().filter(|s| !s.is_empty()))
+        .or_else(|| std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()))
+}
+
+/// Extra request headers for `url` from `private_hosts` entries whose
+/// `match` regex hits, mirroring upstream `Invoke-Download` (headers in
+/// `Name=Value` StringData lines; `Name: Value` is accepted too, as used by
+/// manifests in the wild).
+pub fn headers_for_url(session: &Session, url: &str) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    let config = session.config();
+    let Some(hosts) = config.private_hosts() else {
+        return headers;
+    };
+    for host in hosts {
+        let matched = regex::Regex::new(host.matcher())
+            .map(|re| re.is_match(url))
+            .unwrap_or(false);
+        if !matched {
+            continue;
+        }
+        for line in host.headers().lines() {
+            let line = line.trim().trim_end_matches(';').trim();
+            let pair = line.split_once('=').or_else(|| line.split_once(':'));
+            let Some((name, value)) = pair else {
+                continue;
+            };
+            let (name, value) = (name.trim(), value.trim());
+            if !name.is_empty() {
+                headers.push((name.to_owned(), value.to_owned()));
+            }
+        }
+    }
+    headers
+}
+
+/// Resolve special download URLs before fetching (upstream
+/// `handle_special_urls`):
+///
+/// - FossHub pages go through the download-API handshake (the page URL
+///   alone serves HTML, not the file).
+/// - `sourceforge.net/…/download` URLs are reshaped to the direct
+///   `downloads.sourceforge.net` form, avoiding mirror bounces.
+/// - Private GitHub release URLs resolve to authenticated API asset URLs
+///   when a token is configured.
+///
+/// Anything unrecognized (or any handshake failure) returns the URL
+/// unchanged.
+pub fn resolve_special_url(session: &Session, url: &str, proxy: Option<&str>) -> String {
+    if let Some(direct) = reshape_sourceforge_url(url) {
+        return direct;
+    }
+    if url.contains("fosshub.com/") {
+        if let Some(direct) = resolve_fosshub_url(url, proxy) {
+            return direct;
+        }
+    }
+    if let Some(direct) = resolve_github_private_url(session, url, proxy) {
+        return direct;
+    }
+    url.to_owned()
+}
+
+/// Split a GitHub `releases/download` URL into
+/// `(owner, repo, tag, file, filename-suffix)`.
+fn split_github_release_url(url: &str) -> Option<(String, String, String, String, String)> {
+    let re = regex::Regex::new(
+        r"github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/releases/download/(?P<tag>[^/]+)/(?P<file>[^/#]+)(?P<filename>.*)$",
+    )
+    .ok()?;
+    let caps = re.captures(url)?;
+    Some((
+        caps.name("owner")?.as_str().to_owned(),
+        caps.name("repo")?.as_str().to_owned(),
+        caps.name("tag")?.as_str().to_owned(),
+        caps.name("file")?.as_str().to_owned(),
+        caps.name("filename")?.as_str().to_owned(),
+    ))
+}
+
+/// Pick the API URL of the asset named `file` from a `releases/tags`
+/// response (plus the `#/…` filename suffix upstream preserves).
+fn pick_github_asset(releases_json: &str, file: &str, suffix: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(releases_json).ok()?;
+    let assets = json.get("assets")?.as_array()?;
+    let asset = assets
+        .iter()
+        .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(file))?;
+    let url = asset.get("url")?.as_str()?;
+    Some(format!("{url}{suffix}"))
+}
+
+/// Resolve a private GitHub release download through the API (upstream
+/// `handle_special_urls` GitHub branch): with a token configured and the
+/// repo private, the file downloads from its API asset URL instead.
+fn resolve_github_private_url(session: &Session, url: &str, proxy: Option<&str>) -> Option<String> {
+    let (owner, repo, tag, file, suffix) = split_github_release_url(url)?;
+    let token = github_token(session)?;
+    let auth = format!("token {token}");
+    let headers = [("Authorization", auth.as_str())];
+    let repo_api = format!("https://api.github.com/repos/{owner}/{repo}");
+    let (code, body) = internal::network::fetch_url_with_headers(&repo_api, proxy, &headers)?;
+    if code != 200 {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    if json.get("private").and_then(|p| p.as_bool()) != Some(true) {
+        return None;
+    }
+    let tag_api = format!("https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}");
+    let (code, body) = internal::network::fetch_url_with_headers(&tag_api, proxy, &headers)?;
+    if code != 200 {
+        return None;
+    }
+    pick_github_asset(&body, &file, &suffix)
+}
+
+/// Auth headers for `api.github.com` asset downloads: upstream
+/// `Invoke-Download` sets `Accept: application/octet-stream` and the
+/// `Bearer` token there (the API returns JSON metadata otherwise).
+pub fn github_download_headers(session: &Session, url: &str) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if !url.starts_with("https://api.github.com/repos") {
+        return headers;
+    }
+    headers.push(("Accept".to_owned(), "application/octet-stream".to_owned()));
+    if let Some(token) = github_token(session) {
+        headers.push(("Authorization".to_owned(), format!("Bearer {token}")));
+    }
+    headers
+}
+
+/// Split a FossHub page URL into `(projectUri, fileName)`, mirroring the
+/// upstream match groups.
+fn split_fosshub_url(url: &str) -> Option<(String, String)> {
+    let re =
+        regex::Regex::new(r"^(?:.*fosshub\.com/)(?P<name>.*)(?:/|\?dwl=)(?P<filename>.*)$").ok()?;
+    let caps = re.captures(url)?;
+    Some((
+        caps.name("name")?.as_str().to_owned(),
+        caps.name("filename")?.as_str().to_owned(),
+    ))
+}
+
+/// Reshape `…sourceforge.net/projects?/<project>/[files/]<file>[/download|?…]`
+/// to `https://downloads.sourceforge.net/project/<project>/<file>`.
+fn reshape_sourceforge_url(url: &str) -> Option<String> {
+    let re = regex::Regex::new(
+        r"(?:downloads\.)?sourceforge\.net/projects?/(?P<project>[^/]+)/(?:files/)?(?P<file>.*?)(?:$|/download|\?)",
+    )
+    .ok()?;
+    let caps = re.captures(url)?;
+    let file = caps.name("file")?.as_str();
+    if file.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "https://downloads.sourceforge.net/project/{}/{}",
+        caps.name("project")?.as_str(),
+        file
+    ))
+}
+
+/// Run the FossHub download handshake: fetch the page for the embedded
+/// `projectId`/`releaseId`, then POST to the download API for the file URL.
+fn resolve_fosshub_url(page_url: &str, proxy: Option<&str>) -> Option<String> {
+    let (name, filename) = split_fosshub_url(page_url)?;
+    let page = internal::network::fetch_url(page_url, proxy)?;
+    let ids =
+        regex::Regex::new(r#""p":"(?P<pid>[a-f0-9]{24}).*?"r":"(?P<rid>[a-f0-9]{24})"#).ok()?;
+    let caps = ids.captures(&page)?;
+    let body = serde_json::json!({
+        "projectUri": name,
+        "fileName": filename,
+        "source": "CF",
+        "isLatestVersion": true,
+        "projectId": &caps["pid"],
+        "releaseId": &caps["rid"],
+    })
+    .to_string();
+    let (code, response) =
+        internal::network::post_json("https://api.fosshub.com/download/", proxy, &body)?;
+    if code != 200 {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_str(&response).ok()?;
+    if !json.get("error").map(|e| e.is_null()).unwrap_or(false) {
+        return None;
+    }
+    json.get("data")?.get("url")?.as_str().map(str::to_owned)
+}
+
+/// Binaries of a manifest matching `query`, mirroring upstream
+/// `bin_match_json` display values: full filenames whose stem or alias
+/// matches. `literal` selects plain case-insensitive matching (bagger
+/// `--explicit`) over regex.
+pub fn matching_bin_names(
+    manifest: &crate::package::manifest::Manifest,
+    query: &str,
+    literal: bool,
+) -> Vec<String> {
+    use crate::internal::path::{leaf, leaf_base};
+
+    let mut out = Vec::new();
+    let Some(bins) = manifest.bin() else {
+        return out;
+    };
+    let query_lower = query.to_lowercase();
+    let regex = (!literal)
+        .then(|| {
+            regex::RegexBuilder::new(query)
+                .case_insensitive(true)
+                .multi_line(true)
+                .build()
+                .ok()
+        })
+        .flatten();
+    for def in &bins {
+        let Some(target) = def.first() else {
+            continue;
+        };
+        let stem = leaf_base(target).unwrap_or(target);
+        let alias = def.get(1).copied();
+        let hit = match &regex {
+            Some(re) => re.is_match(stem) || alias.is_some_and(|a| re.is_match(a)),
+            None => {
+                stem.to_lowercase().contains(&query_lower)
+                    || alias.is_some_and(|a| a.to_lowercase().contains(&query_lower))
+            }
+        };
+        if hit {
+            out.push(leaf(target).unwrap_or(target).to_owned());
+        }
+    }
+    out
+}
+
+/// Search not-yet-added known buckets via the GitHub API (upstream
+/// `search_remotes`): manifest paths matching the query. Returns
+/// `(bucket, name)` hits. Unreachable buckets fail silently (auth and
+/// rate-limit hints come from `github_api_get`).
+pub fn search_remote_buckets(session: &Session, query: &str) -> Fallible<Vec<(String, String)>> {
+    let added: Vec<String> = bucket_list(session)?
+        .iter()
+        .map(|b| b.name().to_owned())
+        .collect();
+    let proxy = session.config().proxy().map(|s| s.to_owned());
+    let path_matcher = remote_path_matcher(query)?;
+    let mut out = Vec::new();
+    for (bucket, repo_url) in bucket_list_known() {
+        if added.iter().any(|b| b == bucket) {
+            continue;
+        }
+        let Some((owner, repo)) = split_github_repo(repo_url) else {
+            continue;
+        };
+        let api = format!("https://api.github.com/repos/{owner}/{repo}/git/trees/HEAD?recursive=1");
+        let Some(body) = github_api_get(session, &api, proxy.as_deref()) else {
+            continue;
+        };
+        for name in remote_manifest_names(&body, &path_matcher) {
+            out.push((bucket.to_owned(), name));
+        }
+    }
+    Ok(out)
+}
+
+/// Split a `https://github.com/<owner>/<repo>[.git]` URL.
+fn split_github_repo(url: &str) -> Option<(String, String)> {
+    let path = url
+        .strip_prefix("https://github.com/")?
+        .trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+        return None;
+    }
+    Some((owner.to_owned(), repo.to_owned()))
+}
+
+/// Tree-path matcher for remote bucket search: the query (itself an
+/// alternation of the user's queries) is interpolated as a regex, like
+/// upstream. The alternation is grouped: without `(?:…)` the `|` would
+/// split the surrounding `.*` anchors (`.*a|b.*` matches `.*a` OR `b.*`).
+/// Pure for testability.
+fn remote_path_matcher(query: &str) -> Fallible<regex::Regex> {
+    regex::RegexBuilder::new(&format!("^bucket/(.*(?:{query}).*)\\.json$"))
+        .case_insensitive(true)
+        .build()
+        .map_err(|e| Error::Custom(format!("invalid regular expression '{query}': {e}")))
+}
+
+/// Manifest names from a GitHub tree API response whose `bucket/` paths
+/// match. Pure for testability.
+fn remote_manifest_names(body: &str, path_matcher: &regex::Regex) -> Vec<String> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return vec![];
+    };
+    let Some(tree) = json.get("tree").and_then(|t| t.as_array()) else {
+        return vec![];
+    };
+    tree.iter()
+        .filter_map(|e| e.get("path")?.as_str())
+        .filter_map(|p| {
+            path_matcher
+                .captures(p)?
+                .get(1)
+                .map(|m| m.as_str().to_owned())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod remote_search_tests {
+    use super::*;
+
+    #[test]
+    fn multi_query_alternation_stays_anchored() {
+        // `search a b` joins queries with `|`; the group must keep the
+        // `.*` anchors around the whole alternation.
+        let matcher = remote_path_matcher("q1|q2").unwrap();
+        assert!(matcher.is_match("bucket/aq1b.json"));
+        assert!(matcher.is_match("bucket/q2.json"));
+        assert!(!matcher.is_match("bucket/other.json"));
+        assert!(!matcher.is_match("bucket/q1b.txt"));
+    }
+
+    #[test]
+    fn cache_clear_spares_manifest_db() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-cache-db");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = dir.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("manifests.db"), b"db").unwrap();
+        std::fs::write(cache.join("junk.download"), b"x").unwrap();
+        std::env::set_var("SCOOP_CACHE", &cache);
+        let session = Session::new();
+
+        super::cache_remove(&session, "*").unwrap();
+        assert!(cache.join("manifests.db").is_file());
+        assert!(!cache.join("junk.download").exists());
+
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn checkver_url_prefers_releases_page_for_github_shorthand() {
+        use crate::package::manifest::Manifest;
+
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://github.com/owner/repo",
+                "license": "MIT", "checkver": "github"}"#,
+            std::path::Path::new("cv-url.json"),
+        )
+        .unwrap();
+        let checkver = manifest.checkver();
+        assert_eq!(
+            super::checkver_url(checkver, manifest.homepage()),
+            "https://github.com/owner/repo/releases/latest"
+        );
+        // Explicit urls and non-github homepages are untouched.
+        assert_eq!(
+            super::checkver_url(None, "https://example.com/app"),
+            "https://example.com/app"
+        );
+    }
+}
+
+/// Fetch a GitHub API URL, authenticating when a token is configured
+/// (upstream `Bearer` + API-version headers).
+///
+/// Returns `None` on transport failure and non-200 responses, with
+/// upstream's hints on auth (`Token might be misconfigured`) and
+/// rate-limit failures.
+fn github_api_get(session: &Session, url: &str, proxy: Option<&str>) -> Option<String> {
+    let token = github_token(session);
+    let bearer;
+    let mut headers = vec![
+        ("Accept", "application/vnd.github+json"),
+        ("X-GitHub-Api-Version", "2022-11-28"),
+    ];
+    if let Some(token) = token.as_deref() {
+        bearer = format!("Bearer {token}");
+        headers.push(("Authorization", bearer.as_str()));
+    }
+    let (code, body) = internal::network::fetch_url_with_headers(url, proxy, &headers)?;
+    if code == 401 {
+        eprintln!("warning: GitHub request was unauthorized; token might be misconfigured.");
+        return None;
+    }
+    if code == 403 && body.contains("rate limit") {
+        eprintln!(
+            "warning: GitHub API rate limit reached. Configure a token via 'bagger config set gh_token <token>'."
+        );
+        return None;
+    }
+    if code != 200 {
+        return None;
+    }
+    Some(body)
+}
+
+/// Resolve a site-specific hash, returning `None` when the lookup fails
+/// (the caller then falls back to downloading the asset).
+fn resolve_site_hash(
+    session: &Session,
+    mode: &SiteMode,
+    asset_url: &str,
+    basename: &str,
+    proxy: Option<&str>,
+) -> Option<String> {
+    match mode {
+        SiteMode::Fosshub { filename } => {
+            let body = internal::network::fetch_url(asset_url, proxy)?;
+            fosshub_hash_in_page(&body, filename)
+        }
+        SiteMode::Sourceforge { project, file } => {
+            // The checksums live on the project files page, not the
+            // (mirror-bounced) download URL.
+            let page = format!("https://sourceforge.net/projects/{project}/files/{file}");
+            let dir = page.rsplit_once('/').map(|(d, _)| d).unwrap_or(&page);
+            let body = internal::network::fetch_url(dir, proxy)?;
+            sourceforge_hash_in_page(&body, basename)
+        }
+        SiteMode::Github { owner, repo } => {
+            let api = format!("https://api.github.com/repos/{owner}/{repo}/releases");
+            let body = github_api_get(session, &api, proxy)?;
+            github_asset_digest(&body, asset_url)
+        }
+    }
+}
+
+/// Find a fosshub-embedded sha256 for `filename` in a download page.
+fn fosshub_hash_in_page(page: &str, filename: &str) -> Option<String> {
+    let pattern = format!(
+        r#"{}.*?"sha256":"([a-fA-F0-9]{{64}})"#,
+        regex::escape(filename)
+    );
+    regex::Regex::new(&pattern)
+        .ok()?
+        .captures(page)?
+        .get(1)
+        .and_then(|m| format_hash_value(m.as_str()))
+}
+
+/// Find a sha1 for `basename` in a SourceForge project files page.
+fn sourceforge_hash_in_page(page: &str, basename: &str) -> Option<String> {
+    let pattern = format!(
+        r#""{}":.*?"sha1":\s*"([a-fA-F0-9]{{40}})"#,
+        regex::escape(basename)
+    );
+    regex::Regex::new(&pattern)
+        .ok()?
+        .captures(page)?
+        .get(1)
+        .and_then(|m| format_hash_value(m.as_str()))
+}
+
+/// Find the `digest` of a release asset by its download URL.
+fn github_asset_digest(releases_json: &str, origin_url: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(releases_json).ok()?;
+    for release in json.as_array()? {
+        for asset in release.get("assets")?.as_array()? {
+            if asset.get("browser_download_url")?.as_str()? == origin_url {
+                let digest = asset.get("digest")?.as_str()?;
+                let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+                return format_hash_value(hex);
+            }
+        }
+    }
+    None
+}
+
+/// Find a `sha256` digest in an RDF document for the given basename.
+///
+/// Mirrors upstream `find_hash_in_rdf`: `<Content about="basename">` entries
+/// carrying a `sha256` child. Namespace prefixes are ignored.
+fn rdf_sha256(doc_xml: &str, basename: &str) -> Option<String> {
+    let doc = roxmltree::Document::parse(doc_xml).ok()?;
+    let root = doc.root_element();
+    for content in root
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "Content")
+    {
+        let is_ours = content
+            .attributes()
+            .any(|a| a.name() == "about" && a.value() == basename);
+        if !is_ours {
+            continue;
+        }
+        for child in content.children().filter(|n| n.is_element()) {
+            if child.tag_name().name() == "sha256" {
+                if let Some(hash) = xpath_text_content(&child)
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .and_then(format_hash_value)
+                {
+                    return Some(hash);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the hash for one expanded asset URL, mirroring upstream
+/// `get_hash_for_app`.
+///
+/// `json`/`xpath` modes fetch the hash document and evaluate the
+/// expression; `extract` mode (or a bare URL) searches a text checksum
+/// file; `rdf` reads an RDF digest document; `fosshub`/`sourceforge`/
+/// `github` are detected from the asset URL (or set explicitly) and
+/// resolved from site metadata. `metalink` (needs raw HEAD headers) and
+/// any lookup failure fall back to [`AssetHash::Download`], exactly like
+/// upstream's compute-hashes fallback.
+fn resolve_asset_hash(
+    session: &Session,
+    asset_url: &str,
+    spec: Option<&crate::package::manifest::HashExtraction>,
+    subs: &AutoupdateSubstitutions,
+    proxy: Option<&str>,
+) -> Fallible<AssetHash> {
+    use crate::package::manifest::HashExtractionMode;
+
+    // No hash section: upstream still tries site-specific sources based on
+    // the asset URL before falling back to downloading it.
+    let Some(spec) = spec else {
+        return Ok(match detect_site_mode(asset_url) {
+            Some(site) => {
+                let basename = subs.expand("$basename");
+                match resolve_site_hash(session, &site, asset_url, &basename, proxy) {
+                    Some(hash) => AssetHash::Found(hash),
+                    None => AssetHash::Download,
+                }
+            }
+            None => AssetHash::Download,
+        });
+    };
+
+    // Mode determination mirrors upstream: explicit mode wins, then
+    // jp/jsonpath, then xpath, then a bare URL means extract mode.
+    enum Mode<'a> {
+        Json(&'a str),
+        Xpath(&'a str),
+        Extract(Option<&'a str>),
+        Rdf(Option<&'a str>),
+        Site,
+        Download,
+    }
+    let mode = match &spec.mode {
+        Some(HashExtractionMode::Download) => Mode::Download,
+        Some(HashExtractionMode::Extract) => Mode::Extract(spec.url.as_deref()),
+        Some(HashExtractionMode::Json) => Mode::Json(spec.jsonpath.as_deref().unwrap_or("")),
+        Some(HashExtractionMode::Xpath) => Mode::Xpath(spec.xpath.as_deref().unwrap_or("")),
+        Some(HashExtractionMode::Rdf) => Mode::Rdf(spec.url.as_deref()),
+        // Fosshub/sourceforge/github resolve from the asset URL itself.
+        Some(
+            HashExtractionMode::Fosshub
+            | HashExtractionMode::Sourceforge
+            | HashExtractionMode::Github,
+        ) => Mode::Site,
+        // Metalink (needs raw HEAD headers) and anything else fall back
+        // to downloading the asset.
+        Some(_) => Mode::Download,
+        None => {
+            if spec.jsonpath.is_some() {
+                Mode::Json(spec.jsonpath.as_deref().unwrap_or(""))
+            } else if spec.xpath.is_some() {
+                Mode::Xpath(spec.xpath.as_deref().unwrap_or(""))
+            } else if spec.url.is_some() {
+                Mode::Extract(spec.url.as_deref())
+            } else {
+                Mode::Download
+            }
+        }
+    };
+
+    match mode {
+        Mode::Download => Ok(AssetHash::Download),
+        Mode::Site => match detect_site_mode(asset_url) {
+            Some(site) => {
+                let basename = subs.expand("$basename");
+                match resolve_site_hash(session, &site, asset_url, &basename, proxy) {
+                    Some(hash) => Ok(AssetHash::Found(hash)),
+                    None => Ok(AssetHash::Download),
+                }
+            }
+            None => Ok(AssetHash::Download),
+        },
+        Mode::Rdf(hashfile_url) => {
+            let hashfile_url = hashfile_url.map(|url| subs.expand(url)).unwrap_or_default();
+            if hashfile_url.is_empty() {
+                return Ok(AssetHash::Download);
+            }
+            let Some(body) = internal::network::fetch_url(&hashfile_url, proxy) else {
+                return Ok(AssetHash::Download);
+            };
+            let basename = subs.expand("$basename");
+            match rdf_sha256(&body, &basename) {
+                Some(hash) => Ok(AssetHash::Found(hash)),
+                None => Ok(AssetHash::Download),
+            }
+        }
+        Mode::Json(jsonpath) => {
+            let hashfile_url = subs.expand(spec.url.as_deref().unwrap_or(""));
+            if hashfile_url.is_empty() {
+                return Ok(AssetHash::Download);
+            }
+            let Some(body) = internal::network::fetch_url(&hashfile_url, proxy) else {
+                return Ok(AssetHash::Download);
+            };
+            match eval_jsonpath(&body, &subs.expand(jsonpath)).and_then(|h| format_hash_value(&h)) {
+                Some(hash) => Ok(AssetHash::Found(hash)),
+                None => Ok(AssetHash::Download),
+            }
+        }
+        Mode::Xpath(xpath) => {
+            let hashfile_url = subs.expand(spec.url.as_deref().unwrap_or(""));
+            if hashfile_url.is_empty() {
+                return Ok(AssetHash::Download);
+            }
+            let Some(body) = internal::network::fetch_url(&hashfile_url, proxy) else {
+                return Ok(AssetHash::Download);
+            };
+            match eval_xpath(&body, &subs.expand(xpath)).and_then(|h| format_hash_value(&h)) {
+                Some(hash) => Ok(AssetHash::Found(hash)),
+                None => Ok(AssetHash::Download),
+            }
+        }
+        Mode::Extract(hashfile_url) => {
+            let regex = hash_regex(spec);
+            match hashfile_url {
+                Some(url) => {
+                    let hashfile_url = subs.expand(url);
+                    if hashfile_url.is_empty() {
+                        return Ok(AssetHash::Download);
+                    }
+                    let Some(body) = internal::network::fetch_url(&hashfile_url, proxy) else {
+                        return Ok(AssetHash::Download);
+                    };
+                    let basename = subs.expand("$basename");
+                    match find_hash_in_textfile(&body, &basename, regex, subs) {
+                        Some(hash) => Ok(AssetHash::Found(hash)),
+                        None => Ok(AssetHash::Download),
+                    }
+                }
+                // No hashfile URL: regex applies to the asset URL itself.
+                None => match regex {
+                    Some(pattern) => {
+                        let expanded = subs.expand(pattern);
+                        match regex::Regex::new(&expanded)
+                            .ok()
+                            .and_then(|re| re.captures(asset_url))
+                            .and_then(|caps| caps.get(1))
+                            .and_then(|m| format_hash_value(m.as_str()))
+                        {
+                            Some(hash) => Ok(AssetHash::Found(hash)),
+                            None => Ok(AssetHash::Download),
+                        }
+                    }
+                    None => Ok(AssetHash::Download),
+                },
+            }
+        }
+    }
+}
+
+/// Outcome of [`autoupdate_apply`].
+#[derive(Clone, Debug, Default)]
+pub struct AutoupdateResult {
+    /// The new version that was applied (when `write`).
+    pub version: String,
+    /// Expanded URLs that were downloaded and hashed.
+    pub rewritten_urls: Vec<String>,
+    /// `sha256:…` hashes computed for the rewritten URLs.
+    pub rewritten_hashes: Vec<String>,
+    /// Scopes left untouched, with reasons.
+    pub skipped: Vec<String>,
+    /// Whether the manifest file was rewritten.
+    pub wrote: bool,
+}
+
+/// Expand autoupdate URLs for `latest`, hash the downloads, and optionally
+/// rewrite the bucket manifest.
+///
+/// Only `download`-mode hashes (or a missing `hash` section, which defaults
+/// to download mode) are handled; other modes are reported in
+/// [`AutoupdateResult::skipped`]. URL/hash shapes must match the manifest
+/// (single string vs same-length array) or the scope is skipped rather than
+/// risk corrupting the manifest.
+///
+/// # Errors
+///
+/// Network errors will be returned if an expanded URL cannot be fetched.
+/// One autoupdate URL/hash section with templates expanded for a version.
+#[derive(Clone, Debug)]
+pub(crate) struct ExpandedScope {
+    /// JSON path of the URL field (e.g. `["url"]`).
+    pub url_path: Vec<String>,
+    /// JSON path of the hash field.
+    pub hash_path: Vec<String>,
+    /// Expanded asset URLs.
+    pub urls: Vec<String>,
+    /// Resolved hashes (`algo:value` strings, parallel to `urls`).
+    pub hashes: Vec<String>,
+}
+
+/// Expand all autoupdate URL templates for `version` and resolve their
+/// hashes, without checkver captures.
+///
+/// Templates still holding `$variables` afterwards (e.g. `$match*`
+/// without checkver data) fail: a pinned version cannot be generated from
+/// them. Used for `@version` manifest generation.
+pub(crate) fn autoupdate_expand(
+    session: &Session,
+    package: &Package,
+    version: &str,
+) -> Fallible<Vec<ExpandedScope>> {
+    use crate::package::manifest::{HashExtraction, Vectorized};
+
+    struct Scope<'a> {
+        url_path: Vec<&'static str>,
+        hash_path: Vec<&'static str>,
+        templates: Vec<String>,
+        hash_specs: Option<&'a Vectorized<HashExtraction>>,
+    }
+    let manifest = package.manifest();
+    let Some(autoupdate) = manifest.autoupdate() else {
+        return Ok(vec![]);
+    };
+    let proxy = session.config().proxy().map(|s| s.to_owned());
+
+    let mut scopes: Vec<Scope<'_>> = vec![];
+    if let Some(urls) = autoupdate.url.as_ref() {
+        scopes.push(Scope {
+            url_path: vec!["url"],
+            hash_path: vec!["hash"],
+            templates: urls
+                .devectorize()
+                .into_iter()
+                .map(|s| s.to_owned())
+                .collect(),
+            hash_specs: autoupdate.hash.as_ref(),
+        });
+    }
+    if let Some(arch) = autoupdate.architecture.as_ref() {
+        for (_, url_key, spec) in [
+            ("32bit", "32bit", arch.ia32.as_ref()),
+            ("64bit", "64bit", arch.amd64.as_ref()),
+            ("arm64", "arm64", arch.aarch64.as_ref()),
+        ] {
+            if let Some(spec) = spec {
+                if let Some(urls) = spec.url.as_ref() {
+                    scopes.push(Scope {
+                        url_path: vec!["architecture", url_key, "url"],
+                        hash_path: vec!["architecture", url_key, "hash"],
+                        templates: urls
+                            .devectorize()
+                            .into_iter()
+                            .map(|s| s.to_owned())
+                            .collect(),
+                        hash_specs: spec.hash.as_ref().or(autoupdate.hash.as_ref()),
+                    });
+                }
+            }
+        }
+    }
+    if scopes.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut out = vec![];
+    for scope in &scopes {
+        let expanded: Vec<String> = scope
+            .templates
+            .iter()
+            .map(|t| expand_autoupdate_template(t, version, &[]))
+            .collect();
+        if expanded.iter().any(|u| u.contains('$')) {
+            return Err(Error::Custom(format!(
+                "cannot generate version '{version}': autoupdate URLs need checkver match captures"
+            )));
+        }
+        let specs: Vec<&HashExtraction> = scope
+            .hash_specs
+            .as_ref()
+            .map(|s| s.devectorize())
+            .unwrap_or_default();
+        let mut hashes = vec![];
+        for (idx, url) in expanded.iter().enumerate() {
+            // Fewer extraction templates than URLs: reuse the last one,
+            // mirroring upstream HashHelper.
+            let spec = specs.get(idx).copied().or(specs.last().copied());
+            let subs = AutoupdateSubstitutions {
+                version,
+                asset_url: url,
+                captures: &[],
+            };
+            match resolve_asset_hash(session, url, spec, &subs, proxy.as_deref())? {
+                AssetHash::Found(hash) => hashes.push(hash),
+                AssetHash::Download => {
+                    let bytes =
+                        internal::network::fetch_bytes(url, proxy.as_deref()).ok_or_else(|| {
+                            Error::Custom(format!("failed to download autoupdate URL '{url}'"))
+                        })?;
+                    let mut hasher = bagger_hash::ChecksumBuilder::new().sha256().build();
+                    hasher.consume(&bytes);
+                    hashes.push(format!("sha256:{}", hasher.finalize()));
+                }
+            }
+        }
+        out.push(ExpandedScope {
+            url_path: scope.url_path.iter().map(|s| s.to_string()).collect(),
+            hash_path: scope.hash_path.iter().map(|s| s.to_string()).collect(),
+            urls: expanded,
+            hashes,
+        });
+    }
+    Ok(out)
+}
+
+pub fn autoupdate_apply(
+    session: &Session,
+    package: &Package,
+    latest: &str,
+    captures: &[(String, String)],
+    write: bool,
+) -> Fallible<AutoupdateResult> {
+    use crate::package::manifest::{HashExtraction, Vectorized};
+
+    let manifest = package.manifest();
+    let mut result = AutoupdateResult {
+        version: latest.to_owned(),
+        ..Default::default()
+    };
+
+    let Some(autoupdate) = manifest.autoupdate() else {
+        result.skipped.push("no autoupdate section".to_owned());
+        return Ok(result);
+    };
+
+    let proxy = session.config().proxy().map(|s| s.to_owned());
+
+    // One manifest URL/hash section processed below.
+    struct AutoupdateScope<'a> {
+        label: &'static str,
+        url_path: Vec<&'static str>,
+        hash_path: Vec<&'static str>,
+        templates: Vec<String>,
+        hash_specs: Option<&'a Vectorized<HashExtraction>>,
+    }
+    let mut scopes: Vec<AutoupdateScope<'_>> = vec![];
+
+    if let Some(urls) = autoupdate.url.as_ref() {
+        scopes.push(AutoupdateScope {
+            label: "noarch",
+            url_path: vec!["url"],
+            hash_path: vec!["hash"],
+            templates: urls
+                .devectorize()
+                .into_iter()
+                .map(|s| s.to_owned())
+                .collect(),
+            hash_specs: autoupdate.hash.as_ref(),
+        });
+    }
+
+    if let Some(arch) = autoupdate.architecture.as_ref() {
+        for (label, url_key, spec) in [
+            ("32bit", "32bit", arch.ia32.as_ref()),
+            ("64bit", "64bit", arch.amd64.as_ref()),
+            ("arm64", "arm64", arch.aarch64.as_ref()),
+        ] {
+            if let Some(spec) = spec {
+                if let Some(urls) = spec.url.as_ref() {
+                    scopes.push(AutoupdateScope {
+                        label,
+                        url_path: vec!["architecture", url_key, "url"],
+                        hash_path: vec!["architecture", url_key, "hash"],
+                        templates: urls
+                            .devectorize()
+                            .into_iter()
+                            .map(|s| s.to_owned())
+                            .collect(),
+                        hash_specs: spec.hash.as_ref().or(autoupdate.hash.as_ref()),
+                    });
+                }
+            }
+        }
+    }
+
+    if scopes.is_empty() {
+        result
+            .skipped
+            .push("autoupdate has no URL templates".to_owned());
+    }
+
+    // Load the raw manifest JSON once for shape checks and rewriting.
+    let manifest_path = manifest.path().to_owned();
+    let mut manifest_json: serde_json::Value = if write {
+        let raw = std::fs::read_to_string(&manifest_path)?;
+        serde_json::from_str(&raw)?
+    } else {
+        serde_json::Value::Null
+    };
+
+    for scope in &scopes {
+        let AutoupdateScope {
+            label,
+            url_path,
+            hash_path,
+            templates,
+            hash_specs,
+        } = scope;
+        let specs: Vec<_> = hash_specs.map(|s| s.devectorize()).unwrap_or_default();
+
+        let expanded: Vec<String> = templates
+            .iter()
+            .map(|t| expand_autoupdate_template(t, latest, captures))
+            .collect();
+
+        // Shape check against the current manifest (only meaningful — and
+        // only performed — when writing).
+        if write {
+            let current_urls = url_path
+                .iter()
+                .try_fold(&manifest_json, |v, k| v.get(*k))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let shape_ok = match &current_urls {
+                serde_json::Value::String(_) => expanded.len() == 1,
+                serde_json::Value::Array(arr) => arr.len() == expanded.len(),
+                // Missing URL section: don't invent structure.
+                _ => false,
+            };
+            if !shape_ok {
+                result.skipped.push(format!(
+                    "{label}: template count ({}) does not match manifest URLs; left untouched",
+                    expanded.len()
+                ));
+                continue;
+            }
+        }
+
+        let mut hashes = vec![];
+        for (idx, url) in expanded.iter().enumerate() {
+            // Fewer extraction templates than URLs: reuse the last one,
+            // mirroring upstream HashHelper.
+            let spec = specs.get(idx).copied().or(specs.last().copied());
+            let subs = AutoupdateSubstitutions {
+                version: latest,
+                asset_url: url,
+                captures,
+            };
+            match resolve_asset_hash(session, url, spec, &subs, proxy.as_deref())? {
+                AssetHash::Found(hash) => hashes.push(hash),
+                AssetHash::Download => {
+                    let bytes =
+                        internal::network::fetch_bytes(url, proxy.as_deref()).ok_or_else(|| {
+                            Error::Custom(format!("failed to download autoupdate URL '{url}'"))
+                        })?;
+                    let mut hasher = bagger_hash::ChecksumBuilder::new().sha256().build();
+                    hasher.consume(&bytes);
+                    hashes.push(format!("sha256:{}", hasher.finalize()));
+                }
+            }
+        }
+
+        result.rewritten_urls.extend(expanded.iter().cloned());
+        result.rewritten_hashes.extend(hashes.iter().cloned());
+
+        if write {
+            set_json_path(&mut manifest_json, url_path, string_or_array(&expanded));
+            set_json_path(&mut manifest_json, hash_path, string_or_array(&hashes));
+        }
+    }
+
+    if write {
+        manifest_json["version"] = serde_json::Value::String(latest.to_owned());
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest_json)?,
+        )?;
+        result.wrote = true;
+    }
+
+    Ok(result)
+}
+
+/// Build a JSON string or array of strings, mirroring manifest shape.
+pub(crate) fn string_or_array(values: &[String]) -> serde_json::Value {
+    if values.len() == 1 {
+        serde_json::Value::String(values[0].clone())
+    } else {
+        serde_json::Value::Array(
+            values
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
+        )
+    }
+}
+
+/// Set a nested value in manifest JSON, creating intermediate objects.
+pub(crate) fn set_json_path(root: &mut serde_json::Value, path: &[&str], value: serde_json::Value) {
+    let mut current = root;
+    for (idx, key) in path.iter().enumerate() {
+        if idx + 1 == path.len() {
+            current[*key] = value;
+            return;
+        }
+        if !current.get(*key).map(|v| v.is_object()).unwrap_or(false) {
+            current[*key] = serde_json::Value::Object(serde_json::Map::new());
+        }
+        current = &mut current[*key];
+    }
+}
+
+/// Evaluate a minimal JSONPath expression against a JSON document.
+///
+/// Supports the Scoop-flavored subset used by `checkver.jsonpath`: a `$`
+/// root followed by dot-separated object keys with optional `[n]` array
+/// indices (e.g. `$.tag_name`, `$.releases[0].version`). Only scalar results
+/// (strings, numbers, booleans) yield a value.
+fn eval_jsonpath(content: &str, path: &str) -> Option<String> {
+    let rest = path.trim().strip_prefix('$')?;
+    let rest = rest.strip_prefix('.').unwrap_or(rest);
+
+    let json: serde_json::Value = serde_json::from_str(content).ok()?;
+    if rest.is_empty() {
+        return jsonpath_scalar(&json);
+    }
+
+    let mut current = &json;
+    for part in rest.split('.') {
+        let (key, bracketed) = match part.find('[') {
+            Some(idx) => (&part[..idx], &part[idx..]),
+            None => (part, ""),
+        };
+
+        if !key.is_empty() {
+            current = current.get(key)?;
+        }
+
+        let mut rest = bracketed;
+        while let Some(inner) = rest.strip_prefix('[') {
+            let end = inner.find(']')?;
+            let index: usize = inner[..end].parse().ok()?;
+            current = current.get(index)?;
+            rest = &inner[end + 1..];
+        }
+        if !rest.is_empty() {
+            return None;
+        }
+    }
+
+    jsonpath_scalar(current)
+}
+
+/// Render a JSON scalar as a version string.
+fn jsonpath_scalar(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// A parsed step of the XPath subset supported by [`eval_xpath`].
+enum XPathStep<'a> {
+    /// Element test with optional position/attribute filters.
+    Element {
+        /// `true` for `//` (descendant) steps, `false` for `/` (child) steps.
+        descendant: bool,
+        /// Tag name to match, or `None` for the `*` wildcard.
+        tag: Option<&'a str>,
+        /// 1-based position filter (`tag[n]`), if any.
+        position: Option<usize>,
+        /// Attribute predicate (`tag[@attr='value']`), if any.
+        attr_filter: Option<(&'a str, &'a str)>,
+    },
+    /// Trailing `text()` step (element text content).
+    Text,
+    /// Trailing `@attr` step (attribute value).
+    Attribute(&'a str),
+}
+
+/// Evaluate a small XPath subset against an XML document.
+///
+/// Supported steps, joined by `/` (child) or `//` (descendant search):
+/// `tag`, `*`, `tag[n]` (1-based), `tag[@attr='value']`, plus a trailing
+/// `text()` (element text) or `@attr` (attribute value) step. Returns the
+/// first matching string value, if any.
+fn eval_xpath(content: &str, path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() || path.starts_with("string(") {
+        return None;
+    }
+
+    // Split into steps, tracking the `/` vs `//` axis of each.
+    let mut steps: Vec<XPathStep<'_>> = vec![];
+    let mut rest = path;
+    let mut first = true;
+    while !rest.is_empty() {
+        let (descendant, step) = if let Some(s) = rest.strip_prefix("//") {
+            (true, s)
+        } else if let Some(s) = rest.strip_prefix('/') {
+            (false, s)
+        } else if first {
+            (false, rest)
+        } else {
+            return None;
+        };
+        first = false;
+
+        // A step ends at the next `/` outside brackets and quotes
+        // (attribute values such as MIME types may contain `/`).
+        let (head, tail) = split_xpath_step(step);
+        if head.is_empty() {
+            return None;
+        }
+        steps.push(parse_xpath_step(head, descendant)?);
+        rest = tail;
+    }
+    if steps.is_empty() {
+        return None;
+    }
+
+    let doc = roxmltree::Document::parse(content).ok()?;
+
+    let mut current: Vec<roxmltree::Node<'_, '_>> = vec![doc.root()];
+    for (idx, step) in steps.iter().enumerate() {
+        let is_last = idx + 1 == steps.len();
+        match step {
+            XPathStep::Element {
+                descendant,
+                tag,
+                position,
+                attr_filter,
+            } => {
+                current = apply_xpath_element(&current, *descendant, *tag, *position, *attr_filter);
+            }
+            XPathStep::Text => {
+                if !is_last {
+                    return None;
+                }
+                return first_non_empty(current.iter().filter_map(xpath_text_content));
+            }
+            XPathStep::Attribute(attr) => {
+                if !is_last {
+                    return None;
+                }
+                return first_non_empty(
+                    current
+                        .iter()
+                        .filter_map(|n| n.attribute(*attr))
+                        .map(str::trim),
+                );
+            }
+        }
+        if current.is_empty() {
+            return None;
+        }
+    }
+
+    // A bare element path yields the first element's text content.
+    first_non_empty(current.iter().filter_map(xpath_text_content))
+}
+
+/// Apply one element step to a node set.
+fn apply_xpath_element<'a, 'input>(
+    nodes: &[roxmltree::Node<'a, 'input>],
+    descendant: bool,
+    tag: Option<&str>,
+    position: Option<usize>,
+    attr_filter: Option<(&str, &str)>,
+) -> Vec<roxmltree::Node<'a, 'input>> {
+    let matches = |n: &roxmltree::Node<'_, '_>| {
+        tag.map(|t| n.tag_name().name() == t).unwrap_or(true)
+            && attr_filter
+                .map(|(attr, value)| n.attribute(attr) == Some(value))
+                .unwrap_or(true)
+    };
+
+    let mut out = vec![];
+    if descendant {
+        // `//tag`: all matching descendants in document order.
+        for node in nodes {
+            out.extend(
+                node.descendants()
+                    .filter(|n| n.is_element())
+                    .filter(matches),
+            );
+        }
+        if let Some(n) = position {
+            out = out.into_iter().skip(n - 1).take(1).collect();
+        }
+    } else {
+        // `tag`: matching element children, `[n]` per parent.
+        for node in nodes {
+            let mut children = node
+                .children()
+                .filter(|n| n.is_element())
+                .filter(matches)
+                .peekable();
+            if children.peek().is_none() {
+                continue;
+            }
+            match position {
+                Some(n) => out.extend(children.skip(n - 1).take(1)),
+                None => out.extend(children),
+            }
+        }
+    }
+    out
+}
+
+/// Concatenated text content of an element's descendants.
+///
+/// Note: `descendants()` includes the node itself, and `text()` on an
+/// element returns its first text child, so only `Text` nodes are collected
+/// to avoid double counting.
+fn xpath_text_content(node: &roxmltree::Node<'_, '_>) -> Option<String> {
+    let mut text = String::new();
+    for descendant in node.descendants() {
+        if descendant.is_text() {
+            if let Some(t) = descendant.text() {
+                text.push_str(t);
+            }
+        }
+    }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// First non-empty trimmed string from an iterator.
+fn first_non_empty(iter: impl Iterator<Item = impl AsRef<str>>) -> Option<String> {
+    iter.map(|s| s.as_ref().trim().to_owned())
+        .find(|s| !s.is_empty())
+}
+
+/// Split the leading XPath step from the remainder.
+///
+/// The step ends at the next `/` that appears outside `[...]` brackets and
+/// outside single/double quotes, since attribute values may contain `/`
+/// (e.g. `[@type='application/zip']`).
+fn split_xpath_step(step: &str) -> (&str, &str) {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for (idx, ch) in step.char_indices() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '[' => depth += 1,
+                ']' => depth = depth.saturating_sub(1),
+                '/' if depth == 0 => return step.split_at(idx),
+                _ => {}
+            },
+        }
+    }
+    (step, "")
+}
+
+/// Parse one XPath step (without any leading `/`).
+fn parse_xpath_step(step: &str, descendant: bool) -> Option<XPathStep<'_>> {
+    if step == "text()" {
+        return Some(XPathStep::Text);
+    }
+    if let Some(attr) = step.strip_prefix('@') {
+        if !attr.is_empty() && !attr.contains(['[', ']', '/', '\'', '"']) {
+            return Some(XPathStep::Attribute(attr));
+        }
+        return None;
+    }
+
+    // Bracketed suffix: `[n]` or `[@attr='value']`.
+    let (head, bracket) = match step.find('[') {
+        Some(idx) => {
+            let (h, b) = step.split_at(idx);
+            if !b.ends_with(']') {
+                return None;
+            }
+            (h, Some(&b[1..b.len() - 1]))
+        }
+        None => (step, None),
+    };
+
+    let mut tag: Option<&str> = None;
+    let mut position: Option<usize> = None;
+    let mut attr_filter: Option<(&str, &str)> = None;
+
+    match head {
+        "" | "*" => {}
+        tag_name => tag = Some(tag_name),
+    }
+
+    if let Some(pred) = bracket {
+        if let Ok(num) = pred.parse::<usize>() {
+            if num == 0 {
+                return None;
+            }
+            position = Some(num);
+        } else {
+            let inner = pred.strip_prefix('@')?;
+            let (attr, value) = inner.split_once('=')?;
+            let value = value.trim();
+            let unquoted = value
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+                .or_else(|| value.strip_prefix('"').and_then(|v| v.strip_suffix('"')))?;
+            attr_filter = Some((attr.trim(), unquoted));
+        }
+    }
+
+    Some(XPathStep::Element {
+        descendant,
+        tag,
+        position,
+        attr_filter,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        eval_jsonpath, eval_xpath, expand_autoupdate_template, expand_replace,
+        find_hash_in_textfile, format_hash_value, match_version, AutoupdateSubstitutions,
+    };
+    use crate::package::manifest::Manifest;
+    use crate::package::Package;
+    use crate::Session;
+
+    /// Global scope must reroute root-derived paths to the global root.
+    #[test]
+    fn install_dir_respects_global_scope() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-global-scope");
+        let user_root = dir.join("user");
+        let global_root = dir.join("global");
+        std::env::set_var("SCOOP", &user_root);
+        std::env::set_var("SCOOP_GLOBAL", &global_root);
+        let session = Session::new();
+
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+            std::path::Path::new("scope.json"),
+        )
+        .unwrap();
+        let pkg = Package::from("scopeapp", "main", manifest);
+
+        assert_eq!(
+            super::install_dir(&session, &pkg),
+            user_root.join("apps").join("scopeapp").join("current")
+        );
+
+        session.set_global(true).unwrap();
+        assert_eq!(
+            super::install_dir(&session, &pkg),
+            global_root.join("apps").join("scopeapp").join("current")
+        );
+
+        session.set_global(false).unwrap();
+        assert_eq!(
+            super::install_dir(&session, &pkg),
+            user_root.join("apps").join("scopeapp").join("current")
+        );
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bucket_remove_rejects_unsafe_names() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-bucket-rm-guard");
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("root");
+        std::fs::create_dir_all(root.join("buckets/realb")).unwrap();
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", dir.join("global"));
+        std::env::set_var("SCOOP_CACHE", dir.join("cache"));
+        let session = Session::new();
+
+        for evil in [
+            "", ".", "..", "../other", "a/b", "a\\b", "C:\\temp", "C:/temp",
+        ] {
+            let err = super::bucket_remove(&session, evil).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid bucket name"),
+                "{evil}: {err}"
+            );
+        }
+        // The root and the real bucket both survive the attempts.
+        assert!(root.is_dir());
+        assert!(root.join("buckets/realb").is_dir());
+
+        // A real bucket still removes fine.
+        super::bucket_remove(&session, "realb").unwrap();
+        assert!(!root.join("buckets/realb").exists());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn jsonpath_object_keys() {
+        let doc = r#"{"tag_name": "v1.2.3"}"#;
+        assert_eq!(eval_jsonpath(doc, "$.tag_name").as_deref(), Some("v1.2.3"));
+    }
+
+    #[test]
+    fn jsonpath_nested_with_index() {
+        let doc = r#"{"releases": [{"version": "2.0"}, {"version": "1.0"}]}"#;
+        assert_eq!(
+            eval_jsonpath(doc, "$.releases[0].version").as_deref(),
+            Some("2.0")
+        );
+    }
+
+    #[test]
+    fn jsonpath_scalars_and_misses() {
+        let doc = r#"{"build": 42, "stable": true, "items": [1, 2]}"#;
+        assert_eq!(eval_jsonpath(doc, "$.build").as_deref(), Some("42"));
+        assert_eq!(eval_jsonpath(doc, "$.stable").as_deref(), Some("true"));
+        assert_eq!(eval_jsonpath(doc, "$.missing"), None);
+        assert_eq!(eval_jsonpath(doc, "$.items"), None);
+        assert_eq!(eval_jsonpath(doc, "tag_name"), None);
+        assert_eq!(eval_jsonpath(doc, "$.items[9]"), None);
+    }
+
+    const FEED: &str = r#"<?xml version="1.0"?>
+        <rss version="2.0">
+          <channel>
+            <title>Example</title>
+            <item><title>Release 2.0</title><enclosure url="https://example.com/a-2.0.zip" type="application/zip"/></item>
+            <item><title>Release 1.0</title><enclosure url="https://example.com/a-1.0.zip" type="application/zip"/></item>
+          </channel>
+        </rss>"#;
+
+    #[test]
+    fn xpath_absolute_and_descendant() {
+        assert_eq!(
+            eval_xpath(FEED, "/rss/channel/title").as_deref(),
+            Some("Example")
+        );
+        assert_eq!(
+            eval_xpath(FEED, "//item/title").as_deref(),
+            Some("Release 2.0")
+        );
+    }
+
+    #[test]
+    fn xpath_position_attribute_and_text() {
+        assert_eq!(
+            eval_xpath(FEED, "//item[2]/title/text()").as_deref(),
+            Some("Release 1.0")
+        );
+        assert_eq!(
+            eval_xpath(FEED, "//enclosure[@type='application/zip']/@url").as_deref(),
+            Some("https://example.com/a-2.0.zip")
+        );
+    }
+
+    #[test]
+    fn xpath_misses() {
+        assert_eq!(eval_xpath(FEED, "//missing"), None);
+        assert_eq!(eval_xpath(FEED, "//item[9]/title"), None);
+        assert_eq!(eval_xpath(FEED, "//item[0]/title"), None);
+        assert_eq!(eval_xpath(FEED, "not a path !!!"), None);
+        assert_eq!(eval_xpath("not xml at all", "//item"), None);
+    }
+
+    #[test]
+    fn version_match_first_and_reverse() {
+        let page = "dl v1.0 dl v2.0";
+        let first = match_version(page, Some("v([\\d.]+)"), false, None).unwrap();
+        assert_eq!(first.text, "1.0");
+        let last = match_version(page, Some("v([\\d.]+)"), true, None).unwrap();
+        assert_eq!(last.text, "2.0");
+        assert!(match_version(page, None, false, None).is_none());
+    }
+
+    #[test]
+    fn version_replace_templates() {
+        let page = "sysinternals suite 2024-06-01";
+        let m = match_version(
+            page,
+            Some("suite (?<year>\\d{4})-(?<rest>\\d{2}-\\d{2})"),
+            false,
+            Some("$year.$rest"),
+        )
+        .unwrap();
+        assert_eq!(m.text, "2024.06-01");
+
+        // Numbered groups, ${} form and $$ escaping.
+        assert_eq!(
+            expand_replace("${1}-x", &[("1".to_owned(), "2.0".to_owned())]),
+            "2.0-x"
+        );
+        assert_eq!(
+            expand_replace("$$1 $9", &[("1".to_owned(), "2.0".to_owned())]),
+            "$1 "
+        );
+    }
+
+    /// Upstream `Get-GitHubToken` precedence: `SCOOP_GH_TOKEN`, config
+    /// `gh_token`, `GH_TOKEN`, `GITHUB_TOKEN`; empty values are ignored.
+    #[test]
+    fn github_token_precedence() {
+        let _guard = crate::test_support::env_guard();
+        for var in ["SCOOP_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+            std::env::remove_var(var);
+        }
+        let base = std::env::temp_dir().join("bagger-test-ghtoken");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("config.json"), "{}").unwrap();
+        let session = crate::Session::new_with(base.join("config.json")).unwrap();
+
+        assert_eq!(super::github_token(&session), None);
+        std::env::set_var("GITHUB_TOKEN", "tok-github");
+        assert_eq!(super::github_token(&session), Some("tok-github".to_owned()));
+        std::env::set_var("GH_TOKEN", "tok-gh");
+        assert_eq!(super::github_token(&session), Some("tok-gh".to_owned()));
+        session
+            .config_mut()
+            .unwrap()
+            .set("gh_token", "tok-cfg")
+            .unwrap();
+        assert_eq!(super::github_token(&session), Some("tok-cfg".to_owned()));
+        std::env::set_var("SCOOP_GH_TOKEN", "tok-scoop");
+        assert_eq!(super::github_token(&session), Some("tok-scoop".to_owned()));
+        std::env::set_var("SCOOP_GH_TOKEN", "");
+        assert_eq!(super::github_token(&session), Some("tok-cfg".to_owned()));
+
+        for var in ["SCOOP_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+            std::env::remove_var(var);
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `private_hosts` entries contribute headers only to matching URLs;
+    /// both `=` and `:` separators work, and bad regexes never match.
+    #[test]
+    fn private_host_headers_match_urls() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-privhosts");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("config.json"), "{}").unwrap();
+        let session = crate::Session::new_with(base.join("config.json")).unwrap();
+        session
+            .config_mut()
+            .unwrap()
+            .set(
+                "private_hosts",
+                r#"[{"match": "example\\.com", "headers": "Authorization=Bearer abc\nX-Custom: 1;"}]"#,
+            )
+            .unwrap();
+
+        let headers = super::headers_for_url(&session, "https://example.com/f.7z");
+        assert!(headers.contains(&("Authorization".to_owned(), "Bearer abc".to_owned())));
+        assert!(headers.contains(&("X-Custom".to_owned(), "1".to_owned())));
+        assert!(super::headers_for_url(&session, "https://other.org/f.7z").is_empty());
+
+        // An invalid regex is ignored rather than fatal.
+        session
+            .config_mut()
+            .unwrap()
+            .set("private_hosts", r#"[{"match": "([", "headers": "A=B"}]"#)
+            .unwrap();
+        assert!(super::headers_for_url(&session, "https://example.com/f.7z").is_empty());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Special-URL handling (upstream `handle_special_urls`): FossHub page
+    /// URLs split into project/file groups, SourceForge `/download` URLs
+    /// reshape to the direct mirror form, everything else passes through
+    /// untouched (and without network).
+    #[test]
+    fn special_url_transforms() {
+        assert_eq!(
+            super::split_fosshub_url(
+                "https://www.fosshub.com/qBittorrent.html?dwl=qb_4.6.7_x64_setup.exe"
+            ),
+            Some((
+                "qBittorrent.html".to_owned(),
+                "qb_4.6.7_x64_setup.exe".to_owned()
+            ))
+        );
+        assert_eq!(
+            super::split_fosshub_url("https://www.fosshub.com/Foo/Bar/baz-2.0.zip"),
+            Some(("Foo/Bar".to_owned(), "baz-2.0.zip".to_owned()))
+        );
+        assert_eq!(super::split_fosshub_url("https://example.com/a.zip"), None);
+
+        assert_eq!(
+            super::reshape_sourceforge_url(
+                "https://sourceforge.net/projects/sevenzip/files/7-Zip/24.09/7z2409-x64.exe/download"
+            ),
+            Some("https://downloads.sourceforge.net/project/sevenzip/7-Zip/24.09/7z2409-x64.exe".to_owned())
+        );
+        assert_eq!(
+            super::reshape_sourceforge_url("https://example.com/a.zip"),
+            None
+        );
+
+        // Passthrough never touches the network (hermetic session: no
+        // token anywhere, so the GitHub arm bails before any fetch).
+        let _guard = crate::test_support::env_guard();
+        for var in ["SCOOP_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+            std::env::remove_var(var);
+        }
+        let base = std::env::temp_dir().join("bagger-test-special-url");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("config.json"), "{}").unwrap();
+        let session = crate::Session::new_with(base.join("config.json")).unwrap();
+        assert_eq!(
+            super::resolve_special_url(&session, "https://example.com/a.zip", None),
+            "https://example.com/a.zip"
+        );
+        // Without a token, GitHub release URLs pass through untouched.
+        assert_eq!(
+            super::resolve_special_url(
+                &session,
+                "https://github.com/o/r/releases/download/v1/a.zip",
+                None
+            ),
+            "https://github.com/o/r/releases/download/v1/a.zip"
+        );
+
+        for var in ["SCOOP_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+            std::env::remove_var(var);
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// GitHub release URL splitting and asset picking (pure parts of the
+    /// private-release flow; the API calls need a token and a network).    /// Remote bucket search parts: repo URL splitting and tree-path
+    /// filtering (the API fetch itself needs a network).
+    #[test]
+    fn remote_bucket_search_parts() {
+        assert_eq!(
+            super::split_github_repo("https://github.com/ScoopInstaller/Main"),
+            Some(("ScoopInstaller".to_owned(), "Main".to_owned()))
+        );
+        assert_eq!(
+            super::split_github_repo("https://github.com/ScoopInstaller/Main.git"),
+            Some(("ScoopInstaller".to_owned(), "Main".to_owned()))
+        );
+        assert_eq!(super::split_github_repo("https://example.com/x/y"), None);
+        assert_eq!(
+            super::split_github_repo("https://github.com/onlyowner"),
+            None
+        );
+
+        let body = r#"{"tree": [
+            {"path": "bucket/argyllcms.json"},
+            {"path": "bucket/README.md"},
+            {"path": "other/argyllcms.json"}
+        ]}"#;
+        let matcher = regex::RegexBuilder::new("^bucket/(.*argyll.*)\\.json$")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        assert_eq!(
+            super::remote_manifest_names(body, &matcher),
+            vec!["argyllcms".to_owned()]
+        );
+        assert!(super::remote_manifest_names("not json", &matcher).is_empty());
+    }
+
+    #[test]
+    fn github_private_url_parts() {
+        assert_eq!(
+            super::split_github_release_url(
+                "https://github.com/owner/repo/releases/download/v2.0/app.zip"
+            ),
+            Some((
+                "owner".to_owned(),
+                "repo".to_owned(),
+                "v2.0".to_owned(),
+                "app.zip".to_owned(),
+                String::new()
+            ))
+        );
+        assert_eq!(
+            super::split_github_release_url(
+                "https://github.com/o/r/releases/download/v1/a.zip#/dl.7z"
+            ),
+            Some((
+                "o".to_owned(),
+                "r".to_owned(),
+                "v1".to_owned(),
+                "a.zip".to_owned(),
+                "#/dl.7z".to_owned()
+            ))
+        );
+        assert_eq!(
+            super::split_github_release_url("https://example.com/a.zip"),
+            None
+        );
+
+        let releases = r#"{"assets": [
+            {"name": "other.zip", "url": "https://api.github.com/repos/o/r/releases/assets/1"},
+            {"name": "a.zip", "url": "https://api.github.com/repos/o/r/releases/assets/2"}
+        ]}"#;
+        assert_eq!(
+            super::pick_github_asset(releases, "a.zip", ""),
+            Some("https://api.github.com/repos/o/r/releases/assets/2".to_owned())
+        );
+        assert_eq!(super::pick_github_asset(releases, "missing.zip", ""), None);
+        assert_eq!(super::pick_github_asset("not json", "a.zip", ""), None);
+    }
+
+    /// `api.github.com` asset downloads carry the octet-stream Accept
+    /// header, plus `Bearer` auth when a token is configured.
+    #[test]
+    fn github_download_headers_cover_api_assets() {
+        let _guard = crate::test_support::env_guard();
+        for var in ["SCOOP_GH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+            std::env::remove_var(var);
+        }
+        let base = std::env::temp_dir().join("bagger-test-ghheaders");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("config.json"), "{}").unwrap();
+        let session = crate::Session::new_with(base.join("config.json")).unwrap();
+
+        let api = "https://api.github.com/repos/o/r/releases/assets/2";
+        let headers = super::github_download_headers(&session, api);
+        assert!(headers.contains(&("Accept".to_owned(), "application/octet-stream".to_owned())));
+        assert!(!headers.iter().any(|(k, _)| k == "Authorization"));
+
+        std::env::set_var("GITHUB_TOKEN", "tok-test");
+        let headers = super::github_download_headers(&session, api);
+        assert!(headers.contains(&("Authorization".to_owned(), "Bearer tok-test".to_owned())));
+
+        // Plain URLs get nothing.
+        assert!(super::github_download_headers(&session, "https://example.com/a.zip").is_empty());
+
+        std::env::remove_var("GITHUB_TOKEN");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn github_mode_falls_back_to_download() {
+        use crate::package::manifest::{HashExtraction, HashExtractionMode};
+
+        let spec = HashExtraction {
+            find: None,
+            regex: None,
+            jsonpath: None,
+            xpath: None,
+            mode: Some(HashExtractionMode::Github),
+            url: None,
+        };
+        let subs = AutoupdateSubstitutions {
+            version: "2.0",
+            asset_url: "https://example.com/a-2.0.zip",
+            captures: &[],
+        };
+        // Site-specific hash modes fall back to downloading the asset
+        // (no network happens on this path).
+        let session = crate::Session::new();
+        match super::resolve_asset_hash(&session, subs.asset_url, Some(&spec), &subs, None).unwrap()
+        {
+            super::AssetHash::Download => {}
+            super::AssetHash::Found(hash) => panic!("unexpected resolved hash {hash}"),
+        }
+    }
+
+    #[test]
+    fn autoupdate_template_expansion() {
+        let captures = vec![
+            ("0".to_owned(), "v2.0".to_owned()),
+            ("1".to_owned(), "2.0".to_owned()),
+            ("tag".to_owned(), "v2.0".to_owned()),
+        ];
+        assert_eq!(
+            expand_autoupdate_template(
+                "https://example.com/$version/app-$match1-$matchTag.zip",
+                "2.0",
+                &captures
+            ),
+            "https://example.com/2.0/app-2.0-v2.0.zip"
+        );
+        // `$match1` must not clobber `$match10`.
+        let captures = vec![
+            ("1".to_owned(), "a".to_owned()),
+            ("10".to_owned(), "b".to_owned()),
+        ];
+        assert_eq!(
+            expand_autoupdate_template("$match10/$match1", "9.9", &captures),
+            "b/a"
+        );
+    }
+
+    /// `checkver.useragent` must be honored when fetching.
+    ///
+    /// Uses a local `file://` document so no network is needed; custom
+    /// headers are simply ignored by the file protocol.
+    #[test]
+    fn checkver_honors_useragent() {
+        let dir = std::env::temp_dir().join("bagger-test-checkver-ua");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ver.json"), r#"{"tag": "9.9.9"}"#).unwrap();
+        let url = format!(
+            "file:///{}/ver.json",
+            dir.to_string_lossy().replace('\\', "/")
+        );
+
+        let json = format!(
+            r#"{{"version": "1.0", "homepage": "https://example.com",
+                "license": "MIT",
+                "checkver": {{"url": "{url}", "jsonpath": "$.tag",
+                               "useragent": "BaggerTest/1.0"}}}}"#
+        );
+        let manifest = Manifest::parse_bytes(json.as_bytes(), &dir.join("ua.json")).unwrap();
+        let pkg = Package::from("ua-pkg", "main", manifest);
+        let session = Session::new();
+
+        let result = super::checkver(&session, &pkg).unwrap();
+        assert_eq!(result.latest_version.as_deref(), Some("9.9.9"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `autoupdate_apply` rewrites version, URLs and download-mode hashes.
+    ///
+    /// Fully offline via `file://` payloads.
+    #[test]
+    fn autoupdate_rewrites_download_hashes() {
+        let dir = std::env::temp_dir().join("bagger-test-autoupdate");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app-2.0.bin"), b"new-bytes").unwrap();
+
+        let payload_url = format!(
+            "file:///{}/app-$version.bin",
+            dir.to_string_lossy().replace('\\', "/")
+        );
+        let json = format!(
+            r#"{{"version": "1.0", "homepage": "https://example.com",
+                "license": "MIT", "url": "file:///nonexistent/app-1.0.bin",
+                "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "autoupdate": {{"url": "{payload_url}"}}}}"#
+        );
+        let manifest_path = dir.join("app.json");
+        std::fs::write(&manifest_path, &json).unwrap();
+        let manifest = Manifest::parse(&manifest_path).unwrap();
+        let pkg = Package::from("app", "main", manifest);
+        let session = Session::new();
+
+        // Dry run rewrites nothing.
+        let dry = super::autoupdate_apply(&session, &pkg, "2.0", &[], false).unwrap();
+        assert!(!dry.wrote);
+        assert_eq!(dry.rewritten_urls.len(), 1);
+        assert!(dry.rewritten_urls[0].ends_with("app-2.0.bin"));
+
+        // Write run persists version, URL and hash.
+        let done = super::autoupdate_apply(&session, &pkg, "2.0", &[], true).unwrap();
+        assert!(done.wrote);
+
+        let mut hasher = bagger_hash::ChecksumBuilder::new().sha256().build();
+        hasher.consume(b"new-bytes");
+        let expected = format!("sha256:{}", hasher.finalize());
+
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(rewritten["version"], "2.0");
+        assert_eq!(done.rewritten_hashes, vec![expected.clone()]);
+        assert_eq!(rewritten["hash"], expected);
+        assert!(rewritten["url"].as_str().unwrap().ends_with("app-2.0.bin"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn test_subs<'a>(version: &'a str, url: &'a str) -> AutoupdateSubstitutions<'a> {
+        AutoupdateSubstitutions {
+            version,
+            asset_url: url,
+            captures: &[],
+        }
+    }
+
+    #[test]
+    fn substitution_families() {
+        let subs = test_subs("1.2.3-beta", "https://example.com/dl/app-1.2.3-beta.zip");
+        assert_eq!(subs.expand("$version"), "1.2.3-beta");
+        assert_eq!(subs.expand("$dotVersion"), "1.2.3.beta");
+        assert_eq!(subs.expand("$underscoreVersion"), "1_2_3_beta");
+        assert_eq!(subs.expand("$cleanVersion"), "123beta");
+        assert_eq!(subs.expand("$majorVersion"), "1");
+        assert_eq!(subs.expand("$minorVersion"), "2");
+        assert_eq!(subs.expand("$patchVersion"), "3");
+        assert_eq!(subs.expand("$preReleaseVersion"), "beta");
+        assert_eq!(subs.expand("$matchHead"), "1.2.3");
+        assert_eq!(subs.expand("$matchTail"), "-beta");
+        assert_eq!(subs.expand("$basename"), "app-1.2.3-beta.zip");
+        assert_eq!(subs.expand("$basenameNoExt"), "app-1.2.3-beta");
+        assert_eq!(subs.expand("$baseurl"), "https://example.com/dl");
+    }
+
+    #[test]
+    fn substitution_match_title_case() {
+        let captures = vec![("vversion".to_owned(), "v2".to_owned())];
+        let subs = AutoupdateSubstitutions {
+            version: "2.0",
+            asset_url: "",
+            captures: &captures,
+        };
+        // Upstream TitleCases capture names: $matchVversion, not $matchvversion.
+        assert_eq!(subs.expand("$matchVversion"), "v2");
+    }
+
+    #[test]
+    fn format_hash_lengths() {
+        assert_eq!(
+            format_hash_value(
+                "sha256:ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789"
+            ),
+            Some("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned())
+        );
+        assert_eq!(
+            format_hash_value(&"a".repeat(40)),
+            Some(format!("sha1:{}", "a".repeat(40)))
+        );
+        assert_eq!(format_hash_value("xyz"), None);
+    }
+
+    #[test]
+    fn textfile_hash_modes() {
+        let subs = test_subs("2.0", "https://example.com/app-2.0.zip");
+        let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        // $sha256 placeholder.
+        let content = format!("starts {sha} end");
+        assert_eq!(
+            find_hash_in_textfile(&content, "app-2.0.zip", Some("$sha256"), &subs),
+            Some(sha.to_owned())
+        );
+        // Bare hex line default.
+        assert_eq!(
+            find_hash_in_textfile(&format!("  {sha}  \n"), "other.zip", None, &subs),
+            Some(sha.to_owned())
+        );
+        // Basename fallback.
+        let content = format!("{sha}  app-2.0.zip\n");
+        assert_eq!(
+            find_hash_in_textfile(&content, "app-2.0.zip", Some("nomatchhere"), &subs),
+            Some(sha.to_owned())
+        );
+        // Unusable content.
+        assert_eq!(
+            find_hash_in_textfile("no hashes here", "app.zip", None, &subs),
+            None
+        );
+    }
+
+    #[test]
+    fn hash_regex_prefers_regex_over_find() {
+        use crate::package::manifest::{HashExtraction, HashExtractionMode};
+
+        let spec = HashExtraction {
+            find: Some("find-pattern".to_owned()),
+            regex: Some("regex-pattern".to_owned()),
+            jsonpath: None,
+            xpath: None,
+            mode: None,
+            url: None,
+        };
+        // Upstream collects `find` first and lets `regex` override it.
+        assert_eq!(super::hash_regex(&spec), Some("regex-pattern"));
+
+        let spec = HashExtraction {
+            find: Some("find-pattern".to_owned()),
+            regex: None,
+            jsonpath: None,
+            xpath: None,
+            mode: Some(HashExtractionMode::Extract),
+            url: None,
+        };
+        assert_eq!(super::hash_regex(&spec), Some("find-pattern"));
+
+        let spec = HashExtraction {
+            find: None,
+            regex: None,
+            jsonpath: None,
+            xpath: None,
+            mode: None,
+            url: None,
+        };
+        assert_eq!(super::hash_regex(&spec), None);
+    }
+
+    #[test]
+    fn textfile_base64_hashes() {
+        let subs = test_subs("2.0", "https://example.com/app-2.0.zip");
+        // sha256("") in base64 (classic test vector).
+        let b64 = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=";
+        let hex = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        // Via the $base64 placeholder.
+        let content = format!("hash {b64} end");
+        assert_eq!(
+            find_hash_in_textfile(&content, "app-2.0.zip", Some("$base64"), &subs),
+            Some(hex.to_owned())
+        );
+        // Plain hex of standard length is never base64-decoded.
+        assert_eq!(
+            find_hash_in_textfile(hex, "app-2.0.zip", None, &subs),
+            Some(hex.to_owned())
+        );
+        // Malformed base64 falls back to no match, not garbage.
+        assert_eq!(
+            find_hash_in_textfile("!!!!", "app-2.0.zip", Some("$base64"), &subs),
+            None
+        );
+    }
+
+    #[test]
+    fn textfile_metalink_fallback() {
+        let subs = test_subs("2.0", "https://example.com/app-2.0.zip");
+        let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let content = format!(
+            r#"<?xml version="1.0"?><metalink><file name="other.zip"><hash type="sha-256">{sha}</hash></file></metalink>"#
+        );
+        // Neither the default pattern nor the basename search hits the
+        // metalink document; the `<hash>` fallback does.
+        assert_eq!(
+            find_hash_in_textfile(&content, "app-2.0.zip", None, &subs),
+            Some(sha.to_owned())
+        );
+    }
+
+    #[test]
+    fn base64_codec_vectors() {
+        assert_eq!(super::decode_base64("TWFu"), Some(b"Man".to_vec()));
+        assert_eq!(super::decode_base64("TQ=="), Some(b"M".to_vec()));
+        assert_eq!(super::decode_base64("TWE="), Some(b"Ma".to_vec()));
+        assert_eq!(super::decode_base64(""), None);
+        assert_eq!(super::decode_base64("TWF"), None);
+        assert_eq!(super::decode_base64("TWFu!"), None);
+        assert_eq!(super::decode_base64("===="), None);
+        assert!(super::is_base64_hash(
+            "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
+        ));
+        // A 64-hex string is base64-*shaped* but must never be decoded
+        // (covered end-to-end above); shape alone is not the guard.
+        assert!(super::is_base64_hash(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+    }
+
+    #[test]
+    fn site_mode_detection() {
+        match super::detect_site_mode("https://www.fosshub.com/Foo.html?dwl=foo-2.0.exe") {
+            Some(super::SiteMode::Fosshub { filename }) => {
+                assert_eq!(filename, "foo-2.0.exe")
+            }
+            _ => panic!("expected fosshub"),
+        }
+        match super::detect_site_mode(
+            "https://downloads.sourceforge.net/project/sevenzip/7-Zip/24.09/7z2409-x64.exe",
+        ) {
+            Some(super::SiteMode::Sourceforge { project, .. }) => {
+                assert_eq!(project, "sevenzip")
+            }
+            _ => panic!("expected sourceforge"),
+        }
+        match super::detect_site_mode(
+            "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_windows_amd64.zip",
+        ) {
+            Some(super::SiteMode::Github { owner, repo }) => {
+                assert_eq!((owner.as_str(), repo.as_str()), ("cli", "cli"))
+            }
+            _ => panic!("expected github"),
+        }
+        assert!(super::detect_site_mode("https://example.com/a.zip").is_none());
+    }
+
+    #[test]
+    fn site_page_parsers() {
+        let sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+
+        let fosshub_page = format!(r#"var x = "foo-2.0.exe blah"; "sha256":"{sha256}";"#);
+        assert_eq!(
+            super::fosshub_hash_in_page(&fosshub_page, "foo-2.0.exe").as_deref(),
+            Some(sha256)
+        );
+
+        let sf_page = format!("\"foo-2.0.zip\":{{\"name\":\"x\",\"sha1\": \"{sha1}\"}}");
+        let expected_sf = format!("sha1:{sha1}");
+        assert_eq!(
+            super::sourceforge_hash_in_page(&sf_page, "foo-2.0.zip").as_deref(),
+            Some(expected_sf.as_str())
+        );
+
+        let releases = format!(
+            r#"[{{"tag_name": "v2.0",
+                "assets": [{{"browser_download_url": "https://github.com/o/r/releases/download/v2.0/a.zip",
+                             "digest": "sha256:{sha256}"}}]}}]"#
+        );
+        assert_eq!(
+            super::github_asset_digest(
+                &releases,
+                "https://github.com/o/r/releases/download/v2.0/a.zip"
+            )
+            .as_deref(),
+            Some(sha256)
+        );
+        assert_eq!(
+            super::github_asset_digest(&releases, "https://github.com/o/r/other.zip"),
+            None
+        );
+    }
+
+    #[test]
+    fn rdf_digest_lookup() {
+        let sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let rdf = format!(
+            r#"<?xml version="1.0"?>
+            <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+              <Content rdf:about="app-2.0.zip"><sha256>{sha256}</sha256></Content>
+              <Content rdf:about="other.zip"><sha256>00</sha256></Content>
+            </rdf:RDF>"#
+        );
+        assert_eq!(
+            super::rdf_sha256(&rdf, "app-2.0.zip").as_deref(),
+            Some(sha256)
+        );
+        assert_eq!(super::rdf_sha256(&rdf, "missing.zip"), None);
     }
 }
 
@@ -326,12 +3333,24 @@ pub fn package_hold(session: &Session, name: &str, flag: bool) -> Fallible<()> {
         return Err(Error::PackageHoldNotInstalled(name.to_owned()));
     }
 
-    path.push("current");
-    path.push("install.json");
+    // Under no_junction the metadata lives in the version dir, not `current`.
+    // (This also fixes a double-join: the helpers take the directory, not
+    // the install.json path itself — hold was broken for every install.)
+    let meta_dir = crate::package::installed_metadata_dir(&path, session.config().no_junction());
+    let legacy = meta_dir.join("install.json");
 
-    if let Ok(mut install_info) = InstallInfo::parse(&path) {
+    // Resolve the real file first (upstream `scoop-install.json` preferred):
+    // hold flags must round-trip through the same file that queries read.
+    // `legacy` mirrors it when it exists so old readers never see a stale
+    // hold flag (the commit writes both).
+    let info_path = crate::package::install_info_path(&meta_dir);
+    if let Ok(mut install_info) = InstallInfo::parse(&info_path) {
         install_info.set_held(flag);
-        internal::fs::write_json(path, install_info)
+        internal::fs::write_json(&info_path, &install_info)?;
+        if legacy != info_path && legacy.is_file() {
+            internal::fs::write_json(&legacy, &install_info)?;
+        }
+        Ok(())
     } else {
         Err(Error::PackageHoldBrokenInstall(name.to_owned()))
     }
@@ -380,6 +3399,45 @@ pub fn package_query(
     Ok(packages)
 }
 
+/// Today's dated nightly version (`nightly-yyyyMMdd`).
+pub fn nightly_stamp() -> String {
+    crate::package::nightly_version()
+}
+
+/// Names of installed apps whose nightly build is stale: the bucket
+/// manifest still says `nightly`, the installed stamp is a different date,
+/// and `update_nightly` is set. Mirrors the nightly arm of upstream
+/// `Compare-Version` used by `app_status`.
+pub fn stale_nightlies(session: &Session) -> Fallible<Vec<String>> {
+    if !session.config().update_nightly() {
+        return Ok(vec![]);
+    }
+    let today = nightly_stamp();
+    let installed = package::query::query_installed(session, &["*"], &[])?;
+    let synced = package::query::query_synced(session, &["*"], &[])?;
+    let mut out = vec![];
+    for inst in &installed {
+        let Some(iv) = inst.installed_version() else {
+            continue;
+        };
+        if !crate::package::is_dated_nightly(iv) || iv == today {
+            continue;
+        }
+        if inst.is_held() {
+            continue;
+        }
+        let bucket = inst.installed_bucket().unwrap_or_default();
+        let nightly_origin = synced
+            .iter()
+            .any(|s| s.name() == inst.name() && s.bucket() == bucket && s.version() == "nightly");
+        if nightly_origin {
+            out.push(inst.name().to_owned());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// Sync packages.
 ///
 /// # Note
@@ -402,7 +3460,7 @@ pub fn package_sync(
     session: &Session,
     queries: Vec<&str>,
     options: Vec<SyncOption>,
-) -> Fallible<()> {
+) -> Fallible<bool> {
     // remove possible duplicates
     let queries = HashSet::<&str>::from_iter(queries)
         .into_iter()
@@ -413,15 +3471,108 @@ pub fn package_sync(
     }
 
     let is_op_remove = options.contains(&SyncOption::Remove);
-    if is_op_remove {
-        package::sync::remove(session, &queries, &options)?;
+    let did_work = if is_op_remove {
+        package::sync::remove(session, &queries, &options)?
     } else {
-        package::sync::install(session, &queries, &options)?;
-    }
+        package::sync::install(session, &queries, &options)?
+    };
 
     if let Some(tx) = session.emitter() {
         let _ = tx.send(Event::PackageSyncDone);
     }
 
-    Ok(())
+    Ok(did_work)
+}
+
+/// Result of a VirusTotal file lookup.
+#[derive(Clone, Debug)]
+pub struct VirustotalReport {
+    /// SHA256 of the scanned file.
+    pub sha256: String,
+    /// Whether VirusTotal already knows this file.
+    pub found: bool,
+    /// Number of engines flagging the file as malicious.
+    pub malicious: u64,
+    /// Number of engines flagging the file as suspicious.
+    pub suspicious: u64,
+    /// Number of engines reporting the file as harmless.
+    pub harmless: u64,
+    /// Number of engines with no verdict.
+    pub undetected: u64,
+}
+
+impl VirustotalReport {
+    /// Whether any engine flagged the file.
+    pub fn is_flagged(&self) -> bool {
+        self.malicious > 0 || self.suspicious > 0
+    }
+}
+
+/// Look up a local file on VirusTotal by its SHA256 hash.
+///
+/// Computes the SHA256 of `path`, then queries the VirusTotal v3 file API
+/// (`GET /files/{sha256}`). A missing report (`404`) is not an error: the
+/// returned [`VirustotalReport`] simply has `found` set to `false`.
+///
+/// # Errors
+///
+/// I/O errors will be returned if the file cannot be read. Network errors
+/// will be returned if the API request fails.
+pub fn virustotal_file_report(
+    session: &Session,
+    path: &std::path::Path,
+    api_key: &str,
+) -> Fallible<VirustotalReport> {
+    use bagger_hash::ChecksumBuilder;
+    use std::io::Read;
+
+    let mut hasher = ChecksumBuilder::new().sha256().build();
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = [0u8; 1024 * 64];
+    loop {
+        let len = file.read(&mut buf)?;
+        if len == 0 {
+            break;
+        }
+        hasher.consume(&buf[..len]);
+    }
+    let sha256 = hasher.finalize();
+
+    let url = format!("https://www.virustotal.com/api/v3/files/{sha256}");
+    let proxy = session.config().proxy().map(|s| s.to_owned());
+    let (code, body) = internal::network::fetch_url_with_headers(
+        &url,
+        proxy.as_deref(),
+        &[("x-apikey", api_key), ("Accept", "application/json")],
+    )
+    .ok_or_else(|| Error::Custom("failed to reach the VirusTotal API".to_owned()))?;
+
+    if code == 404 {
+        return Ok(VirustotalReport {
+            sha256,
+            found: false,
+            malicious: 0,
+            suspicious: 0,
+            harmless: 0,
+            undetected: 0,
+        });
+    }
+
+    if code != 200 {
+        return Err(Error::Custom(format!(
+            "VirusTotal API returned HTTP {code}"
+        )));
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&body)?;
+    let stats = &json["data"]["attributes"]["last_analysis_stats"];
+
+    Ok(VirustotalReport {
+        sha256,
+        found: true,
+        malicious: stats["malicious"].as_u64().unwrap_or(0),
+        suspicious: stats["suspicious"].as_u64().unwrap_or(0),
+        harmless: stats["harmless"].as_u64().unwrap_or(0),
+        undetected: stats["undetected"].as_u64().unwrap_or(0),
+    })
 }

@@ -1,3 +1,5 @@
+use crate::Result;
+
 /// Convert bytes to KB/MB/GB representation.
 pub fn humansize(length: u64, with_unit: bool) -> String {
     let gb: f64 = 2.0_f64.powf(30_f64);
@@ -76,4 +78,52 @@ pub(crate) fn is_admin() -> bool {
     }
 
     is_member.as_bool()
+}
+
+/// Enable global scope when `--global` was passed.
+///
+/// Global operations target `%ProgramData%\scoop` (all users) and require
+/// admin rights. Errors otherwise, or when the session config is in use.
+///
+/// This must be called before any `session.config()` borrow is taken and
+/// before event threads are spawned.
+pub(crate) fn apply_global_flag(global: bool, session: &scoop_rs::Session) -> Result<()> {
+    if !global {
+        return Ok(());
+    }
+
+    if !is_admin() {
+        return Err(anyhow::anyhow!(
+            "you need admin rights to manage global apps"
+        ));
+    }
+
+    session
+        .set_global(true)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// Apply the `--arch` selection, falling back to the `SCOOP_ARCH`
+/// environment variable and then the `default_architecture` config.
+///
+/// Must run before any package sync operation.
+pub(crate) fn apply_arch_flag(arch: Option<&str>, session: &scoop_rs::Session) -> Result<()> {
+    if let Some(name) = arch {
+        return scoop_rs::arch::set_override(name).map_err(|e| anyhow::anyhow!(e.to_string()));
+    }
+
+    if let Ok(name) = std::env::var("SCOOP_ARCH") {
+        if !name.trim().is_empty() {
+            scoop_rs::arch::set_override(&name).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            return Ok(());
+        }
+    }
+
+    if let Some(name) = session.config().default_architecture() {
+        if !name.trim().is_empty() {
+            scoop_rs::arch::set_override(name).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        }
+    }
+
+    Ok(())
 }

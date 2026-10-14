@@ -7,9 +7,9 @@ pub(crate) mod sync;
 use once_cell::unsync::OnceCell;
 use std::{fmt, path::PathBuf};
 
-pub use manifest::{HashString, InstallInfo, License, Manifest};
+pub use manifest::{Autoupdate, Checkver, HashString, InstallInfo, License, Manifest};
 pub use query::QueryOption;
-pub use sync::SyncOption;
+pub use sync::{SyncOption, Transaction};
 
 use crate::{constant::ISOLATED_PACKAGE_BUCKET, internal};
 
@@ -37,6 +37,88 @@ pub struct Package {
     /// This field is never serialized.
     #[serde(skip)]
     upgradable: OnceCell<Option<Box<Package>>>,
+}
+
+/// Today's dated nightly version (`nightly-yyyyMMdd`, local date like
+/// upstream `nightly_version`).
+pub(crate) fn nightly_version() -> String {
+    format!("nightly-{}", chrono::Local::now().format("%Y%m%d"))
+}
+
+/// Whether a version is a dated nightly stamp (`nightly-yyyyMMdd`).
+/// Together with the literal, these versions skip hash checks and only
+/// upgrade on a new day with `update_nightly` (or forced).
+pub(crate) fn is_dated_nightly(version: &str) -> bool {
+    version.len() == "nightly-YYYYMMDD".len()
+        && version.starts_with("nightly-")
+        && version[8..].bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Installed manifest path inside a version directory, preferring
+/// upstream's `scoop-manifest.json` with fallback to the legacy name.
+pub fn installed_manifest_path(dir: &std::path::Path) -> std::path::PathBuf {
+    let scoped = dir.join("scoop-manifest.json");
+    if scoped.is_file() {
+        scoped
+    } else {
+        dir.join("manifest.json")
+    }
+}
+
+/// Install info path inside a version directory, preferring upstream's
+/// `scoop-install.json` with fallback to the legacy name.
+pub fn install_info_path(dir: &std::path::Path) -> std::path::PathBuf {
+    let scoped = dir.join("scoop-install.json");
+    if scoped.is_file() {
+        scoped
+    } else {
+        dir.join("install.json")
+    }
+}
+
+/// Whether a version directory carries install metadata under either
+/// naming scheme.
+pub fn has_install_metadata(dir: &std::path::Path) -> bool {
+    installed_manifest_path(dir).is_file() && install_info_path(dir).is_file()
+}
+
+/// Directory holding a package's install metadata: `current` normally;
+/// under `no_junction` the live version directory (rotation backups
+/// `_*` excluded, highest version wins when several qualify). Falls back
+/// to `current` when nothing qualifies, preserving the old skip behavior.
+pub(crate) fn installed_metadata_dir(
+    app_dir: &std::path::Path,
+    no_junction: bool,
+) -> std::path::PathBuf {
+    if !no_junction {
+        return app_dir.join("current");
+    }
+    let mut best: Option<(std::path::PathBuf, String)> = None;
+    if let Ok(entries) = std::fs::read_dir(app_dir) {
+        for entry in entries.filter_map(|de| de.ok()) {
+            let path = entry.path();
+            let Some(name) = entry.file_name().to_str().map(|s| s.to_owned()) else {
+                continue;
+            };
+            if name == "current" || name.starts_with('_') {
+                continue;
+            }
+            if !has_install_metadata(&path) {
+                continue;
+            }
+            let replace = match &best {
+                None => true,
+                Some((_, version)) => {
+                    crate::internal::compare_versions(&name, version) == std::cmp::Ordering::Greater
+                }
+            };
+            if replace {
+                best = Some((path, name));
+            }
+        }
+    }
+    best.map(|(path, _)| path)
+        .unwrap_or_else(|| app_dir.join("current"))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,6 +174,14 @@ impl Package {
             install_state: OnceCell::new(),
             upgradable: OnceCell::new(),
         }
+    }
+
+    /// Clone this package with a stamped manifest version, preserving
+    /// install state (nightly installs).
+    pub(crate) fn with_version(&self, version: &str) -> Package {
+        let mut stamped = self.clone();
+        stamped.manifest = self.manifest.with_version(version);
+        stamped
     }
 
     /// The identity of this package.
@@ -205,17 +295,48 @@ impl Package {
                 hasher.consume(u.as_bytes());
                 let mut hash = hasher.finalize();
                 hash.truncate(7);
-                let path = PathBuf::from(u);
-                let mut ext = path
-                    .extension()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
+                // Extension from the query-stripped URL (`?dl=1` suffixes
+                // are not filename characters on Windows), sanitized so
+                // the cache filename is always valid.
+                let clean = u.split(['#', '?']).next().unwrap_or(u);
+                let path = PathBuf::from(clean);
+                let mut ext = crate::internal::fs::filenamify(
+                    path.extension().unwrap_or_default().to_string_lossy(),
+                );
                 if !ext.is_empty() {
                     ext.insert(0, '.');
                 }
 
                 format!("{}#{}#{}{}", self.name(), self.version(), hash, ext)
+            })
+            .collect::<Vec<_>>()
+    }
+
+    /// Get the filenames downloads are staged under in the app directory.
+    ///
+    /// Mirrors upstream `url_filename`: the leaf after the last slash, with
+    /// any `?...` query dropped. A `#/...` fragment therefore coerces the
+    /// name (e.g. `Obsidian-1.14.4.exe#/dl.7z` stages as `dl.7z`), which is
+    /// what hook scripts, `installer.file` paths, and shim targets observe.
+    pub(crate) fn download_staged_filenames(&self) -> Vec<String> {
+        let cache_fallback = self.download_filenames();
+        self.manifest
+            .url()
+            .into_iter()
+            .enumerate()
+            .map(|(i, u)| {
+                let leaf = u
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(u)
+                    .split('?')
+                    .next()
+                    .unwrap_or(u);
+                if leaf.is_empty() {
+                    cache_fallback[i].clone()
+                } else {
+                    leaf.to_owned()
+                }
             })
             .collect::<Vec<_>>()
     }
@@ -252,6 +373,21 @@ impl Package {
             Some(state) => match state {
                 InstallState::NotInstalled => None,
                 InstallState::Installed(info) => Some(info.version()),
+            },
+        }
+    }
+
+    /// Get the installed architecture of this package.
+    ///
+    /// # Returns
+    ///
+    /// The architecture the package was installed for (e.g. `64bit`), if any.
+    pub fn installed_arch(&self) -> Option<&str> {
+        match self.install_state.get() {
+            None => None,
+            Some(state) => match state {
+                InstallState::NotInstalled => None,
+                InstallState::Installed(info) => Some(info.arch.as_str()),
             },
         }
     }
@@ -452,7 +588,16 @@ impl fmt::Display for HashMismatchContext {
             self.url(),
             self.expected(),
             self.actual()
-        )
+        )?;
+        // Upstream prints this exact hint: SourceForge mirrors are known
+        // for causing transient hash failures.
+        if self.url().contains("sourceforge.net") {
+            write!(
+                f,
+                "\nSourceForge.net is known for causing hash validation fails. Please try again before opening a ticket."
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -485,5 +630,65 @@ impl HashMismatchContext {
     /// Actual hash.
     pub fn actual(&self) -> &str {
         self.actual.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Install metadata resolves under both naming schemes (upstream
+    /// `scoop-*.json` preferred, legacy fallback); a lone install info
+    /// file is not a healthy install.
+    #[test]
+    fn install_metadata_covers_both_namings() {
+        let base = std::env::temp_dir().join("bagger-test-metadata-names");
+        let _ = std::fs::remove_dir_all(&base);
+        let legacy = base.join("legacy");
+        let scoped = base.join("scoped");
+        let mixed = base.join("mixed");
+        let empty = base.join("empty");
+        let partial = base.join("partial");
+        for dir in [&legacy, &scoped, &mixed, &empty, &partial] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(legacy.join("manifest.json"), "{}").unwrap();
+        std::fs::write(legacy.join("install.json"), "{}").unwrap();
+        std::fs::write(scoped.join("scoop-manifest.json"), "{}").unwrap();
+        std::fs::write(scoped.join("scoop-install.json"), "{}").unwrap();
+        std::fs::write(mixed.join("manifest.json"), "{}").unwrap();
+        std::fs::write(mixed.join("scoop-install.json"), "{}").unwrap();
+        std::fs::write(partial.join("install.json"), "{}").unwrap();
+
+        assert!(has_install_metadata(&legacy));
+        assert!(has_install_metadata(&scoped));
+        assert!(has_install_metadata(&mixed));
+        assert!(!has_install_metadata(&empty));
+        assert!(!has_install_metadata(&partial));
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Cache filenames stay valid Windows names when URLs carry query
+    /// strings (`?dl=1` suffixes are not filename characters).
+    #[test]
+    fn download_filenames_sanitize_query_extensions() {
+        use crate::package::manifest::Manifest;
+
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT",
+                "architecture": {"64bit": {"url": "https://example.com/f.exe?dl=1"}}}"#,
+            std::path::Path::new("dlq.json"),
+        )
+        .unwrap();
+        let pkg = Package::from("dlq", "main", manifest);
+        let names = pkg.download_filenames();
+        assert_eq!(names.len(), 1);
+        assert!(
+            !names[0].contains(['?', '&', '=']),
+            "cache filename must be valid: {}",
+            names[0]
+        );
+        assert!(names[0].ends_with(".exe"), "{}", names[0]);
     }
 }
