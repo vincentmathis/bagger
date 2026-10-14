@@ -33,8 +33,9 @@ path = "benches/sha512.rs"
 harness = false
 
 [dependencies]
-md-5 = { version = "0.10", optional = true }
-sha1 = { version = "0.10", optional = true }
+digest = { version = "0.11", optional = true }
+md-5 = { version = "0.11", optional = true }
+sha1 = { version = "0.11", optional = true }
 sha2 = { version = "0.11", optional = true }
 
 [dev-dependencies]
@@ -43,4 +44,4 @@ criterion = "0.4"
 [features]
 default = []
 # The "rustcrypto" feature enables hash implementations from RustCrypto's crates.
-rustcrypto = ["md-5", "sha1", "sha2"]
+rustcrypto = ["digest", "md-5", "sha1", "sha2"]

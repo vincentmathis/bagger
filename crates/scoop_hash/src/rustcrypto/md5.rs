@@ -1,4 +1,4 @@
-use md5::Digest;
+use digest::Digest;
 use md5::Md5;
 
 pub struct WrappedMd5 {
