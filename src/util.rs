@@ -127,3 +127,15 @@ pub(crate) fn apply_arch_flag(arch: Option<&str>, session: &scoop_rs::Session) -
 
     Ok(())
 }
+
+/// Process-wide serialization for tests that swap the `SCOOP*` environment
+/// variables. Cargo runs tests in threads sharing one environment block, so
+/// two env-swapping tests without a common guard read each other's roots
+/// (flaky `neovim`-missing failure in the completion engine test on CI).
+/// Every test that sets `SCOOP`/`SCOOP_GLOBAL`/`SCOOP_CACHE` must hold this
+/// guard for its whole body.
+#[cfg(test)]
+pub(crate) fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GUARD.lock().unwrap()
+}
