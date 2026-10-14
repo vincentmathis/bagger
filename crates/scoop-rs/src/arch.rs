@@ -90,6 +90,21 @@ pub fn selected() -> Arch {
     override_arch().unwrap_or_else(Arch::host)
 }
 
+/// Manifest section fallback chain, mirroring upstream
+/// `Get-SupportedArchitecture`: an explicit override selects exactly one
+/// section, otherwise the host walks down (64bit→32bit,
+/// arm64→64bit→32bit) so e.g. a 32bit-only manifest still installs on a
+/// 64-bit host.
+pub(crate) fn fallback_chain() -> &'static [Arch] {
+    if cfg!(target_arch = "x86") {
+        &[Arch::Ia32]
+    } else if cfg!(target_arch = "aarch64") {
+        &[Arch::Aarch64, Arch::Amd64, Arch::Ia32]
+    } else {
+        &[Arch::Amd64, Arch::Ia32]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +173,34 @@ mod tests {
 
         clear_override();
         assert_eq!(manifest.url(), vec!["https://example.com/x64.zip"]);
+    }
+
+    /// Without an override, a manifest carrying only a lower section still
+    /// resolves via the host fallback chain (64bit→32bit on this host).
+    #[test]
+    fn fallback_resolves_lower_section() {
+        use crate::package::manifest::Manifest;
+
+        let manifest = Manifest::parse_bytes(
+            br#"{
+                "version": "1.0",
+                "homepage": "https://example.com",
+                "license": "MIT",
+                "architecture": {
+                    "32bit": {
+                        "url": "https://example.com/x86.zip",
+                        "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                    }
+                }
+            }"#,
+            std::path::Path::new("arch-fallback.json"),
+        )
+        .expect("fixture manifest should parse");
+
+        clear_override();
+        // Every host chain ends at 32bit, so the lone 32bit section
+        // resolves everywhere.
+        assert_eq!(manifest.url(), vec!["https://example.com/x86.zip"]);
+        clear_override();
     }
 }

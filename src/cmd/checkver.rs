@@ -9,7 +9,7 @@ use crate::Result;
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The package name (or "all" for all installed apps)
-    #[arg(required = true)]
+    #[arg(required = true, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::checkver_targets))]
     package: String,
 
     /// Show all versions, not just the latest

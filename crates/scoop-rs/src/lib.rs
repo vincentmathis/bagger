@@ -34,6 +34,7 @@ extern crate serde;
 
 mod bucket;
 mod cache;
+pub mod complete;
 mod config;
 mod constant;
 pub mod diagnostic;

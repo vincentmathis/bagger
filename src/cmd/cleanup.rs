@@ -15,7 +15,7 @@ use std::{
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// Given named app(s) to be cleaned up
-    #[arg(action = ArgAction::Append)]
+    #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     app: Vec<String>,
     /// Clean up all installed apps
     #[arg(short = 'a', long, action = ArgAction::SetTrue)]

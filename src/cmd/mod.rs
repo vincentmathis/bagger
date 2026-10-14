@@ -1,4 +1,4 @@
-use clap::{crate_description, crate_name, crate_version, Parser, Subcommand};
+use clap::{crate_description, crate_name, crate_version, CommandFactory, Parser, Subcommand};
 use clap_verbosity_flag::Verbosity;
 use scoop_rs::Session;
 use tracing_subscriber::{
@@ -106,7 +106,15 @@ pub enum Command {
 
 /// CLI entry point
 pub fn start() -> Result<()> {
-    let args = Cli::parse();
+    // Dynamic shell completion (COMPLETE=<shell>): answer the shell hook
+    // and exit. Must run before anything touches stdout (including the
+    // logger) or parses args — stdout is the candidate protocol here.
+    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+
+    // User aliases (`bagger alias add ll "list -u"`) expand before parsing;
+    // builtins always win over aliases.
+    let args = Cli::try_parse_from(alias::expand_argv(std::env::args_os().collect()))
+        .unwrap_or_else(|e| e.exit());
 
     let session = Session::default();
     // The `debug` config raises the log floor, mirroring upstream's

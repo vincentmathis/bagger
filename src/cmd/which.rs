@@ -8,6 +8,7 @@ use crate::Result;
 #[clap(arg_required_else_help = true)]
 pub struct Args {
     /// The command name to look for
+    #[arg(add = clap_complete::engine::ArgValueCompleter::new(crate::complete::shims))]
     command: String,
 }
 

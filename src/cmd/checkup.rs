@@ -1,6 +1,6 @@
 use clap::Parser;
 use crossterm::style::Stylize;
-use scoop_rs::{operation, Session};
+use scoop_rs::{operation, QueryOption, Session};
 
 use crate::Result;
 
@@ -11,7 +11,7 @@ pub struct Args {}
 pub fn execute(_args: Args, session: &Session) -> Result<()> {
     println!("Checking for app updates...");
 
-    let installed = operation::package_query(session, vec![], vec![], true)?;
+    let installed = operation::package_query(session, vec![], vec![QueryOption::Upgradable], true)?;
 
     let mut upgradable: Vec<_> = Vec::new();
     let mut held: Vec<_> = Vec::new();

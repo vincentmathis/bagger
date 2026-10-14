@@ -96,8 +96,10 @@ pub fn install(session: &Session, package: &Package) -> Fallible<()> {
             if !path_within(&path_entry, &app_base) {
                 continue;
             }
+            // Upstream `Add-Path` prepends, so freshly installed apps win
+            // over older entries (e.g. a system-wide same-named binary).
             if !paths.contains(&path_entry) {
-                paths.push(path_entry);
+                paths.insert(0, path_entry);
                 changed = true;
             }
         }
@@ -105,6 +107,55 @@ pub fn install(session: &Session, package: &Package) -> Fallible<()> {
         if changed {
             let updated = internal::env::join_path_list(&paths)?;
             internal::env::set_scoped(&env_path_name, Some(&updated), global)?;
+        }
+    }
+
+    if changed {
+        internal::env::broadcast_env_change();
+    }
+
+    Ok(())
+}
+
+/// Remove environment integration the new manifest no longer declares:
+/// PATH entries under the old base that are absent from the new set, and
+/// `env_set` vars the new manifest dropped. Used by upgrade finalization;
+/// failures abort the transaction (unlike hook scripts, env writes are
+/// local and atomic).
+pub(crate) fn remove_stale(
+    session: &Session,
+    old_paths: &[std::path::PathBuf],
+    new_paths: &[std::path::PathBuf],
+    old_vars: &[String],
+    new_vars: &[String],
+) -> Fallible<()> {
+    let config = session.config();
+    let global = config.is_global_scope();
+    let mut changed = false;
+
+    let stale_paths: Vec<&std::path::PathBuf> = old_paths
+        .iter()
+        .filter(|p| !new_paths.contains(p))
+        .collect();
+    if !stale_paths.is_empty() {
+        for target in path_targets(&config) {
+            let mut paths = internal::env::get_path_like_env_scoped(&target, global)?;
+            let before = paths.len();
+            paths.retain(|p| !stale_paths.contains(&p));
+            if paths.len() != before {
+                let updated = internal::env::join_path_list(&paths)?;
+                internal::env::set_scoped(&target, Some(&updated), global)?;
+                changed = true;
+            }
+        }
+    }
+
+    for key in old_vars {
+        if !new_vars.contains(key) {
+            internal::env::set_scoped(key, None, global)?;
+            // Upstream also clears the current session (`Remove-Item env:\`).
+            std::env::remove_var(key);
+            changed = true;
         }
     }
 

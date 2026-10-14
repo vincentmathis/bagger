@@ -209,6 +209,20 @@ pub fn bucket_update(session: &Session) -> Fallible<()> {
 /// This method will return an error if the bucket does not exist. I/O errors
 /// will be returned if the bucket directory is unable to be removed.
 pub fn bucket_remove(session: &Session, name: &str) -> Fallible<()> {
+    // The name is joined onto the buckets dir and the whole tree is
+    // deleted, so it must be a plain bucket name: anything else (`..`,
+    // separators, absolute paths) could wipe the Scoop root or worse.
+    let valid = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':'])
+        && std::path::Path::new(name)
+            .file_name()
+            .is_some_and(|n| n == name);
+    if !valid {
+        return Err(Error::Custom(format!("invalid bucket name '{name}'")));
+    }
+
     let mut path = session.config().root_path().to_owned();
     path.push("buckets");
     path.push(name);
@@ -281,7 +295,28 @@ pub fn cache_remove(session: &Session, query: &str) -> Fallible<()> {
     match query {
         "*" => {
             let config = session.config();
-            Ok(internal::fs::empty_dir(config.cache_path())?)
+            // The manifest cache database lives in the cache dir; wiping
+            // it forces a full bucket rescan, so it is spared.
+            let db = config.cache_path().join("manifests.db");
+            let mut spared = false;
+            if let Ok(entries) = config.cache_path().read_dir() {
+                for entry in entries.filter_map(|de| de.ok()) {
+                    let path = entry.path();
+                    if path == db {
+                        spared = true;
+                        continue;
+                    }
+                    if path.is_dir() {
+                        let _ = remove_dir_all::remove_dir_all(&path);
+                    } else {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+            if spared {
+                debug!("spared manifest cache database during cache clear");
+            }
+            Ok(())
         }
         query => {
             let files = cache_list(session, query)?;
@@ -407,6 +442,41 @@ impl CheckverResult {
     }
 }
 
+/// Resolve the page a checkver run fetches: the explicit `url` when set,
+/// otherwise the homepage — except bare `"checkver": "github"`, which only
+/// carries the default regex and, like upstream, checks the repo's
+/// releases page instead.
+fn checkver_url(checkver: Option<&crate::package::manifest::Checkver>, homepage: &str) -> String {
+    match checkver.and_then(|c| c.url.as_deref()) {
+        Some(url) => url.to_string(),
+        None if checkver.and_then(|c| c.regex.as_deref())
+            == Some(crate::package::manifest::GITHUB_CHECKVER_REGEX)
+            && is_github_repo_url(homepage) =>
+        {
+            format!("{}/releases/latest", homepage.trim_end_matches('/'))
+        }
+        None => homepage.to_string(),
+    }
+}
+
+/// Whether a homepage URL points at a GitHub repository
+/// (`https://github.com/<owner>/<repo>`, optional trailing slash/`.git`).
+fn is_github_repo_url(url: &str) -> bool {
+    let rest = url
+        .trim_end_matches('/')
+        .strip_suffix(".git")
+        .unwrap_or(url)
+        .trim_end_matches('/');
+    let Some(path) = rest.strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let mut parts = path.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(owner), Some(repo), None) if !owner.is_empty() && !repo.is_empty()
+    )
+}
+
 /// Check the latest version of a package by fetching its checkver URL.
 ///
 /// # Returns
@@ -459,10 +529,8 @@ pub fn checkver(session: &Session, package: &Package) -> Fallible<CheckverResult
         });
     }
 
-    let url = checkver
-        .and_then(|c| c.url.as_deref())
-        .unwrap_or_else(|| manifest.homepage())
-        .to_string();
+    let homepage = manifest.homepage();
+    let url = checkver_url(checkver, homepage);
 
     // `checkver.useragent` wins, then the session user agent.
     let user_agent = checkver
@@ -1307,11 +1375,7 @@ pub fn search_remote_buckets(session: &Session, query: &str) -> Fallible<Vec<(St
         .map(|b| b.name().to_owned())
         .collect();
     let proxy = session.config().proxy().map(|s| s.to_owned());
-    // Tree paths match with the query interpolated as a regex, like upstream.
-    let path_matcher = regex::RegexBuilder::new(&format!("^bucket/(.*{query}.*)\\.json$"))
-        .case_insensitive(true)
-        .build()
-        .map_err(|e| Error::Custom(format!("invalid regular expression '{query}': {e}")))?;
+    let path_matcher = remote_path_matcher(query)?;
     let mut out = Vec::new();
     for (bucket, repo_url) in bucket_list_known() {
         if added.iter().any(|b| b == bucket) {
@@ -1344,6 +1408,18 @@ fn split_github_repo(url: &str) -> Option<(String, String)> {
     Some((owner.to_owned(), repo.to_owned()))
 }
 
+/// Tree-path matcher for remote bucket search: the query (itself an
+/// alternation of the user's queries) is interpolated as a regex, like
+/// upstream. The alternation is grouped: without `(?:…)` the `|` would
+/// split the surrounding `.*` anchors (`.*a|b.*` matches `.*a` OR `b.*`).
+/// Pure for testability.
+fn remote_path_matcher(query: &str) -> Fallible<regex::Regex> {
+    regex::RegexBuilder::new(&format!("^bucket/(.*(?:{query}).*)\\.json$"))
+        .case_insensitive(true)
+        .build()
+        .map_err(|e| Error::Custom(format!("invalid regular expression '{query}': {e}")))
+}
+
 /// Manifest names from a GitHub tree API response whose `bucket/` paths
 /// match. Pure for testability.
 fn remote_manifest_names(body: &str, path_matcher: &regex::Regex) -> Vec<String> {
@@ -1362,6 +1438,64 @@ fn remote_manifest_names(body: &str, path_matcher: &regex::Regex) -> Vec<String>
                 .map(|m| m.as_str().to_owned())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod remote_search_tests {
+    use super::*;
+
+    #[test]
+    fn multi_query_alternation_stays_anchored() {
+        // `search a b` joins queries with `|`; the group must keep the
+        // `.*` anchors around the whole alternation.
+        let matcher = remote_path_matcher("q1|q2").unwrap();
+        assert!(matcher.is_match("bucket/aq1b.json"));
+        assert!(matcher.is_match("bucket/q2.json"));
+        assert!(!matcher.is_match("bucket/other.json"));
+        assert!(!matcher.is_match("bucket/q1b.txt"));
+    }
+
+    #[test]
+    fn cache_clear_spares_manifest_db() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-cache-db");
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = dir.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("manifests.db"), b"db").unwrap();
+        std::fs::write(cache.join("junk.download"), b"x").unwrap();
+        std::env::set_var("SCOOP_CACHE", &cache);
+        let session = Session::new();
+
+        super::cache_remove(&session, "*").unwrap();
+        assert!(cache.join("manifests.db").is_file());
+        assert!(!cache.join("junk.download").exists());
+
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn checkver_url_prefers_releases_page_for_github_shorthand() {
+        use crate::package::manifest::Manifest;
+
+        let manifest = Manifest::parse_bytes(
+            br#"{"version": "1.0", "homepage": "https://github.com/owner/repo",
+                "license": "MIT", "checkver": "github"}"#,
+            std::path::Path::new("cv-url.json"),
+        )
+        .unwrap();
+        let checkver = manifest.checkver();
+        assert_eq!(
+            super::checkver_url(checkver, manifest.homepage()),
+            "https://github.com/owner/repo/releases/latest"
+        );
+        // Explicit urls and non-github homepages are untouched.
+        assert_eq!(
+            super::checkver_url(None, "https://example.com/app"),
+            "https://example.com/app"
+        );
+    }
 }
 
 /// Fetch a GitHub API URL, authenticating when a token is configured
@@ -2379,6 +2513,41 @@ mod tests {
     }
 
     #[test]
+    fn bucket_remove_rejects_unsafe_names() {
+        let _guard = crate::test_support::env_guard();
+        let dir = std::env::temp_dir().join("bagger-test-bucket-rm-guard");
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("root");
+        std::fs::create_dir_all(root.join("buckets/realb")).unwrap();
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", dir.join("global"));
+        std::env::set_var("SCOOP_CACHE", dir.join("cache"));
+        let session = Session::new();
+
+        for evil in [
+            "", ".", "..", "../other", "a/b", "a\\b", "C:\\temp", "C:/temp",
+        ] {
+            let err = super::bucket_remove(&session, evil).unwrap_err();
+            assert!(
+                err.to_string().contains("invalid bucket name"),
+                "{evil}: {err}"
+            );
+        }
+        // The root and the real bucket both survive the attempts.
+        assert!(root.is_dir());
+        assert!(root.join("buckets/realb").is_dir());
+
+        // A real bucket still removes fine.
+        super::bucket_remove(&session, "realb").unwrap();
+        assert!(!root.join("buckets/realb").exists());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn jsonpath_object_keys() {
         let doc = r#"{"tag_name": "v1.2.3"}"#;
         assert_eq!(eval_jsonpath(doc, "$.tag_name").as_deref(), Some("v1.2.3"));
@@ -3164,19 +3333,22 @@ pub fn package_hold(session: &Session, name: &str, flag: bool) -> Fallible<()> {
         return Err(Error::PackageHoldNotInstalled(name.to_owned()));
     }
 
-    path.push("current");
-    path.push("install.json");
+    // Under no_junction the metadata lives in the version dir, not `current`.
+    // (This also fixes a double-join: the helpers take the directory, not
+    // the install.json path itself — hold was broken for every install.)
+    let meta_dir = crate::package::installed_metadata_dir(&path, session.config().no_junction());
+    let legacy = meta_dir.join("install.json");
 
     // Resolve the real file first (upstream `scoop-install.json` preferred):
     // hold flags must round-trip through the same file that queries read.
-    // `path` itself is the legacy name; mirror into it when it exists so
-    // old readers never see a stale hold flag (the commit writes both).
-    let info_path = crate::package::install_info_path(&path);
+    // `legacy` mirrors it when it exists so old readers never see a stale
+    // hold flag (the commit writes both).
+    let info_path = crate::package::install_info_path(&meta_dir);
     if let Ok(mut install_info) = InstallInfo::parse(&info_path) {
         install_info.set_held(flag);
         internal::fs::write_json(&info_path, &install_info)?;
-        if path != info_path && path.is_file() {
-            internal::fs::write_json(&path, &install_info)?;
+        if legacy != info_path && legacy.is_file() {
+            internal::fs::write_json(&legacy, &install_info)?;
         }
         Ok(())
     } else {

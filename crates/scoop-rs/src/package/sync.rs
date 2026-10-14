@@ -11,8 +11,8 @@ use crate::{
 use super::{
     download::{self, DownloadSize},
     is_dated_nightly,
-    manifest::InstallInfo,
-    nightly_version, query, resolve, Package,
+    manifest::{InstallInfo, Manifest},
+    nightly_version, query, resolve, InstallState, InstallStateInstalled, Package,
 };
 
 /// Options that may be used to tweak behavior of package sync operation.
@@ -69,16 +69,13 @@ pub enum SyncOption {
     /// # Note
     ///
     /// This option can be used to ignore the failure and continue the operation
-    /// to commit the remaining packages in the transaction.
+    /// to commit the remaining packages in the transaction. Successfully
+    /// committed packages are kept as they are; the rest of the unprocessed
+    /// packages are still attempted, and the first error is returned at the
+    /// end so callers still observe the failure.
     ///
-    /// When a failure occurs, the operation will be stopped immediately and
-    /// a rollback will be performed on the exact package causing the failure
-    /// while successfully committed packages will be kept be as they are. The
-    /// rest of the unpocessed packages will be skipped, and the error will be
-    /// returned.
-    ///
-    /// **NO rollback will be performed if this option is enabled**, which means
-    /// there may be broken packages being committed to the system.
+    /// No rollback is performed in either mode: packages committed before a
+    /// failure stay committed.
     IgnoreFailure,
 
     /// Do not install dependencies.
@@ -407,7 +404,13 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
     let update_nightly = session.config().update_nightly();
 
     if only_upgrade {
-        packages = query::query_installed(session, queries, &[QueryOption::Upgradable])?;
+        // Exact matching: `upgrade git` must not sweep up `gitui` or
+        // `git-lfs` (regex substring matching upgraded the wrong apps).
+        packages = query::query_installed(
+            session,
+            queries,
+            &[QueryOption::Upgradable, QueryOption::Explicit],
+        )?;
 
         // Replace the packages with their upgradable references.
         packages = packages
@@ -449,7 +452,9 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 .filter(|&p| {
                     let (query_bucket, query_name) = query.split_once('/').unwrap_or(("", query));
                     let bucket_matched = query_bucket.is_empty() || p.bucket() == query_bucket;
-                    let name_matched = p.name() == query_name;
+                    // App lookup is case-insensitive, like Windows file
+                    // names and upstream `-match`.
+                    let name_matched = p.name().eq_ignore_ascii_case(query_name);
                     bucket_matched && name_matched
                 })
                 .cloned()
@@ -773,6 +778,13 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 if actual != expected {
                     let name = pkg.name().to_owned();
                     let url = pkg.download_urls()[idx].to_owned();
+                    // Drop the bad file so the next run re-downloads
+                    // instead of failing the same integrity check forever.
+                    let _ = std::fs::remove_file(&path);
+                    eprintln!(
+                        "warning: removed corrupt cache file '{}'; it will be re-downloaded",
+                        path.display()
+                    );
                     let ctx =
                         super::HashMismatchContext::new(name, url, expected.to_owned(), actual);
                     return Err(Error::HashMismatch(ctx));
@@ -789,6 +801,8 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
     if !download_only {
         let config = session.config();
         let apps_dir = config.root_path().join("apps");
+        let ignore_failure = options.contains(&SyncOption::IgnoreFailure);
+        let mut deferred: Option<Error> = None;
 
         // Log packages requiring PowerShell scripts
         let script_pkgs = packages
@@ -817,240 +831,281 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 false => pkg,
             };
 
-            // Re-check at commit time: a process may have started while
-            // downloading. Skip it rather than failing the transaction.
-            if let Some(processes) = running_blocked(session, pkg) {
+            // One package's commit runs in a closure so `IgnoreFailure`
+            // can collect the error and continue with the rest instead of
+            // aborting the transaction (`?` returns from here, and the
+            // skip below returns success for this package only).
+            let result = (|| -> Fallible<()> {
+                // Re-check at commit time: a process may have started while
+                // downloading. Skip it rather than failing the transaction.
+                if let Some(processes) = running_blocked(session, pkg) {
+                    if let Some(tx) = session.emitter() {
+                        let _ = tx.send(Event::PackageRunningSkipped {
+                            name: pkg.name().to_owned(),
+                            processes,
+                        });
+                    }
+                    return Ok(());
+                }
+
                 if let Some(tx) = session.emitter() {
-                    let _ = tx.send(Event::PackageRunningSkipped {
-                        name: pkg.name().to_owned(),
-                        processes,
-                    });
+                    let _ = tx.send(Event::PackageCommitStart(pkg.name().to_owned()));
                 }
-                continue;
-            }
 
-            if let Some(tx) = session.emitter() {
-                let _ = tx.send(Event::PackageCommitStart(pkg.name().to_owned()));
-            }
-
-            let working_dir = apps_dir.join(pkg.name()).join(pkg.version());
-            // A previous failed attempt leaves a metadata-less directory
-            // behind; purge it before staging (upstream `ensure_none_failed`).
-            // Mutually exclusive with the force rotation below, which needs
-            // the markers to be present.
-            if purge_failed_dir(&apps_dir.join(pkg.name()), pkg.version())? {
-                info!(
-                    "purged previous failed install of '{}' ({})",
-                    pkg.name(),
-                    pkg.version()
-                );
-            }
-            if force && super::has_install_metadata(&working_dir) {
-                // Upstream `update -f`: rotate the previous install aside
-                // instead of merging the reinstall into it.
-                let backup = rotate_version_dir(&apps_dir.join(pkg.name()), pkg.version())?;
-                info!(
-                    "moved previous install of '{}' aside to '{}'",
-                    pkg.name(),
-                    backup.display()
-                );
-            }
-            internal::fs::ensure_dir(&working_dir)?;
-
-            let filenames = pkg.download_filenames();
-            let staged = pkg.download_staged_filenames();
-
-            let cache_root = config.cache_path();
-
-            // Stage downloads under their real URL basenames (upstream
-            // `url_filename`; `#/...` fragments coerce the name), so hook
-            // scripts, installer files, and shim targets observe the names
-            // manifests were written against.
-            for (filename, staged_name) in filenames.iter().zip(staged.iter()) {
-                let src = cache_root.join(filename);
-                if !src.exists() {
-                    continue;
+                let working_dir = apps_dir.join(pkg.name()).join(pkg.version());
+                // A previous failed attempt leaves a metadata-less directory
+                // behind; purge it before staging (upstream `ensure_none_failed`).
+                // Mutually exclusive with the force rotation below, which needs
+                // the markers to be present.
+                if purge_failed_dir(&apps_dir.join(pkg.name()), pkg.version())? {
+                    info!(
+                        "purged previous failed install of '{}' ({})",
+                        pkg.name(),
+                        pkg.version()
+                    );
                 }
-                let dst = working_dir.join(staged_name);
-                let _ = std::fs::remove_file(&dst);
-                std::fs::copy(&src, &dst)?;
-            }
-
-            // Standard extraction first, matching upstream Scoop
-            // (`Invoke-Extraction` runs before any hook script and simply
-            // skips files without a known extractor, leaving those for the
-            // installer file/script below).
-            extract_package(session, pkg, &working_dir)?;
-
-            // Handle extract_dir/extract_to from manifest
-            handle_extract_location(session, pkg, &working_dir)?;
-
-            // Run pre_install after extraction (upstream order): hook
-            // scripts such as `Expand-7zipArchive "$dir\inner.7z"` operate
-            // on the extracted tree.
-            if let Some(pre_install) = pkg.manifest().pre_install() {
-                internal::ps::invoke_script(session, pkg, "install", &pre_install, &working_dir)?;
-            }
-
-            // Run installer file and/or script if present. Upstream runs
-            // the downloaded file (first URL basename) when `args` is
-            // given without `file`, so the call is unconditional: it
-            // no-ops when the section carries neither.
-            if let Some(installer) = pkg.manifest().installer() {
-                run_installer_file(
-                    session,
-                    pkg,
-                    &working_dir,
-                    installer.file(),
-                    installer.args(),
-                    installer.keep(),
-                    false,
-                )?;
-                if let Some(script) = installer.script() {
-                    internal::ps::invoke_script(session, pkg, "install", &script, &working_dir)?;
+                if force && super::has_install_metadata(&working_dir) {
+                    // Upstream `update -f`: rotate the previous install aside
+                    // instead of merging the reinstall into it.
+                    let backup = rotate_version_dir(&apps_dir.join(pkg.name()), pkg.version())?;
+                    info!(
+                        "moved previous install of '{}' aside to '{}'",
+                        pkg.name(),
+                        backup.display()
+                    );
                 }
-            }
+                internal::fs::ensure_dir(&working_dir)?;
 
-            // Installers may register the app dir on PATH themselves;
-            // upstream scrubs those entries so the manifest stays in
-            // control of the environment.
-            crate::env::scrub_install_dir_from_path(session, &working_dir)?;
+                let filenames = pkg.download_filenames();
+                let staged = pkg.download_staged_filenames();
 
-            // Create the 'current' symlink if not using no_junction
-            if !config.no_junction() {
-                let current_link = apps_dir.join(pkg.name()).join("current");
-                internal::fs::remove_symlink(&current_link)?;
-                internal::fs::symlink_dir(&working_dir, &current_link)?;
-            }
+                let cache_root = config.cache_path();
 
-            let install_subdir = if config.no_junction() {
-                pkg.version().to_string()
-            } else {
-                "current".to_string()
-            };
-            let install_base = apps_dir.join(pkg.name()).join(&install_subdir);
+                // Stage downloads under their real URL basenames (upstream
+                // `url_filename`; `#/...` fragments coerce the name), so hook
+                // scripts, installer files, and shim targets observe the names
+                // manifests were written against.
+                for (filename, staged_name) in filenames.iter().zip(staged.iter()) {
+                    let src = cache_root.join(filename);
+                    if !src.exists() {
+                        continue;
+                    }
+                    let dst = working_dir.join(staged_name);
+                    let _ = std::fs::remove_file(&dst);
+                    std::fs::copy(&src, &dst)?;
+                }
 
-            // Save the installed manifest under both names (upstream
-            // `scoop-manifest.json`, legacy `manifest.json`).
-            let manifest_json = serde_json::to_string_pretty(pkg.manifest().inner())?;
-            std::fs::write(install_base.join("manifest.json"), &manifest_json)?;
-            std::fs::write(install_base.join("scoop-manifest.json"), &manifest_json)?;
+                // Standard extraction first, matching upstream Scoop
+                // (`Invoke-Extraction` runs before any hook script and simply
+                // skips files without a known extractor, leaving those for the
+                // installer file/script below).
+                extract_package(session, pkg, &working_dir)?;
 
-            // Write install info under both names (upstream
-            // `scoop-install.json`, legacy `install.json`). Isolated
-            // packages record no bucket so they keep the `__isolated__`
-            // marker on later queries. The `url` mirrors upstream
-            // semantics — the manifest source for isolated installs,
-            // absent for bucket installs. It must never be a download
-            // URL: upstream `update` mistakes that for a manifest and
-            // fails the reinstall.
-            let isolated = pkg.bucket() == crate::constant::ISOLATED_PACKAGE_BUCKET;
-            let install_bucket = match isolated {
-                true => None,
-                false => Some(pkg.bucket().to_owned()),
-            };
-            let install_url = match isolated {
-                true => Some(pkg.manifest().path().to_string_lossy().into_owned()),
-                false => None,
-            };
-            let install_info = InstallInfo::new(
-                crate::operation::resolved_arch(pkg),
-                install_bucket,
-                install_url,
-            );
-            internal::fs::write_json(install_base.join("install.json"), &install_info)?;
-            internal::fs::write_json(install_base.join("scoop-install.json"), &install_info)?;
+                // Run pre_install after extraction (upstream order): hook
+                // scripts such as `Expand-7zipArchive "$dir\inner.7z"` operate
+                // on the extracted tree.
+                if let Some(pre_install) = pkg.manifest().pre_install() {
+                    internal::ps::invoke_script(
+                        session,
+                        pkg,
+                        "install",
+                        &pre_install,
+                        &working_dir,
+                    )?;
+                }
 
-            // Set up persist directories
-            persist::link(session, pkg)?;
+                // Run installer file and/or script if present. Upstream runs
+                // the downloaded file (first URL basename) when `args` is
+                // given without `file`, so the call is unconditional: it
+                // no-ops when the section carries neither.
+                if let Some(installer) = pkg.manifest().installer() {
+                    run_installer_file(
+                        session,
+                        pkg,
+                        &working_dir,
+                        installer.file(),
+                        installer.args(),
+                        installer.keep(),
+                        false,
+                    )?;
+                    if let Some(script) = installer.script() {
+                        internal::ps::invoke_script(
+                            session,
+                            pkg,
+                            "install",
+                            &script,
+                            &working_dir,
+                        )?;
+                    }
+                }
 
-            // Upstream `persist_permission`: global installs running
-            // elevated grant Users write access to the persist root so
-            // non-admin users can use the persisted data.
-            if session.config().is_global_scope()
-                && pkg.manifest().persist().is_some()
-                && internal::os::is_elevated()
-            {
-                persist::grant_users_write(&session.config().root_path().join("persist"))?;
-            }
+                // Installers may register the app dir on PATH themselves;
+                // upstream scrubs those entries so the manifest stays in
+                // control of the environment.
+                crate::env::scrub_install_dir_from_path(session, &working_dir)?;
 
-            // Add shims
-            shim::add(session, pkg)?;
+                // Create the 'current' symlink if not using no_junction
+                if !config.no_junction() {
+                    let current_link = apps_dir.join(pkg.name()).join("current");
+                    internal::fs::remove_symlink(&current_link)?;
+                    internal::fs::symlink_dir(&working_dir, &current_link)?;
+                }
 
-            // Add shortcuts
-            shortcut::add(session, pkg)?;
-
-            // Import PowerShell modules
-            psmodule::add(session, pkg)?;
-
-            // Set environment variables and path
-            env::install(session, pkg)?;
-
-            // Run post_install script if present
-            if let Some(post_install) = pkg.manifest().post_install() {
-                let post_install_dir = if config.no_junction() {
-                    apps_dir.join(pkg.name()).join(pkg.version())
+                let install_subdir = if config.no_junction() {
+                    pkg.version().to_string()
                 } else {
-                    apps_dir.join(pkg.name()).join("current")
+                    "current".to_string()
                 };
-                internal::ps::invoke_script(
-                    session,
-                    pkg,
-                    "install",
-                    &post_install,
-                    &post_install_dir,
-                )?;
-            }
+                let install_base = apps_dir.join(pkg.name()).join(&install_subdir);
 
-            if let Some(tx) = session.emitter() {
-                // Substitute `$dir`/`$original_dir`/`$persist_dir` in notes,
-                // mirroring upstream `show_notes`.
-                let dir_str = install_base.to_string_lossy();
-                let original_dir = apps_dir.join(pkg.name()).join(pkg.version());
-                let original_str = original_dir.to_string_lossy();
-                let persist_str = config
-                    .root_path()
-                    .join("persist")
-                    .join(pkg.name())
-                    .to_string_lossy()
-                    .into_owned();
-                let substitute = |s: &str| {
-                    s.replace("$original_dir", original_str.as_ref())
-                        .replace("$persist_dir", persist_str.as_str())
-                        .replace("$dir", dir_str.as_ref())
+                // Save the installed manifest under both names (upstream
+                // `scoop-manifest.json`, legacy `manifest.json`).
+                let manifest_json = serde_json::to_string_pretty(pkg.manifest().inner())?;
+                std::fs::write(install_base.join("manifest.json"), &manifest_json)?;
+                std::fs::write(install_base.join("scoop-manifest.json"), &manifest_json)?;
+
+                // Write install info under both names (upstream
+                // `scoop-install.json`, legacy `install.json`). Isolated
+                // packages record no bucket so they keep the `__isolated__`
+                // marker on later queries. The `url` mirrors upstream
+                // semantics — the manifest source for isolated installs,
+                // absent for bucket installs. It must never be a download
+                // URL: upstream `update` mistakes that for a manifest and
+                // fails the reinstall.
+                let isolated = pkg.bucket() == crate::constant::ISOLATED_PACKAGE_BUCKET;
+                let install_bucket = match isolated {
+                    true => None,
+                    false => Some(pkg.bucket().to_owned()),
                 };
-                let notes = pkg
-                    .manifest()
-                    .notes()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(substitute)
-                    .collect::<Vec<_>>();
-                let suggest = pkg
-                    .manifest()
-                    .suggest()
-                    .map(|map| {
-                        let mut entries = map
-                            .iter()
-                            .map(|(scope, apps)| {
-                                format!("{scope}: {}", apps.devectorize().join(", "))
-                            })
-                            .collect::<Vec<_>>();
-                        entries.sort();
-                        entries
-                    })
-                    .unwrap_or_default();
+                let install_url = match isolated {
+                    true => Some(pkg.manifest().path().to_string_lossy().into_owned()),
+                    false => None,
+                };
+                let install_info = InstallInfo::new(
+                    crate::operation::resolved_arch(pkg),
+                    install_bucket,
+                    install_url,
+                );
+                internal::fs::write_json(install_base.join("install.json"), &install_info)?;
+                internal::fs::write_json(install_base.join("scoop-install.json"), &install_info)?;
 
-                if !notes.is_empty() || !suggest.is_empty() {
-                    let _ = tx.send(Event::PackageInstalledNotes {
-                        ident: pkg.ident(),
-                        notes,
-                        suggest,
-                    });
+                // Set up persist directories
+                persist::link(session, pkg)?;
+
+                // Upstream `persist_permission`: global installs running
+                // elevated grant Users write access to the persist root so
+                // non-admin users can use the persisted data.
+                if session.config().is_global_scope()
+                    && pkg.manifest().persist().is_some()
+                    && internal::os::is_elevated()
+                {
+                    persist::grant_users_write(&session.config().root_path().join("persist"))?;
                 }
 
-                let _ = tx.send(Event::PackageCommitDone(pkg.name().to_owned()));
+                // Add shims
+                shim::add(session, pkg)?;
+
+                // Add shortcuts
+                shortcut::add(session, pkg)?;
+
+                // Import PowerShell modules
+                psmodule::add(session, pkg)?;
+
+                // Set environment variables and path
+                env::install(session, pkg)?;
+
+                // Run post_install script if present
+                if let Some(post_install) = pkg.manifest().post_install() {
+                    let post_install_dir = if config.no_junction() {
+                        apps_dir.join(pkg.name()).join(pkg.version())
+                    } else {
+                        apps_dir.join(pkg.name()).join("current")
+                    };
+                    internal::ps::invoke_script(
+                        session,
+                        pkg,
+                        "install",
+                        &post_install,
+                        &post_install_dir,
+                    )?;
+                }
+
+                if let Some(tx) = session.emitter() {
+                    // Substitute `$dir`/`$original_dir`/`$persist_dir` in notes,
+                    // mirroring upstream `show_notes`.
+                    let dir_str = install_base.to_string_lossy();
+                    let original_dir = apps_dir.join(pkg.name()).join(pkg.version());
+                    let original_str = original_dir.to_string_lossy();
+                    let persist_str = config
+                        .root_path()
+                        .join("persist")
+                        .join(pkg.name())
+                        .to_string_lossy()
+                        .into_owned();
+                    let substitute = |s: &str| {
+                        s.replace("$original_dir", original_str.as_ref())
+                            .replace("$persist_dir", persist_str.as_str())
+                            .replace("$dir", dir_str.as_ref())
+                    };
+                    let notes = pkg
+                        .manifest()
+                        .notes()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(substitute)
+                        .collect::<Vec<_>>();
+                    let suggest = pkg
+                        .manifest()
+                        .suggest()
+                        .map(|map| {
+                            let mut entries = map
+                                .iter()
+                                .map(|(scope, apps)| {
+                                    format!("{scope}: {}", apps.devectorize().join(", "))
+                                })
+                                .collect::<Vec<_>>();
+                            entries.sort();
+                            entries
+                        })
+                        .unwrap_or_default();
+
+                    if !notes.is_empty() || !suggest.is_empty() {
+                        let _ = tx.send(Event::PackageInstalledNotes {
+                            ident: pkg.ident(),
+                            notes,
+                            suggest,
+                        });
+                    }
+
+                    let _ = tx.send(Event::PackageCommitDone(pkg.name().to_owned()));
+                }
+
+                // Upgrades finalize after the new version commits: the previous
+                // version's uninstall hooks run, integration the new manifest
+                // dropped is removed, and the old directory goes away.
+                if only_upgrade {
+                    finalize_upgrade(session, pkg);
+                }
+                Ok(())
+            })();
+
+            if let Err(e) = result {
+                if ignore_failure {
+                    eprintln!(
+                        "warning: failed to process '{}': {e}; continuing with the rest",
+                        pkg.name()
+                    );
+                    if deferred.is_none() {
+                        deferred = Some(e);
+                    }
+                } else {
+                    return Err(e);
+                }
             }
+        }
+
+        if let Some(e) = deferred {
+            return Err(e);
         }
     }
 
@@ -1246,9 +1301,9 @@ fn run_installer_file(
                 status
             )));
         }
-        if let Some(tx) = session.emitter() {
-            let _ = tx.send(Event::PackageCommitDone(pkg.name().to_owned()));
-        }
+        // NOTE: no PackageCommitDone here either. Running the installer
+        // file is a mid-transaction step (its start is announced above for
+        // binaries); the owning transaction reports completion exactly once.
         // Upstream only removes installer binaries (`.ps1` files are kept);
         // removal is skipped when `keep` is set.
         if !is_ps1 && !keep {
@@ -1259,6 +1314,14 @@ fn run_installer_file(
 }
 
 /// Extract downloaded archives in the working directory.
+///
+/// Each archive extracts into its own staging directory so `extract_dir`
+/// and `extract_to` pair with URLs by index (upstream semantics): a lone
+/// entry broadcasts to every URL (e.g. msival2's single `extract_dir`
+/// over 4 URLs), otherwise entry[i] applies to URL[i] (aspell,
+/// unxutils). Staged content then merges to the working dir (or the
+/// paired `extract_to` subdirectory); unextractable files (e.g. `.exe`
+/// app binaries) stay at the top level where shims expect them.
 fn extract_package(
     session: &Session,
     pkg: &Package,
@@ -1266,12 +1329,19 @@ fn extract_package(
 ) -> Fallible<()> {
     let filenames = pkg.download_staged_filenames();
     let config = session.config();
+    let extract_dirs = pkg.manifest().extract_dir().unwrap_or_default();
+    let extract_tos = pkg.manifest().extract_to().unwrap_or_default();
 
-    for filename in filenames.iter() {
+    for (index, filename) in filenames.iter().enumerate() {
         let archive_path = working_dir.join(filename);
         if !archive_path.exists() {
             continue;
         }
+
+        // Fresh staging per URL (leftovers from a failed run are dropped).
+        let stage = working_dir.join(format!("__url_{index}"));
+        let _ = remove_dir_all::remove_dir_all(&stage);
+        internal::fs::ensure_dir(&stage)?;
 
         // MSI packages go through the native MSI extractor (lessmsi or
         // msiexec, mirroring upstream `Expand-MsiArchive`); 7z mangles
@@ -1288,13 +1358,9 @@ fn extract_package(
                 )));
             }
             let lessmsi = crate::internal::ps::helper_exe(session, "lessmsi", "lessmsi.exe");
-            internal::archive::extract_msi(
-                &archive_path,
-                working_dir,
-                config.use_lessmsi(),
-                lessmsi,
-            )?;
+            internal::archive::extract_msi(&archive_path, &stage, config.use_lessmsi(), lessmsi)?;
             let _ = std::fs::remove_file(&archive_path);
+            merge_staged_content(&stage, working_dir, paired_entry(&extract_tos, index))?;
             continue;
         }
 
@@ -1324,7 +1390,7 @@ fn extract_package(
                     })?;
             let status = std::process::Command::new(&innounp)
                 .arg("-x")
-                .arg(format!("-d{}", working_dir.to_string_lossy()))
+                .arg(format!("-d{}", stage.to_string_lossy()))
                 .arg(&archive_path)
                 .arg("-y")
                 .arg("-c{app}")
@@ -1337,6 +1403,7 @@ fn extract_package(
                 )));
             }
             let _ = std::fs::remove_file(&archive_path);
+            merge_staged_content(&stage, working_dir, paired_entry(&extract_tos, index))?;
             continue;
         }
 
@@ -1360,129 +1427,285 @@ fn extract_package(
                 // 7z handles .tar files natively, and .tar.gz etc. automatically
                 internal::archive::extract_with_root(
                     &archive_path,
-                    working_dir,
+                    &stage,
                     Some(config.root_path()),
                 )?;
             } else {
-                // Extract to a temporary subdirectory first
-                let extract_dir = working_dir.join(format!("__extract_{}", filename));
+                // Extract to the staging directory first
                 internal::archive::extract_with_root(
                     &archive_path,
-                    &extract_dir,
+                    &stage,
                     Some(config.root_path()),
                 )?;
-
-                // Move contents from extract_dir to working_dir
-                let entries = std::fs::read_dir(&extract_dir)?;
-                for entry in entries {
-                    let entry = entry?;
-                    let name = entry.file_name();
-                    let src = entry.path();
-                    let dst = working_dir.join(&name);
-                    if dst.exists() {
-                        let _ = std::fs::remove_file(&dst);
-                    }
-                    std::fs::rename(&src, &dst)?;
-                }
-                let _ = internal::fs::remove_dir(&extract_dir);
             }
 
             // Clean up the archive file after extraction
             let _ = std::fs::remove_file(&archive_path);
+
+            // This URL's extract_dir promotes within the stage.
+            if let Some(sub) = paired_entry(&extract_dirs, index) {
+                promote_subdir(&stage, &sub)?;
+            }
+            merge_staged_content(&stage, working_dir, paired_entry(&extract_tos, index))?;
         }
     }
 
     Ok(())
 }
 
-/// Handle extract_dir and extract_to manifest fields.
-///
-/// - `extract_dir`: promote the named subdirectory of the extracted tree
-///   (upstream `Invoke-Extraction` moves `$dest\$extract_dir` up to `$dest`;
-///   a no-op when the subdirectory does not exist, e.g. flat 7z output).
-/// - `extract_to`: move extracted content into a subdirectory of the app dir.
-///
-/// Paths are never moved into their own descendants (a no-op instead of a
-/// platform error).
-fn handle_extract_location(
-    session: &Session,
-    pkg: &Package,
-    working_dir: &std::path::Path,
-) -> Fallible<()> {
-    let config = session.config();
-    let apps_dir = config.root_path().join("apps");
+/// Pick the `extract_dir`/`extract_to` entry for one URL: a lone entry
+/// broadcasts to every URL, otherwise entries pair by URL index.
+fn paired_entry(entries: &[&str], index: usize) -> Option<String> {
+    if entries.len() == 1 {
+        entries.first().map(|s| s.to_string())
+    } else {
+        entries.get(index).map(|s| s.to_string())
+    }
+}
 
-    if let Some(extract_dir) = pkg.manifest().extract_dir() {
-        for sub in extract_dir {
-            let src_dir = working_dir.join(sub);
-            if !src_dir.is_dir() {
+/// Promote a subdirectory's contents up into its root, pruning the
+/// emptied directories deepest-first. A no-op when the subdirectory
+/// does not exist (e.g. flat 7z output).
+fn promote_subdir(root: &std::path::Path, sub: &str) -> Fallible<()> {
+    let src_dir = root.join(sub);
+    if !src_dir.is_dir() {
+        return Ok(());
+    }
+    // Move the subdirectory's contents up into the root.
+    let entries = std::fs::read_dir(&src_dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let src = entry.path();
+        let dst = root.join(&name);
+        if dst.exists() {
+            if dst.is_dir() {
                 continue;
             }
-            // Move the subdirectory's contents up into the working dir.
-            let entries = std::fs::read_dir(&src_dir)?;
-            for entry in entries {
-                let entry = entry?;
-                let name = entry.file_name();
-                let src = entry.path();
-                let dst = working_dir.join(&name);
-                if dst.exists() {
-                    if dst.is_dir() {
-                        continue;
-                    }
-                    let _ = std::fs::remove_file(&dst);
-                }
-                std::fs::rename(&src, &dst)?;
+            let _ = std::fs::remove_file(&dst);
+        }
+        std::fs::rename(&src, &dst)?;
+    }
+    // Remove the (now empty) promoted directories, deepest first.
+    let mut dir = src_dir.as_path();
+    while dir.starts_with(root) && dir != root {
+        if std::fs::read_dir(dir)?.next().is_some() {
+            break;
+        }
+        std::fs::remove_dir(dir)?;
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// Merge staged content to its destination: the working dir, or the
+/// paired `extract_to` subdirectory of it (created on demand).
+/// Unextractable files left at the top level are never relocated.
+/// Directories merge recursively (matching direct multi-archive
+/// extraction); files replace.
+fn merge_staged_content(
+    stage: &std::path::Path,
+    working_dir: &std::path::Path,
+    extract_to: Option<String>,
+) -> Fallible<()> {
+    let dest = match extract_to {
+        Some(sub) => {
+            let dir = working_dir.join(sub);
+            internal::fs::ensure_dir(&dir)?;
+            dir
+        }
+        None => working_dir.to_owned(),
+    };
+    merge_dir_contents(stage, &dest)?;
+    let _ = std::fs::remove_dir(stage);
+    Ok(())
+}
+
+/// Move every entry of `src` into `dst`, merging directories recursively
+/// and replacing files.
+fn merge_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> Fallible<()> {
+    let entries = std::fs::read_dir(src)?;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let from = entry.path();
+        let to = dst.join(&name);
+        if from.is_dir() {
+            if to.exists() && to.is_dir() {
+                merge_dir_contents(&from, &to)?;
+                let _ = std::fs::remove_dir(&from);
+                continue;
             }
-            // Remove the (now empty) promoted directories, deepest first.
-            let mut dir = src_dir.as_path();
-            while dir.starts_with(working_dir) && dir != working_dir {
-                if std::fs::read_dir(dir)?.next().is_some() {
-                    break;
-                }
-                std::fs::remove_dir(dir)?;
-                match dir.parent() {
-                    Some(parent) => dir = parent,
-                    None => break,
-                }
+            if to.exists() {
+                let _ = std::fs::remove_file(&to);
+            }
+            std::fs::rename(&from, &to)?;
+            continue;
+        }
+        if to.exists() {
+            if to.is_dir() {
+                continue;
+            }
+            let _ = std::fs::remove_file(&to);
+        }
+        std::fs::rename(&from, &to)?;
+    }
+    Ok(())
+}
+
+/// Finalize an upgrade after the new version committed: run the previous
+/// version's uninstall hooks, drop integration the new manifest no longer
+/// declares (stale shims/shortcuts/env entries), and remove the old
+/// version directory.
+///
+/// Best-effort convergence, mirroring the install side's tolerance: the
+/// upgrade itself already succeeded, so failures here warn instead of
+/// failing the transaction. `current` and rotation backups (`_*`) are
+/// never touched.
+fn finalize_upgrade(session: &Session, pkg: &Package) {
+    if let Err(e) = finalize_upgrade_inner(session, pkg) {
+        eprintln!(
+            "warning: upgrade cleanup for '{}' incomplete: {e}",
+            pkg.name()
+        );
+    }
+}
+
+fn finalize_upgrade_inner(session: &Session, pkg: &Package) -> Fallible<()> {
+    use std::collections::HashSet;
+
+    let config = session.config();
+    let app_dir = config.root_path().join("apps").join(pkg.name());
+    let new_version = pkg
+        .installed_version()
+        .unwrap_or_else(|| pkg.version())
+        .to_owned();
+    let new_base = if config.no_junction() {
+        app_dir.join(&new_version)
+    } else {
+        app_dir.join("current")
+    };
+    drop(config);
+
+    // Previous version directories carrying install metadata.
+    let mut olds = vec![];
+    if let Ok(entries) = std::fs::read_dir(&app_dir) {
+        for entry in entries.filter_map(|de| de.ok()) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "current" || name == new_version || name.starts_with('_') {
+                continue;
+            }
+            let dir = entry.path();
+            if dir.is_dir() && super::has_install_metadata(&dir) {
+                olds.push(dir);
             }
         }
     }
+    olds.sort();
 
-    // extract_to is applied after extraction, moving content to a subdirectory
-    // within the app's directory (not the version dir)
-    if let Some(extract_to) = pkg.manifest().extract_to() {
-        let target_dir = apps_dir
-            .join(pkg.name())
-            .join(pkg.version())
-            .join(extract_to[0]);
-        internal::fs::ensure_dir(&target_dir)?;
+    let new_manifest = pkg.manifest();
+    let new_bins: HashSet<String> = new_manifest
+        .bin()
+        .unwrap_or_default()
+        .iter()
+        .map(|def| crate::shim::Shim::name_of(def).to_owned())
+        .collect();
+    let new_shortcuts: HashSet<String> =
+        shortcut::shortcut_names(new_manifest, pkg.name(), &new_base)
+            .into_iter()
+            .collect();
+    let new_paths = env_paths_for(&new_base, new_manifest);
+    let new_vars = env_vars_for(new_manifest);
 
-        // Never relocate the downloaded archives themselves: consumed ones
-        // are already gone, and skipped ones (e.g. an unextractable `.exe`
-        // that IS the app binary, as in oh-my-posh) must stay at the top
-        // level where shims expect them.
-        let archives: std::collections::HashSet<String> =
-            pkg.download_staged_filenames().into_iter().collect();
-        let entries = std::fs::read_dir(working_dir)?;
-        for entry in entries {
-            let entry = entry?;
-            let name = entry.file_name();
-            let path = entry.path();
-            if path == target_dir {
-                continue;
-            }
-            if archives.contains(&name.to_string_lossy().into_owned()) {
-                continue;
-            }
-            let dest = target_dir.join(&name);
-            if dest.exists() {
-                let _ = std::fs::remove_file(&dest);
-            }
-            std::fs::rename(&path, &dest)?;
+    for old_dir in olds {
+        let old_manifest = Manifest::parse(super::installed_manifest_path(&old_dir))?;
+        // Hook context for the old version ($dir = old version dir).
+        let old_pkg = Package::from(pkg.name(), pkg.bucket(), old_manifest.clone());
+        let arch = InstallInfo::parse(super::install_info_path(&old_dir))
+            .map(|info| info.arch().to_owned())
+            .unwrap_or_default();
+        old_pkg.fill_install_state(InstallState::Installed(InstallStateInstalled {
+            version: old_manifest.version().to_owned(),
+            bucket: None,
+            arch,
+            held: false,
+            url: None,
+        }));
+
+        // The old version's uninstall hooks (same semantics as remove).
+        if let Some(pre) = old_manifest.pre_uninstall() {
+            internal::ps::invoke_script(session, &old_pkg, "uninstall", &pre, &old_dir)?;
         }
+        if let Some(uninstaller) = old_manifest.uninstaller() {
+            run_installer_file(
+                session,
+                &old_pkg,
+                &old_dir,
+                uninstaller.file(),
+                uninstaller.args(),
+                uninstaller.keep(),
+                true,
+            )?;
+            if let Some(script) = uninstaller.script() {
+                internal::ps::invoke_script(session, &old_pkg, "uninstall", &script, &old_dir)?;
+            }
+        }
+        if let Some(post) = old_manifest.post_uninstall() {
+            internal::ps::invoke_script(session, &old_pkg, "uninstall", &post, &old_dir)?;
+        }
+
+        // Stale shims/shortcuts: declared by the old manifest, gone from
+        // the new one. Shared names now point at the new install and are
+        // left alone.
+        let old_bins: HashSet<String> = old_manifest
+            .bin()
+            .unwrap_or_default()
+            .iter()
+            .map(|def| crate::shim::Shim::name_of(def).to_owned())
+            .collect();
+        let stale_bins: HashSet<String> = old_bins.difference(&new_bins).cloned().collect();
+        shim::remove_stale(session, &stale_bins)?;
+
+        let old_shortcuts: HashSet<String> =
+            shortcut::shortcut_names(&old_manifest, pkg.name(), &old_dir)
+                .into_iter()
+                .collect();
+        let stale_shortcuts: HashSet<String> =
+            old_shortcuts.difference(&new_shortcuts).cloned().collect();
+        shortcut::remove_stale(session, &stale_shortcuts)?;
+
+        // Stale env: old PATH entries and vars the new manifest dropped.
+        let old_paths = env_paths_for(&old_dir, &old_manifest);
+        let old_vars = env_vars_for(&old_manifest);
+        env::remove_stale(session, &old_paths, &new_paths, &old_vars, &new_vars)?;
+
+        // Drop the old version directory.
+        internal::fs::tolerate_not_found(internal::fs::remove_dir(&old_dir))?;
     }
 
     Ok(())
+}
+
+/// `env_add_path` entries of a manifest resolved against a base dir.
+fn env_paths_for(base: &std::path::Path, manifest: &Manifest) -> Vec<std::path::PathBuf> {
+    match manifest.env_add_path() {
+        Some(entries) => entries
+            .into_iter()
+            .map(|p| internal::path::normalize_path(base.join(p)))
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// `env_set` variable names of a manifest.
+fn env_vars_for(manifest: &Manifest) -> Vec<String> {
+    manifest
+        .env_set()
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Sync operation: remove packages.
@@ -1495,7 +1718,7 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
     for &name in queries {
         let mut matched = installed
             .iter()
-            .filter(|&p| p.name() == name)
+            .filter(|&p| p.name().eq_ignore_ascii_case(name))
             .cloned()
             .collect::<Vec<_>>();
 
@@ -1682,8 +1905,9 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
                 )?;
             }
 
-            // Remove the app directory
-            internal::fs::remove_dir(app_dir)?;
+            // Remove the app directory (already-absent is fine: a retried
+            // uninstall after a partial failure must converge, not abort).
+            internal::fs::tolerate_not_found(internal::fs::remove_dir(&app_dir))?;
 
             if purge {
                 if let Some(tx) = session.emitter() {
@@ -1691,7 +1915,7 @@ pub fn remove(session: &Session, queries: &[&str], options: &[SyncOption]) -> Fa
                 }
 
                 let persist_dir = config.root_path().join("persist").join(package.name());
-                internal::fs::remove_dir(persist_dir)?;
+                internal::fs::tolerate_not_found(internal::fs::remove_dir(&persist_dir))?;
 
                 if let Some(tx) = session.emitter() {
                     let _ = tx.send(Event::PackagePersistPurgeDone);
@@ -1966,7 +2190,62 @@ mod tests {
         std::env::remove_var("SCOOP");
         std::env::remove_var("SCOOP_GLOBAL");
         std::env::remove_var("SCOOP_CACHE");
-        std::fs::remove_dir_all(base).ok();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `extract_dir`/`extract_to` pair with URLs by index; a lone entry
+    /// broadcasts. Merges recurse, files replace, promotions prune.
+    #[test]
+    fn extract_pairing_merge_and_promote() {
+        assert_eq!(paired_entry(&["a"], 0), Some("a".to_string()));
+        assert_eq!(paired_entry(&["a"], 7), Some("a".to_string()));
+        assert_eq!(paired_entry(&["a", "b"], 1), Some("b".to_string()));
+        assert_eq!(paired_entry(&["a", "b"], 5), None);
+        assert_eq!(paired_entry(&[], 0), None);
+
+        let base = std::env::temp_dir().join("bagger-test-extract-pair");
+        let _ = std::fs::remove_dir_all(&base);
+        let stage = base.join("stage");
+        let dest = base.join("dest");
+        std::fs::create_dir_all(stage.join("sub/deep")).unwrap();
+        std::fs::write(stage.join("sub/deep/f.txt"), "f").unwrap();
+        std::fs::write(stage.join("top.txt"), "top").unwrap();
+        std::fs::create_dir_all(dest.join("sub")).unwrap();
+        std::fs::write(dest.join("sub/old.txt"), "old").unwrap();
+
+        promote_subdir(&stage, "sub").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(stage.join("deep/f.txt")).unwrap(),
+            "f"
+        );
+        assert!(!stage.join("sub").exists());
+
+        merge_staged_content(&stage, &dest, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deep/f.txt")).unwrap(),
+            "f"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("top.txt")).unwrap(),
+            "top"
+        );
+        // Recursive merge kept the pre-existing file.
+        assert_eq!(
+            std::fs::read_to_string(dest.join("sub/old.txt")).unwrap(),
+            "old"
+        );
+
+        // extract_to relocates staged content into the subdirectory.
+        let stage2 = base.join("stage2");
+        std::fs::create_dir_all(&stage2).unwrap();
+        std::fs::write(stage2.join("moved.txt"), "m").unwrap();
+        merge_staged_content(&stage2, &dest, Some("sub2".to_string())).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("sub2/moved.txt")).unwrap(),
+            "m"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// `args` without `file` runs the staged download (upstream `coalesce`
@@ -2093,5 +2372,165 @@ mod tests {
         assert!(err.to_string().contains("missing"));
 
         cleanup_installer_env(&base);
+    }
+
+    /// Running installer files/scripts emits no `PackageCommitDone`: they
+    /// are mid-transaction steps, and each extra send printed another green
+    /// "'x' was uninstalled." line on top of the real commit event.
+    #[test]
+    #[cfg(windows)]
+    fn installer_file_sends_no_commit_done() {
+        use crate::Event;
+
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-installer-events");
+        let session = installer_session(&base);
+        let rx = session.event_bus().receiver();
+
+        // Binary installer.
+        let pkg = installer_package(r#"{"file": "setup.cmd", "args": "/S"}"#);
+        let dir = base.join("root/apps/instapp/1.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("setup.cmd"), "@echo off\r\n").unwrap();
+        run_installer_file(
+            &session,
+            &pkg,
+            &dir,
+            Some("setup.cmd"),
+            pkg.manifest().installer().unwrap().args(),
+            true,
+            false,
+        )
+        .unwrap();
+
+        // PowerShell installer (runs through the hook-script path).
+        std::fs::write(dir.join("setup.ps1"), "\"ok\" | Out-Null\r\n").unwrap();
+        run_installer_file(&session, &pkg, &dir, Some("setup.ps1"), None, true, false).unwrap();
+
+        // Hook script path directly.
+        crate::internal::ps::invoke_script(&session, &pkg, "install", &["\"ok\""], &dir).unwrap();
+
+        let mut commits = 0;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, Event::PackageCommitDone(_)) {
+                commits += 1;
+            }
+        }
+        assert_eq!(
+            commits, 0,
+            "installer steps must not send PackageCommitDone"
+        );
+
+        cleanup_installer_env(&base);
+    }
+
+    /// Uninstalling after a partial failure (shims already removed, app dir
+    /// still present) converges instead of aborting with os error 2.
+    #[test]
+    fn remove_converges_after_partial_failure() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-remove-retry");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let version = root.join("apps/halfapp/1.0");
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(
+            version.join("manifest.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT",
+                "bin": "half.exe"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            version.join("install.json"),
+            r#"{"architecture": "64bit", "bucket": "fake"}"#,
+        )
+        .unwrap();
+        crate::internal::fs::symlink_dir(&version, root.join("apps/halfapp/current")).unwrap();
+        // Shims dir exists but the shim is already gone (first attempt
+        // removed it before dying further down the tail).
+        std::fs::create_dir_all(root.join("shims")).unwrap();
+
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        let session = Session::new();
+        let did_work = remove(&session, &["halfapp"], &[]).unwrap();
+        assert!(did_work);
+        assert!(!root.join("apps/halfapp").exists());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Upgrade finalization runs the old version's uninstall hooks, drops
+    /// stale shims the new manifest no longer declares, and removes the
+    /// old version directory — while keeping shared shims and the new
+    /// install intact.
+    #[test]
+    #[cfg(windows)]
+    fn finalize_upgrade_cleans_old_version() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-finalize-upgrade");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let old = root.join("apps/finapp/1.0");
+        let new = root.join("apps/finapp/2.0");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(
+            old.join("manifest.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT",
+                "bin": ["oldbin.exe"],
+                "post_uninstall": ["Set-Content -Path \"$dir/../hook-marker.txt\" -Value hooked"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            old.join("install.json"),
+            r#"{"architecture": "64bit", "bucket": "fake"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            new.join("manifest.json"),
+            r#"{"version": "2.0", "homepage": "https://example.com", "license": "MIT",
+                "bin": ["newbin.exe"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            new.join("install.json"),
+            r#"{"architecture": "64bit", "bucket": "fake"}"#,
+        )
+        .unwrap();
+        crate::internal::fs::symlink_dir(&new, root.join("apps/finapp/current")).unwrap();
+        let shims = root.join("shims");
+        std::fs::create_dir_all(&shims).unwrap();
+        std::fs::write(shims.join("oldbin.cmd"), "@echo off\n").unwrap();
+        std::fs::write(shims.join("newbin.cmd"), "@echo off\n").unwrap();
+
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        let session = Session::new();
+        let pkgs = query::query_installed(&session, &["finapp"], &[QueryOption::Explicit]).unwrap();
+        assert_eq!(pkgs.len(), 1);
+
+        finalize_upgrade(&session, &pkgs[0]);
+
+        // Old hook ran ($dir = old version dir, marker beside it).
+        assert_eq!(
+            std::fs::read_to_string(root.join("apps/finapp/hook-marker.txt")).unwrap(),
+            "hooked\r\n"
+        );
+        // Stale shim gone, shared/new shim kept, old dir dropped.
+        assert!(!shims.join("oldbin.cmd").exists());
+        assert!(shims.join("newbin.cmd").is_file());
+        assert!(!old.exists());
+        assert!(new.is_dir());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
     }
 }
