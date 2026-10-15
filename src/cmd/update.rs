@@ -26,6 +26,15 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
         return super::upgrade::execute(upgrade_args, session);
     }
 
+    refresh_buckets(session)
+}
+
+/// Fetch and update all subscribed buckets with progress UI.
+///
+/// Shared with `upgrade`, which refreshes before resolving so "up to
+/// date" is measured against live upstream state rather than whatever
+/// the local checkouts happen to hold.
+pub(crate) fn refresh_buckets(session: &Session) -> Result<()> {
     let rx = session.event_bus().receiver();
     let show_log = session.config().show_update_log();
 

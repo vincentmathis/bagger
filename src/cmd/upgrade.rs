@@ -63,6 +63,16 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
     crate::util::apply_global_flag(args.global, session)?;
     crate::util::apply_arch_flag(args.arch.as_deref(), session)?;
 
+    // Refresh buckets before resolving, so upgrades (and the "up to
+    // date" verdict) measure against live upstream state rather than
+    // stale checkouts. Skipped under `--offline`; a failed refresh warns
+    // and continues against local state instead of aborting the upgrade.
+    if !args.offline {
+        if let Err(e) = super::update::refresh_buckets(session) {
+            eprintln!("warning: bucket refresh failed ({e}); resolving against local state");
+        }
+    }
+
     let mut queries = args.package.iter().map(|s| s.as_str()).collect::<Vec<_>>();
     if queries.is_empty() {
         queries.push("*");
