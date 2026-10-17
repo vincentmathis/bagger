@@ -48,8 +48,8 @@ pub enum Error {
     HashMismatch(HashMismatchContext),
 
     /// Invalid cache file error
-    #[error("cache file not found or unreadable: {}", .path.display())]
-    InvalidCacheFile { path: PathBuf },
+    #[error("cannot read cache file '{}': {reason}", .path.display())]
+    InvalidCacheFile { path: PathBuf, reason: String },
 
     /// Throw when receiving an invalid answer from the frontend.
     #[error("invalid answer")]
@@ -136,4 +136,50 @@ pub enum Error {
     /// SQLite error
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+}
+
+impl Error {
+    /// Build a cache-file read error that keeps the underlying reason.
+    ///
+    /// The previous message ("not found or unreadable") hid the cause: a
+    /// file blocked by antivirus (common for hacktools like netcat, or
+    /// memory patchers) fails with access-denied, not "missing", and the
+    /// distinction is the only thing that tells a user what to do.
+    pub(crate) fn invalid_cache_file(path: &std::path::Path, source: &std::io::Error) -> Error {
+        let mut reason = source.to_string();
+        if source.kind() == std::io::ErrorKind::PermissionDenied {
+            reason.push_str(" (blocked by antivirus, or locked by another program?)");
+        }
+        Error::InvalidCacheFile {
+            path: path.to_owned(),
+            reason,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_read_error_keeps_cause_and_hints_av() {
+        let e = Error::invalid_cache_file(
+            std::path::Path::new(r"C:\scoop\cache\app#1.0#abc.zip"),
+            &std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+        let msg = e.to_string();
+        assert!(msg.contains("cannot read cache file"), "{msg}");
+        assert!(msg.contains("permission denied"), "{msg}");
+        assert!(msg.contains("antivirus"), "{msg}");
+    }
+
+    #[test]
+    fn cache_read_error_missing_omits_av_hint() {
+        let e = Error::invalid_cache_file(
+            std::path::Path::new("app#1.0#abc.zip"),
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        let msg = e.to_string();
+        assert!(!msg.contains("antivirus"), "{msg}");
+    }
 }

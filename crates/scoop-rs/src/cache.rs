@@ -13,7 +13,10 @@ impl CacheFile {
     pub fn from(path: PathBuf) -> Fallible<CacheFile> {
         let text = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         match REGEX_CACHE_FILE.is_match(text) {
-            false => Err(Error::InvalidCacheFile { path }),
+            false => Err(Error::InvalidCacheFile {
+                path,
+                reason: "filename does not match the cache naming scheme".to_owned(),
+            }),
             true => Ok(CacheFile { path }),
         }
     }

@@ -734,7 +734,7 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                     let path = cache_root.join(filename);
                     let mut hasher = ChecksumBuilder::new().sha256().build();
                     let mut file = std::fs::File::open(&path)
-                        .map_err(|_| Error::InvalidCacheFile { path: path.clone() })?;
+                        .map_err(|e| Error::invalid_cache_file(&path, &e))?;
                     loop {
                         let len = file.read(&mut buf)?;
                         if len == 0 {
@@ -763,8 +763,8 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                     let _ = tx.send(Event::PackageIntegrityCheckProgress(progress));
                 }
 
-                let mut file = std::fs::File::open(&path)
-                    .map_err(|_| Error::InvalidCacheFile { path: path.clone() })?;
+                let mut file =
+                    std::fs::File::open(&path).map_err(|e| Error::invalid_cache_file(&path, &e))?;
                 loop {
                     let len = file.read(&mut buf)?;
                     if len == 0 {
