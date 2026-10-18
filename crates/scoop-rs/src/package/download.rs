@@ -435,7 +435,14 @@ impl<'a> PackageSet<'a> {
                 let _ = easyhandle.set_token(token);
                 handles.insert(token, easyhandle);
 
-                token_ctx.insert(token, (cache.package.ident(), filename.to_owned()));
+                token_ctx.insert(
+                    token,
+                    (
+                        cache.package.ident(),
+                        dlinfo.url.to_owned(),
+                        filename.to_owned(),
+                    ),
+                );
             }
         }
 
@@ -444,6 +451,7 @@ impl<'a> PackageSet<'a> {
             alive = self.multi.perform()? > 0;
 
             let mut handle_err = None;
+            let mut failed_url: Option<String> = None;
 
             self.multi.messages(|message| {
                 let token = message.token().expect("failed to get token");
@@ -451,12 +459,19 @@ impl<'a> PackageSet<'a> {
 
                 // catch and propagate curl error
                 if let Some(Err(e)) = message.result_for(handle) {
+                    failed_url = token_ctx
+                        .get(&token)
+                        .map(|v| v.1.clone())
+                        .or_else(|| Some("unknown".to_owned()));
                     handle_err = Some(e);
                 }
             });
 
             if let Some(err) = handle_err {
-                return Err(err.into());
+                let url = failed_url.unwrap_or_else(|| "unknown".to_owned());
+                return Err(crate::Error::Custom(format!(
+                    "download failed for '{url}': {err}"
+                )));
             }
 
             if alive {
@@ -532,6 +547,7 @@ impl<'a> PackageSet<'a> {
             alive = self.multi.perform()? > 0;
 
             let mut handle_err = None;
+            let mut failed_url: Option<String> = None;
 
             self.multi.messages(|message| {
                 let token = message.token().expect("failed to get token");
@@ -539,7 +555,13 @@ impl<'a> PackageSet<'a> {
 
                 if let Some(handle_ret) = message.result_for(handle) {
                     match handle_ret {
-                        Err(e) => handle_err = Some(e),
+                        Err(e) => {
+                            failed_url = token_ctx
+                                .get(&token)
+                                .map(|v| v.1.clone())
+                                .or_else(|| Some("unknown".to_owned()));
+                            handle_err = Some(e);
+                        }
                         Ok(_) => {
                             let (ident, url, filename) = token_ctx.get(&token).unwrap();
                             let package_cache = package_caches.get_mut(ident).unwrap();
@@ -576,7 +598,10 @@ impl<'a> PackageSet<'a> {
             });
 
             if let Some(err) = handle_err {
-                return Err(err.into());
+                let url = failed_url.unwrap_or_else(|| "unknown".to_owned());
+                return Err(crate::Error::Custom(format!(
+                    "download failed for '{url}': {err}"
+                )));
             }
 
             if alive {
