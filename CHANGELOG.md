@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.3.0](https://github.com/vincentmathis/bagger/compare/v1.2.2...v1.3.0) (2026-10-18)
+
+
+### Features
+
+* upgrade refreshes buckets before resolving (skipped offline) ([c5d9258](https://github.com/vincentmathis/bagger/commit/c5d92588fa18d72678c6ea2a4531624a9bc62dc0))
+
+
+### Bug Fixes
+
+* surface the failing URL in download errors ([59d27db](https://github.com/vincentmathis/bagger/commit/59d27dbf2c1e898d7f7e57745265e484219af53a))
+* surface the real cause when a cache file cannot be read ([8f9b55f](https://github.com/vincentmathis/bagger/commit/8f9b55f0d4f2b5cae89a767a91a3ab4080b0e628))
+
 ## [1.2.2](https://github.com/vincentmathis/bagger/compare/v1.2.1...v1.2.2) (2026-10-14)
 
 
