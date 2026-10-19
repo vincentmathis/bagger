@@ -21,7 +21,7 @@ clap-verbosity-flag = { version = "3.0.1", features = [
   "tracing",
 ], default-features = false }
 clap_complete = { version = "4.5.38", features = ["unstable-dynamic"] }
-crossterm = "0.28"
+crossterm = "0.29"
 dirs = "5.0.1"
 indicatif = "0.17.9"
 regex = "1.5.3"
