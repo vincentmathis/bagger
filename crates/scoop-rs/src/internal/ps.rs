@@ -200,6 +200,7 @@ function Invoke-ExternalCommand {
         [String]$FilePath,
         [Parameter(Position = 1)]
         [String[]]$ArgumentList,
+        [switch]$Quiet,
         [Alias('Msg')]
         [String]$Activity,
         [Alias('cec')]
@@ -207,7 +208,7 @@ function Invoke-ExternalCommand {
         [Alias('Log')]
         [String]$LogPath
     )
-    if ($Activity) { Write-Host "$Activity " -NoNewline }
+    if ($Activity -and !$Quiet) { Write-Host "$Activity " -NoNewline }
     try {
         if ($LogPath -and ($FilePath -match '^msiexec(.exe)?$')) {
             $ArgumentList += "/lwe `"$LogPath`""
@@ -218,21 +219,21 @@ function Invoke-ExternalCommand {
             & $FilePath @ArgumentList
         }
     } catch {
-        if ($Activity) { Write-Host 'Error.' -ForegroundColor DarkRed }
-        error $_.Exception.Message
+        if ($Activity -and !$Quiet) { Write-Host 'Error.' -ForegroundColor DarkRed }
+        if (!$Quiet) { error $_.Exception.Message }
         return $false
     }
     if ($LASTEXITCODE -ne 0) {
         if ($ContinueExitCodes -and ($ContinueExitCodes.ContainsKey($LASTEXITCODE))) {
-            if ($Activity) { Write-Host 'Done.' -ForegroundColor DarkYellow }
+            if ($Activity -and !$Quiet) { Write-Host 'Done.' -ForegroundColor DarkYellow }
             warn $ContinueExitCodes[$LASTEXITCODE]
             return $true
         }
-        if ($Activity) { Write-Host 'Error.' -ForegroundColor DarkRed }
-        error "Exit code was $LASTEXITCODE!"
+        if ($Activity -and !$Quiet) { Write-Host 'Error.' -ForegroundColor DarkRed }
+        if (!$Quiet) { error "Exit code was $LASTEXITCODE!" }
         return $false
     }
-    if ($Activity) { Write-Host 'Done.' -ForegroundColor Green }
+    if ($Activity -and !$Quiet) { Write-Host 'Done.' -ForegroundColor Green }
     return $true
 }
 function movedir($from, $to) {
