@@ -237,6 +237,25 @@ fn create_shim(
     pkg_name: &str,
 ) -> Fallible<()> {
     let content = create_shim_content(target, shim, content)?;
+    // Never displace another package's shim: two packages declaring the same
+    // bin name (e.g. `opencode` and `opencode2` both shipping `opencode.exe`)
+    // must not clobber each other — the last installer wins, which breaks the
+    // first package's shim (e.g. `opencode` launching `opencode2`'s binary).
+    // Same-package reinstalls are unaffected because `existing == content`
+    // short-circuits `displace_on_collision` below.
+    if let Ok(existing) = std::fs::read_to_string(shim_path) {
+        if existing != content {
+            if let Some(existing_owner) = shim_target_owner(shim_path) {
+                if existing_owner != pkg_name {
+                    eprintln!(
+                        "warning: shim '{}' for '{}' already owned by '{}'; skipping",
+                        shim.name, pkg_name, existing_owner
+                    );
+                    return Ok(());
+                }
+            }
+        }
+    }
     displace_on_collision(shim_path, &content, pkg_name)?;
     // Clear any leftover (e.g. readonly) file before writing.
     let _ = std::fs::remove_file(shim_path);
