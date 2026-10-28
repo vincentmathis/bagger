@@ -21,9 +21,6 @@ pub struct Args {
     /// Download package(s) without performing installation
     #[arg(short = 'd', long, action = ArgAction::SetTrue)]
     download_only: bool,
-    /// Ignore failures to ensure a complete transaction
-    #[arg(short = 'f', long, action = ArgAction::SetTrue)]
-    ignore_failure: bool,
     /// Leverage cache and suppress network access
     #[arg(short = 'o', long, action = ArgAction::SetTrue)]
     offline: bool,
@@ -66,7 +63,6 @@ impl Args {
         Self {
             package,
             download_only: false,
-            ignore_failure: false,
             offline: false,
             assume_yes,
             ignore_cache: false,
@@ -97,10 +93,6 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
 
     if args.escape_hold {
         options.push(SyncOption::EscapeHold);
-    }
-
-    if args.ignore_failure {
-        options.push(SyncOption::IgnoreFailure);
     }
 
     if args.ignore_cache {

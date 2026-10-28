@@ -66,18 +66,52 @@ where
     let repo = Repository::open(path.as_ref())?;
     let mut origin = repo.find_remote("origin")?;
 
-    // fetch all refs
+    // Fetch all remote branches into remote-tracking refs (refs/remotes/origin/*).
+    // The old `refs/heads/*:refs/heads/*` refspec tried to write directly into
+    // local branches, which git2 refuses to do for the currently checked-out
+    // branch — so the local HEAD never moved and bucket manifests stayed stale.
     origin.fetch(
-        &["refs/heads/*:refs/heads/*"],
+        &["+refs/heads/*:refs/remotes/origin/*"],
         Some(&mut fetch_options(proxy)),
         None,
     )?;
 
-    let head = repo.head()?.target().unwrap();
-    let obj = repo.find_object(head, None)?;
+    // Figure out which commit to reset to. Prefer the remote-tracking branch
+    // that matches the local branch (e.g. main → refs/remotes/origin/main),
+    // fall back to origin/HEAD (the remote's default branch), then to the
+    // local HEAD itself.
+    let local_branch = repo
+        .head()
+        .ok()
+        .and_then(|h| h.name().map(|s| s.to_owned()))
+        .and_then(|n| n.strip_prefix("refs/heads/").map(|s| s.to_owned()));
+
+    let obj = local_branch
+        .as_deref()
+        .and_then(|name| {
+            let refname = format!("refs/remotes/origin/{name}");
+            repo.find_reference(&refname)
+                .ok()
+                .and_then(|r| r.target())
+                .and_then(|t| repo.find_object(t, None).ok())
+        })
+        .or_else(|| {
+            repo.find_reference("refs/remotes/origin/HEAD")
+                .ok()
+                .and_then(|r| r.target())
+                .and_then(|t| repo.find_object(t, None).ok())
+        })
+        .or_else(|| {
+            repo.head()
+                .ok()
+                .and_then(|h| h.target())
+                .and_then(|t| repo.find_object(t, None).ok())
+        })
+        .ok_or_else(|| {
+            crate::error::Error::Custom("bucket has no valid commit to reset to".to_owned())
+        })?;
 
     repo.reset(&obj, git2::ResetType::Hard, None)?;
-
     Ok(())
 }
 

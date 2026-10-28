@@ -3472,15 +3472,20 @@ pub fn package_sync(
 
     let is_op_remove = options.contains(&SyncOption::Remove);
     let did_work = if is_op_remove {
-        package::sync::remove(session, &queries, &options)?
+        package::sync::remove(session, &queries, &options)
     } else {
-        package::sync::install(session, &queries, &options)?
+        package::sync::install(session, &queries, &options)
     };
 
+    // Always notify the event loop that the sync is done, even on error,
+    // so the CLI's event-drain thread can break out of rx.recv() and
+    // handle.join() can complete. Otherwise the process hangs after a
+    // tolerated per-package failure.
     if let Some(tx) = session.emitter() {
         let _ = tx.send(Event::PackageSyncDone);
     }
 
+    let did_work = did_work?;
     Ok(did_work)
 }
 

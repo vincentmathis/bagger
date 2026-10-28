@@ -84,15 +84,23 @@ pub fn has_install_metadata(dir: &std::path::Path) -> bool {
 
 /// Directory holding a package's install metadata: `current` normally;
 /// under `no_junction` the live version directory (rotation backups
-/// `_*` excluded, highest version wins when several qualify). Falls back
-/// to `current` when nothing qualifies, preserving the old skip behavior.
+/// `_*` excluded, highest version wins when several qualify).
+///
+/// A junction install whose `current` carries no metadata (a dangling link
+/// or a leftover staging directory from a failed upgrade, where the live
+/// version directory was purged) falls back to the same scan instead of
+/// reporting the app as not installed — otherwise `upgrade` could never
+/// recover those apps.
 pub(crate) fn installed_metadata_dir(
     app_dir: &std::path::Path,
     no_junction: bool,
 ) -> std::path::PathBuf {
-    if !no_junction {
-        return app_dir.join("current");
+    let current = app_dir.join("current");
+
+    if !no_junction && has_install_metadata(&current) {
+        return current;
     }
+
     let mut best: Option<(std::path::PathBuf, String)> = None;
     if let Ok(entries) = std::fs::read_dir(app_dir) {
         for entry in entries.filter_map(|de| de.ok()) {
@@ -117,8 +125,7 @@ pub(crate) fn installed_metadata_dir(
             }
         }
     }
-    best.map(|(path, _)| path)
-        .unwrap_or_else(|| app_dir.join("current"))
+    best.map(|(path, _)| path).unwrap_or(current)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -665,6 +672,37 @@ mod tests {
         assert!(has_install_metadata(&mixed));
         assert!(!has_install_metadata(&empty));
         assert!(!has_install_metadata(&partial));
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A `current` directory without metadata (dangling junction, or a
+    /// staging dir left behind by a failed upgrade whose version directory
+    /// was purged) must not hide a healthy version directory: the app is
+    /// still installed, and the highest version with metadata wins.
+    #[test]
+    fn metadata_dir_falls_back_to_version_dir() {
+        let base = std::env::temp_dir().join("bagger-test-metadata-fallback");
+        let _ = std::fs::remove_dir_all(&base);
+        let current = base.join("current");
+        let older = base.join("1.2.0");
+        let newer = base.join("1.10.0");
+        let backup = base.join("_1.9.0");
+        for dir in [&current, &older, &newer, &backup] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for dir in [&older, &newer, &backup] {
+            std::fs::write(dir.join("scoop-manifest.json"), "{}").unwrap();
+            std::fs::write(dir.join("scoop-install.json"), "{}").unwrap();
+        }
+
+        // `current` has no metadata: fall back to the highest version dir.
+        assert_eq!(installed_metadata_dir(&base, false), newer);
+
+        // A healthy `current` keeps winning over newer-looking dirs.
+        std::fs::write(current.join("manifest.json"), "{}").unwrap();
+        std::fs::write(current.join("install.json"), "{}").unwrap();
+        assert_eq!(installed_metadata_dir(&base, false), current);
 
         std::fs::remove_dir_all(&base).ok();
     }

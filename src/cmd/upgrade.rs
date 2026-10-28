@@ -15,9 +15,6 @@ pub struct Args {
     /// The package(s) to be upgraded (default: all except held)
     #[arg(action = ArgAction::Append, add = clap_complete::engine::ArgValueCompleter::new(crate::complete::installed_apps))]
     package: Vec<String>,
-    /// Ignore failures to ensure a complete transaction
-    #[arg(short = 'f', long, action = ArgAction::SetTrue)]
-    ignore_failure: bool,
     /// Force reinstall even when the installed version is current
     /// (previous install rotated aside to `_<version>.old`)
     #[arg(long, action = ArgAction::SetTrue)]
@@ -47,7 +44,6 @@ impl Args {
     pub(crate) fn from_packages(package: Vec<String>, assume_yes: bool) -> Self {
         Self {
             package,
-            ignore_failure: false,
             offline: false,
             assume_yes,
             escape_hold: false,
@@ -85,10 +81,6 @@ pub fn execute(args: Args, session: &Session) -> Result<()> {
 
     if args.escape_hold {
         options.push(SyncOption::EscapeHold);
-    }
-
-    if args.ignore_failure {
-        options.push(SyncOption::IgnoreFailure);
     }
 
     if args.force || session.config().force_update() {

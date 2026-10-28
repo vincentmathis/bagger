@@ -1,5 +1,6 @@
 use bagger_hash::ChecksumBuilder;
 use once_cell::unsync::OnceCell;
+use std::collections::HashSet;
 use std::io::Read;
 use tracing::{debug, info};
 
@@ -59,24 +60,6 @@ pub enum SyncOption {
     ///
     /// [1]: SyncOption::Offline
     IgnoreCache,
-
-    /// Ignore transaction failure.
-    ///
-    /// The sync operation processes packages in the transaction one by one
-    /// according to the dependency order. By default, the transaction will be
-    /// aborted if any failure occurs during the operation.
-    ///
-    /// # Note
-    ///
-    /// This option can be used to ignore the failure and continue the operation
-    /// to commit the remaining packages in the transaction. Successfully
-    /// committed packages are kept as they are; the rest of the unprocessed
-    /// packages are still attempted, and the first error is returned at the
-    /// end so callers still observe the failure.
-    ///
-    /// No rollback is performed in either mode: packages committed before a
-    /// failure stay committed.
-    IgnoreFailure,
 
     /// Do not install dependencies.
     ///
@@ -402,6 +385,9 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
     let escape_hold = options.contains(&SyncOption::EscapeHold);
     let force = options.contains(&SyncOption::Force);
     let update_nightly = session.config().update_nightly();
+    // First resolution failure, deferred so the remaining names still
+    // resolve and install (one bad name must not sink the batch).
+    let mut unresolved: Option<Error> = None;
 
     if only_upgrade {
         // Exact matching: `upgrade git` must not sweep up `gitui` or
@@ -427,24 +413,36 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             if let Some(version) = pinned {
                 // Held pins without hold escape resolve to `None` and are
                 // skipped like the other flows.
-                let resolved = query::resolve_version_pin(session, &base, &version, escape_hold)?;
-                if resolved.as_ref().is_some_and(|pkg| !packages.contains(pkg)) {
-                    packages.push(resolved.unwrap());
+                match query::resolve_version_pin(session, &base, &version, escape_hold) {
+                    Ok(Some(pkg)) => {
+                        if !packages.contains(&pkg) {
+                            packages.push(pkg);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => defer_unresolved(&mut unresolved, query, e),
                 }
                 continue;
             }
 
             // Manifest URLs and local manifest files install as isolated
             // packages without requiring a bucket.
-            if let Some(p) = query::load_isolated_package(session, query)? {
-                if p.is_held() && !escape_hold {
+            match query::load_isolated_package(session, query) {
+                Ok(Some(p)) => {
+                    if p.is_held() && !escape_hold {
+                        continue;
+                    }
+
+                    if !packages.contains(&p) {
+                        packages.push(p);
+                    }
                     continue;
                 }
-
-                if !packages.contains(&p) {
-                    packages.push(p);
+                Ok(None) => {}
+                Err(e) => {
+                    defer_unresolved(&mut unresolved, query, e);
+                    continue;
                 }
-                continue;
             }
 
             let mut matched = synced
@@ -461,7 +459,11 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 .collect::<Vec<_>>();
 
             match matched.len() {
-                0 => return Err(Error::PackageNotFound(query.to_owned())),
+                0 => defer_unresolved(
+                    &mut unresolved,
+                    query,
+                    Error::PackageNotFound(query.to_owned()),
+                ),
                 1 => {
                     let p = matched.pop().unwrap();
 
@@ -497,6 +499,10 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
     // anything still empty is caught by the post-transaction early return
     // instead.
     if packages.is_empty() && !force && !update_nightly {
+        if let Some(e) = unresolved {
+            return Err(e);
+        }
+
         return Ok(false);
     }
 
@@ -648,10 +654,12 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
 
     let packages = transaction.add_view();
     if packages.is_empty() {
+        if let Some(e) = unresolved {
+            return Err(e);
+        }
+
         return Ok(false);
     }
-
-    let mut set = download::PackageSet::new(session, &packages, reuse_cache)?;
 
     let assume_yes = options.contains(&SyncOption::AssumeYes);
     let offline = options.contains(&SyncOption::Offline);
@@ -662,7 +670,23 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             let _ = tx.send(Event::PackageDownloadSizingStart);
         }
 
-        let download_size = set.calculate_download_size()?;
+        // One unreachable host must not abort the whole batch: size each
+        // package independently and tolerate failures.
+        let mut total = 0u64;
+        let mut estimated = false;
+        for pkg in packages.iter() {
+            let one_pkg: &[&Package] = std::slice::from_ref(pkg);
+            let mut one = if let Ok(s) = download::PackageSet::new(session, one_pkg, reuse_cache) {
+                s
+            } else {
+                continue;
+            };
+            if let Ok(ds) = one.calculate_download_size() {
+                total += ds.total;
+                estimated |= ds.estimated;
+            }
+        }
+        let download_size = download::DownloadSize { total, estimated };
         // Only skip downloading when every size is known (not estimated)
         // and nothing is missing: servers that omit Content-Length (or
         // non-HTTP URLs like file://) report zero sizes, which must still
@@ -694,12 +718,48 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         }
     }
 
+    // First failure across the download, integrity-check, and commit phases.
+    // It is returned only after the remaining packages had their turn, so a
+    // single bad package cannot sink the whole batch.
+    let mut deferred: Option<Error> = None;
+    // Packages that must not be committed: their download or integrity check
+    // already failed, so there is nothing trustworthy to install.
+    let mut failed: HashSet<String> = HashSet::new();
+
     if !should_offline {
         if let Some(tx) = session.emitter() {
             let _ = tx.send(Event::PackageDownloadStart);
         }
 
-        set.download()?;
+        // Download packages one at a time so a single unreachable URL
+        // doesn't abort the whole batch.
+        for pkg in packages.iter() {
+            let one_pkg: &[&Package] = std::slice::from_ref(pkg);
+            let mut one = match download::PackageSet::new(session, one_pkg, reuse_cache) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to download '{}': {e}; continuing with the rest",
+                        pkg.name()
+                    );
+                    failed.insert(pkg.name().to_owned());
+                    if deferred.is_none() {
+                        deferred = Some(e);
+                    }
+                    continue;
+                }
+            };
+            if let Err(e) = one.download() {
+                eprintln!(
+                    "warning: failed to download '{}': {e}; continuing with the rest",
+                    pkg.name()
+                );
+                failed.insert(pkg.name().to_owned());
+                if deferred.is_none() {
+                    deferred = Some(e);
+                }
+            }
+        }
 
         if let Some(tx) = session.emitter() {
             let _ = tx.send(Event::PackageDownloadDone);
@@ -718,6 +778,12 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         let mut buf = [0; 1024 * 64];
 
         for &pkg in packages.iter() {
+            // Its download already failed; there is no file to verify, and
+            // committing it would fail too.
+            if failed.contains(pkg.name()) {
+                continue;
+            }
+
             // Nightly builds skip hash checks (the dated stamp is
             // covered too, since stamping happens before this phase).
             if pkg.version() == "nightly" || is_dated_nightly(pkg.version()) {
@@ -725,14 +791,47 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 continue;
             }
 
-            let files = pkg.download_filenames();
-            let hashes = pkg.download_hashes();
-            if hashes.is_empty() {
-                // Upstream prints the computed SHA256 for hash-less
-                // manifests so authors can fill it in.
-                for filename in files.iter() {
+            // One package's verification runs in a closure so a missing
+            // cache file or a hash mismatch skips that package only.
+            let result = (|| -> Fallible<()> {
+                let files = pkg.download_filenames();
+                let hashes = pkg.download_hashes();
+                if hashes.is_empty() {
+                    // Upstream prints the computed SHA256 for hash-less
+                    // manifests so authors can fill it in.
+                    for filename in files.iter() {
+                        let path = cache_root.join(filename);
+                        let mut hasher = ChecksumBuilder::new().sha256().build();
+                        let mut file = std::fs::File::open(&path)
+                            .map_err(|e| Error::invalid_cache_file(&path, &e))?;
+                        loop {
+                            let len = file.read(&mut buf)?;
+                            if len == 0 {
+                                break;
+                            }
+                            hasher.consume(&buf[..len]);
+                        }
+                        eprintln!(
+                            "warning: no hash in manifest for '{}'. SHA256 for '{}' is:\n    {}",
+                            pkg.name(),
+                            path.file_name().unwrap_or_default().to_string_lossy(),
+                            hasher.finalize()
+                        );
+                    }
+                    return Ok(());
+                }
+                let files_cnt = files.len();
+
+                for (idx, (filename, hash)) in files.into_iter().zip(hashes).enumerate() {
                     let path = cache_root.join(filename);
-                    let mut hasher = ChecksumBuilder::new().sha256().build();
+
+                    let mut hasher = ChecksumBuilder::new().algo(hash.algorithm())?.build();
+
+                    if let Some(tx) = session.emitter() {
+                        let progress = format!("{} ({}/{})", pkg.name(), idx + 1, files_cnt);
+                        let _ = tx.send(Event::PackageIntegrityCheckProgress(progress));
+                    }
+
                     let mut file = std::fs::File::open(&path)
                         .map_err(|e| Error::invalid_cache_file(&path, &e))?;
                     loop {
@@ -742,52 +841,35 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                         }
                         hasher.consume(&buf[..len]);
                     }
-                    eprintln!(
-                        "warning: no hash in manifest for '{}'. SHA256 for '{}' is:\n    {}",
-                        pkg.name(),
-                        path.file_name().unwrap_or_default().to_string_lossy(),
-                        hasher.finalize()
-                    );
-                }
-                continue;
-            }
-            let files_cnt = files.len();
 
-            for (idx, (filename, hash)) in files.into_iter().zip(hashes).enumerate() {
-                let path = cache_root.join(filename);
-
-                let mut hasher = ChecksumBuilder::new().algo(hash.algorithm())?.build();
-
-                if let Some(tx) = session.emitter() {
-                    let progress = format!("{} ({}/{})", pkg.name(), idx + 1, files_cnt);
-                    let _ = tx.send(Event::PackageIntegrityCheckProgress(progress));
-                }
-
-                let mut file =
-                    std::fs::File::open(&path).map_err(|e| Error::invalid_cache_file(&path, &e))?;
-                loop {
-                    let len = file.read(&mut buf)?;
-                    if len == 0 {
-                        break;
+                    let actual = hasher.finalize();
+                    let expected = hash.value();
+                    if actual != expected {
+                        let name = pkg.name().to_owned();
+                        let url = pkg.download_urls()[idx].to_owned();
+                        // Drop the bad file so the next run re-downloads
+                        // instead of failing the same integrity check forever.
+                        let _ = std::fs::remove_file(&path);
+                        eprintln!(
+                            "warning: removed corrupt cache file '{}'; it will be re-downloaded",
+                            path.display()
+                        );
+                        let ctx =
+                            super::HashMismatchContext::new(name, url, expected.to_owned(), actual);
+                        return Err(Error::HashMismatch(ctx));
                     }
-                    hasher.consume(&buf[..len]);
                 }
+                Ok(())
+            })();
 
-                let actual = hasher.finalize();
-                let expected = hash.value();
-                if actual != expected {
-                    let name = pkg.name().to_owned();
-                    let url = pkg.download_urls()[idx].to_owned();
-                    // Drop the bad file so the next run re-downloads
-                    // instead of failing the same integrity check forever.
-                    let _ = std::fs::remove_file(&path);
-                    eprintln!(
-                        "warning: removed corrupt cache file '{}'; it will be re-downloaded",
-                        path.display()
-                    );
-                    let ctx =
-                        super::HashMismatchContext::new(name, url, expected.to_owned(), actual);
-                    return Err(Error::HashMismatch(ctx));
+            if let Err(e) = result {
+                eprintln!(
+                    "warning: integrity check failed for '{}': {e}; continuing with the rest",
+                    pkg.name()
+                );
+                failed.insert(pkg.name().to_owned());
+                if deferred.is_none() {
+                    deferred = Some(e);
                 }
             }
         }
@@ -801,8 +883,6 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
     if !download_only {
         let config = session.config();
         let apps_dir = config.root_path().join("apps");
-        let ignore_failure = options.contains(&SyncOption::IgnoreFailure);
-        let mut deferred: Option<Error> = None;
 
         // Log packages requiring PowerShell scripts
         let script_pkgs = packages
@@ -818,6 +898,11 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
         }
 
         for pkg in packages.iter() {
+            // Its download or integrity check failed; nothing to install.
+            if failed.contains(pkg.name()) {
+                continue;
+            }
+
             // Nightly manifests install under a dated version (upstream
             // `nightly_version`), so each day gets a fresh directory. The
             // stamped manifest is saved as-is, making the installed version
@@ -831,8 +916,8 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 false => pkg,
             };
 
-            // One package's commit runs in a closure so `IgnoreFailure`
-            // can collect the error and continue with the rest instead of
+            // One package's commit runs in a closure so its error can be
+            // collected and the rest of the batch can continue instead of
             // aborting the transaction (`?` returns from here, and the
             // skip below returns success for this package only).
             let result = (|| -> Fallible<()> {
@@ -1090,26 +1175,50 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             })();
 
             if let Err(e) = result {
-                if ignore_failure {
-                    eprintln!(
-                        "warning: failed to process '{}': {e}; continuing with the rest",
-                        pkg.name()
-                    );
-                    if deferred.is_none() {
-                        deferred = Some(e);
-                    }
-                } else {
-                    return Err(e);
+                eprintln!(
+                    "warning: failed to process '{}': {e}; continuing with the rest",
+                    pkg.name()
+                );
+                if deferred.is_none() {
+                    deferred = Some(e);
                 }
+            } else {
+                // Fresh installs are not upgrades; reporting them as such
+                // was confusing during batch imports.
+                let verb = match installed_snapshot.iter().any(|(n, _)| n == pkg.name()) {
+                    true => "upgraded",
+                    false => "installed",
+                };
+                println!("{verb} {}", pkg.name());
             }
-        }
-
-        if let Some(e) = deferred {
-            return Err(e);
         }
     }
 
+    // Download, integrity, and commit failures are reported after every
+    // other package had its turn, so the command still exits non-zero.
+    if let Some(e) = deferred {
+        return Err(e);
+    }
+
+    // Names that could not be resolved are reported after every other
+    // package had its turn, so the command still exits non-zero.
+    if let Some(e) = unresolved {
+        return Err(e);
+    }
+
     Ok(true)
+}
+
+/// Warn about an unresolvable query and remember the first failure.
+///
+/// A name that matches nothing (or a broken pinned version / manifest
+/// reference) must not abort the rest of the batch, so the error is only
+/// reported once the remaining packages have been processed.
+fn defer_unresolved(deferred: &mut Option<Error>, query: &str, e: Error) {
+    eprintln!("warning: could not resolve '{query}': {e}; continuing with the rest");
+    if deferred.is_none() {
+        *deferred = Some(e);
+    }
 }
 
 /// Get the architecture string for the current platform.
@@ -1579,10 +1688,12 @@ fn finalize_upgrade_inner(session: &Session, pkg: &Package) -> Fallible<()> {
 
     let config = session.config();
     let app_dir = config.root_path().join("apps").join(pkg.name());
-    let new_version = pkg
-        .installed_version()
-        .unwrap_or_else(|| pkg.version())
-        .to_owned();
+    // The version that was just committed: the origin (bucket) version, not
+    // the recorded install state. For an upgradable reference
+    // `installed_version()` is still the *previous* version, so using it
+    // here treated the freshly installed directory as an old one — deleting
+    // it and leaving `current` dangling while the old version survived.
+    let new_version = pkg.version().to_owned();
     let new_base = if config.no_junction() {
         app_dir.join(&new_version)
     } else {
@@ -2527,6 +2638,82 @@ mod tests {
         assert!(shims.join("newbin.cmd").is_file());
         assert!(!old.exists());
         assert!(new.is_dir());
+
+        std::env::remove_var("SCOOP");
+        std::env::remove_var("SCOOP_GLOBAL");
+        std::env::remove_var("SCOOP_CACHE");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The package passed to `finalize_upgrade` during an upgrade is the
+    /// origin reference: `version()` is the version just committed while
+    /// `installed_version()` is still the previous one. Finalization must key
+    /// off the committed version — keying off the install state deleted the
+    /// fresh install and left a dangling `current` behind (every real
+    /// upgrade hit this).
+    #[test]
+    #[cfg(windows)]
+    fn finalize_upgrade_keeps_new_version_of_upgradable_ref() {
+        let _guard = crate::test_support::env_guard();
+        let base = std::env::temp_dir().join("bagger-test-finalize-upgradable");
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let old = root.join("apps/finapp/1.0");
+        let new = root.join("apps/finapp/2.0");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(
+            old.join("manifest.json"),
+            r#"{"version": "1.0", "homepage": "https://example.com", "license": "MIT"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            old.join("install.json"),
+            r#"{"architecture": "64bit", "bucket": "fake"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            new.join("manifest.json"),
+            r#"{"version": "2.0", "homepage": "https://example.com", "license": "MIT"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            new.join("install.json"),
+            r#"{"architecture": "64bit", "bucket": "fake"}"#,
+        )
+        .unwrap();
+        crate::internal::fs::symlink_dir(&new, root.join("apps/finapp/current")).unwrap();
+
+        std::env::set_var("SCOOP", &root);
+        std::env::set_var("SCOOP_GLOBAL", base.join("global"));
+        std::env::set_var("SCOOP_CACHE", base.join("cache"));
+        let session = Session::new();
+
+        // Shape of an upgradable reference: origin manifest (2.0) carrying
+        // the recorded install state of the previous version (1.0).
+        let manifest = Manifest::parse(old.join("manifest.json"));
+        let manifest = manifest.expect("parse fixture");
+        let pkg = Package::from("finapp", "fake", manifest).with_version("2.0");
+        pkg.fill_install_state(crate::package::InstallState::Installed(
+            crate::package::InstallStateInstalled {
+                version: "1.0".to_owned(),
+                bucket: Some("fake".to_owned()),
+                arch: "64bit".to_owned(),
+                held: false,
+                url: None,
+            },
+        ));
+        assert_eq!(pkg.version(), "2.0");
+        assert_eq!(pkg.installed_version(), Some("1.0"));
+
+        finalize_upgrade(&session, &pkg);
+
+        assert!(new.is_dir(), "the freshly committed version must survive");
+        assert!(!old.exists(), "the previous version directory is removed");
+        assert!(
+            root.join("apps/finapp/current").is_dir(),
+            "current must still resolve"
+        );
 
         std::env::remove_var("SCOOP");
         std::env::remove_var("SCOOP_GLOBAL");
