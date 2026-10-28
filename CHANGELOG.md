@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.0](https://github.com/vincentmathis/bagger/compare/v1.2.2...v1.3.0) (2026-10-28)
+
+
+### Features
+
+* tolerate per-package failures; fix upgrade deleting fresh install; import &lt;auto-generated&gt; sources ([666cb5b](https://github.com/vincentmathis/bagger/commit/666cb5bba8ee928a9202093ae5fa9403f58f7515))
+* upgrade refreshes buckets before resolving (skipped offline) ([c5d9258](https://github.com/vincentmathis/bagger/commit/c5d92588fa18d72678c6ea2a4531624a9bc62dc0))
+
+
+### Bug Fixes
+
+* add -Quiet switch to Invoke-ExternalCommand PowerShell prelude ([bb7c0b6](https://github.com/vincentmathis/bagger/commit/bb7c0b6a6e13d43aa2857d067c1dba330de6ceff))
+* add shim and startmenu_shortcut to PowerShell prelude ([51a0c24](https://github.com/vincentmathis/bagger/commit/51a0c24b647879cbfd9a32122d5d04a504600938))
+* never displace a shim owned by another package ([df5edc2](https://github.com/vincentmathis/bagger/commit/df5edc206f0aca6b4ede334ae9131bb3c123d77c))
+* run Invoke-ExternalCommand via .NET Process to match scoop ([873111d](https://github.com/vincentmathis/bagger/commit/873111da494c5729075eb8b20ea710defafef0a4))
+* surface the failing URL in download errors ([59d27db](https://github.com/vincentmathis/bagger/commit/59d27dbf2c1e898d7f7e57745265e484219af53a))
+* surface the real cause when a cache file cannot be read ([8f9b55f](https://github.com/vincentmathis/bagger/commit/8f9b55f0d4f2b5cae89a767a91a3ab4080b0e628))
+
 ## [1.2.2](https://github.com/vincentmathis/bagger/compare/v1.2.1...v1.2.2) (2026-10-14)
 
 
