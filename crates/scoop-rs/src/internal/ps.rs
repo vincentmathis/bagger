@@ -96,6 +96,16 @@ function get_config($name, $default) {
     if ($null -eq $BaggerConfig[$name] -and $null -ne $default) { return $default }
     return $BaggerConfig[$name]
 }
+function shim($path, $global, $name, $arg) {
+    # Bagger creates shims in Rust after the hook script runs
+    # (shim::add), so this is a no-op kept for manifest compatibility.
+    if ($path) { Write-Host "Creating shim for $path" }
+}
+function startmenu_shortcut($target, $shortcutName, $arguments, $icon, $global) {
+    # Bagger creates start menu shortcuts in Rust after the hook script
+    # runs (shortcut::add), so this is a no-op kept for manifest compatibility.
+    if ($shortcutName) { Write-Host "Creating start menu shortcut for $shortcutName" }
+}
 function Get-HelperPath {
     [CmdletBinding()]
     [OutputType([String])]
