@@ -210,27 +210,72 @@ function Invoke-ExternalCommand {
     )
     if ($Activity -and !$Quiet) { Write-Host "$Activity " -NoNewline }
     try {
-        if ($LogPath -and ($FilePath -match '^msiexec(.exe)?$')) {
-            $ArgumentList += "/lwe `"$LogPath`""
-            & $FilePath @ArgumentList
-        } elseif ($LogPath) {
-            & $FilePath @ArgumentList 2>&1 | Out-File -FilePath $LogPath -Encoding utf8
-        } else {
-            & $FilePath @ArgumentList
+        $Process = New-Object System.Diagnostics.Process
+        $Process.StartInfo.FileName = $FilePath
+        $Process.StartInfo.UseShellExecute = $false
+        $Process.StartInfo.CreateNoWindow = $true
+
+        if ($Quiet) {
+            $Process.StartInfo.UseShellExecute = $true
+            $Process.StartInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
         }
+
+        if ($LogPath) {
+            $Process.StartInfo.RedirectStandardOutput = $true
+            $Process.StartInfo.RedirectStandardError = $true
+        }
+
+        if ($ArgumentList.Length -gt 0) {
+            # Use .NET ArgumentList (PowerShell 6.1+) when available to avoid
+            # PowerShell's native command mangling arguments for NSIS installers
+            # and other non-.NET executables.
+            if ($Process.StartInfo.PSObject.Properties.Name -contains 'ArgumentList') {
+                $ArgumentList.ForEach({ $Process.StartInfo.ArgumentList.Add($_) })
+            } else {
+                # Legacy argument escaping (mirrors scoop core.ps1):
+                # quote paths starting with a drive letter, don't quote NSIS /D=,
+                # quote args with spaces.
+                $escapedArgs = switch -regex ($ArgumentList) {
+                    '(?<!/D=)[A-Z]:[\\/].*' { "$_"; continue }
+                    '/D=[A-Z]:[\\/].*' { $_; continue }
+                    ' ' { "`"$_`""; continue }
+                    default { $_; continue }
+                }
+                $Process.StartInfo.Arguments = $escapedArgs -join ' '
+            }
+        }
+
+        [void]$Process.Start()
+
+        if ($LogPath) {
+            # Read stdout/stderr asynchronously to avoid deadlocks, then write
+            # to the log file.
+            $stdoutTask = $Process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $Process.StandardError.ReadToEndAsync()
+            $Process.WaitForExit()
+            $stdout = $stdoutTask.Result
+            $stderr = $stderrTask.Result
+            $out = ($stdout + $stderr) -join "`n"
+            $out | Out-File -FilePath $LogPath -Encoding utf8
+        } else {
+            $Process.WaitForExit()
+        }
+
+        $exitCode = $Process.ExitCode
     } catch {
         if ($Activity -and !$Quiet) { Write-Host 'Error.' -ForegroundColor DarkRed }
         if (!$Quiet) { error $_.Exception.Message }
         return $false
     }
-    if ($LASTEXITCODE -ne 0) {
-        if ($ContinueExitCodes -and ($ContinueExitCodes.ContainsKey($LASTEXITCODE))) {
+
+    if ($exitCode -ne 0) {
+        if ($ContinueExitCodes -and ($ContinueExitCodes.ContainsKey($exitCode))) {
             if ($Activity -and !$Quiet) { Write-Host 'Done.' -ForegroundColor DarkYellow }
-            warn $ContinueExitCodes[$LASTEXITCODE]
+            warn $ContinueExitCodes[$exitCode]
             return $true
         }
         if ($Activity -and !$Quiet) { Write-Host 'Error.' -ForegroundColor DarkRed }
-        if (!$Quiet) { error "Exit code was $LASTEXITCODE!" }
+        if (!$Quiet) { error "Exit code was $exitCode!" }
         return $false
     }
     if ($Activity -and !$Quiet) { Write-Host 'Done.' -ForegroundColor Green }
