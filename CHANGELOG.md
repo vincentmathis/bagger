@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/vincentmathis/bagger/compare/v1.3.0...v1.3.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* download all packages in parallel via curl multi ([50e9dc5](https://github.com/vincentmathis/bagger/commit/50e9dc5173e59f1a813790d2d71cbfa33250937e))
+
 ## [1.3.0](https://github.com/vincentmathis/bagger/compare/v1.2.2...v1.3.0) (2026-10-28)
 
 
