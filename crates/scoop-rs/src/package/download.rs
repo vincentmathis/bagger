@@ -3,9 +3,10 @@ use curl::multi::Multi;
 use flume::Sender;
 use once_cell::unsync::OnceCell;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     io::Write,
+    path::PathBuf,
     time::Duration,
 };
 use tracing::debug;
@@ -349,8 +350,8 @@ impl<'a> PackageSet<'a> {
         let mut token_ctx = HashMap::new();
         let package_caches = self.caches.get_mut().unwrap();
 
-        // map download tmp files to their final names
-        let mut filepaths = vec![];
+        // map download tmp files to their final names, keyed by curl token
+        let mut filepaths: HashMap<usize, (PathBuf, PathBuf)> = HashMap::new();
 
         // ensure cache dir exists
         internal::fs::ensure_dir(&cache_root)?;
@@ -420,8 +421,6 @@ impl<'a> PackageSet<'a> {
                 let _ = std::fs::remove_file(&path);
                 let _ = std::fs::remove_file(&tmp);
 
-                filepaths.push((tmp.clone(), path.clone()));
-
                 // TODO: Fragmented download support could be added to improve
                 // download speed.
                 let mut file = OpenOptions::new().create(true).append(true).open(&tmp)?;
@@ -435,6 +434,8 @@ impl<'a> PackageSet<'a> {
                 let _ = easyhandle.set_token(token);
                 handles.insert(token, easyhandle);
 
+                filepaths.insert(token, (tmp.clone(), path.clone()));
+
                 token_ctx.insert(
                     token,
                     (
@@ -447,40 +448,48 @@ impl<'a> PackageSet<'a> {
         }
 
         let mut alive = true;
+        let mut first_error: Option<crate::Error> = None;
+        let mut failed_tokens = HashSet::new();
+
         while alive {
             alive = self.multi.perform()? > 0;
-
-            let mut handle_err = None;
-            let mut failed_url: Option<String> = None;
 
             self.multi.messages(|message| {
                 let token = message.token().expect("failed to get token");
                 let handle = handles.get_mut(&token).expect("failed to get handle");
 
-                // catch and propagate curl error
+                // catch and record curl error, but don't abort — other
+                // downloads may still be in flight
                 if let Some(Err(e)) = message.result_for(handle) {
-                    failed_url = token_ctx
+                    let url = token_ctx
                         .get(&token)
                         .map(|v| v.1.clone())
-                        .or_else(|| Some("unknown".to_owned()));
-                    handle_err = Some(e);
+                        .or_else(|| Some("unknown".to_owned()))
+                        .unwrap_or_else(|| "unknown".to_owned());
+                    if first_error.is_none() {
+                        first_error = Some(crate::Error::Custom(format!(
+                            "download failed for '{url}': {e}"
+                        )));
+                    }
+                    failed_tokens.insert(token);
                 }
             });
-
-            if let Some(err) = handle_err {
-                let url = failed_url.unwrap_or_else(|| "unknown".to_owned());
-                return Err(crate::Error::Custom(format!(
-                    "download failed for '{url}': {err}"
-                )));
-            }
 
             if alive {
                 self.multi.wait(&mut [], Duration::from_secs(5))?;
             }
         }
 
-        for (tmp, path) in filepaths.iter() {
-            std::fs::rename(tmp, path)?;
+        // Only rename successfully downloaded files; failed ones leave
+        // their .download stubs behind so the next run re-downloads them.
+        for (token, (tmp, path)) in &filepaths {
+            if !failed_tokens.contains(token) {
+                std::fs::rename(tmp, path)?;
+            }
+        }
+
+        if let Some(err) = first_error {
+            return Err(err);
         }
 
         Ok(())

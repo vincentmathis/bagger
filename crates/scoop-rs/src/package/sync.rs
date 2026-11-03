@@ -731,33 +731,26 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             let _ = tx.send(Event::PackageDownloadStart);
         }
 
-        // Download packages one at a time so a single unreachable URL
-        // doesn't abort the whole batch.
-        for pkg in packages.iter() {
-            let one_pkg: &[&Package] = std::slice::from_ref(pkg);
-            let mut one = match download::PackageSet::new(session, one_pkg, reuse_cache) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!(
-                        "warning: failed to download '{}': {e}; continuing with the rest",
-                        pkg.name()
-                    );
-                    failed.insert(pkg.name().to_owned());
-                    if deferred.is_none() {
-                        deferred = Some(e);
-                    }
-                    continue;
-                }
-            };
-            if let Err(e) = one.download() {
-                eprintln!(
-                    "warning: failed to download '{}': {e}; continuing with the rest",
-                    pkg.name()
-                );
-                failed.insert(pkg.name().to_owned());
+        // Download all packages in parallel via curl multi (one PackageSet
+        // with all packages). download_via_curl continues on individual
+        // failures so one bad URL doesn't abort the whole batch. The first
+        // error is deferred and returned after all packages have been
+        // attempted.
+        let mut one = match download::PackageSet::new(session, packages.as_slice(), reuse_cache) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("warning: failed to prepare download: {e}; continuing with the rest");
                 if deferred.is_none() {
                     deferred = Some(e);
                 }
+                // Create an empty PackageSet so the rest of the flow still runs
+                download::PackageSet::new(session, &[], reuse_cache).unwrap()
+            }
+        };
+        if let Err(e) = one.download() {
+            eprintln!("warning: download failed: {e}; continuing with the rest");
+            if deferred.is_none() {
+                deferred = Some(e);
             }
         }
 
@@ -792,7 +785,7 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
             }
 
             // One package's verification runs in a closure so a missing
-            // cache file or a hash mismatch skips that package only.
+            // cache file or hash mismatch skips that package only.
             let result = (|| -> Fallible<()> {
                 let files = pkg.download_filenames();
                 let hashes = pkg.download_hashes();
