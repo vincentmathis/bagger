@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/vincentmathis/bagger/compare/v1.3.1...v1.3.2) (2026-11-10)
+
+
+### Bug Fixes
+
+* add curl timeouts so stalled downloads can't hang forever ([d881a48](https://github.com/vincentmathis/bagger/commit/d881a486a721cfe29961d7f8f27e4dc633e33c24))
+
 ## [1.3.1](https://github.com/vincentmathis/bagger/compare/v1.3.0...v1.3.1) (2026-11-03)
 
 
