@@ -41,6 +41,9 @@ pub struct PackageSet<'a> {
 
     /// Whether to reuse cached files.
     reuse_cache: bool,
+
+    /// Packages whose download failed, keyed by name.
+    failed_packages: HashSet<String>,
 }
 
 /// Stores download information of a file.
@@ -129,7 +132,13 @@ impl<'a> PackageSet<'a> {
             multi,
             caches: OnceCell::new(),
             reuse_cache,
+            failed_packages: HashSet::new(),
         })
+    }
+
+    /// Names of packages whose download failed.
+    pub fn failed_packages(&self) -> &HashSet<String> {
+        &self.failed_packages
     }
 
     fn load_cache(&self) {
@@ -348,6 +357,7 @@ impl<'a> PackageSet<'a> {
 
         let mut handles = HashMap::new();
         let mut token_ctx = HashMap::new();
+        let mut token_to_pkg = HashMap::new();
         let package_caches = self.caches.get_mut().unwrap();
 
         // map download tmp files to their final names, keyed by curl token
@@ -374,6 +384,10 @@ impl<'a> PackageSet<'a> {
 
                 let mut easy = Easy::new();
                 easy.get(true)?;
+                easy.connect_timeout(Duration::from_secs(30))?;
+                easy.timeout(Duration::from_secs(600))?;
+                easy.low_speed_time(Duration::from_secs(30))?;
+                easy.low_speed_limit(1)?;
                 // Special hosts (FossHub handshake, SourceForge reshape,
                 // private GitHub releases) resolve to the real file URL
                 // before fetching. Cache keys and staged names
@@ -433,6 +447,7 @@ impl<'a> PackageSet<'a> {
                 let token = pidx * 100 + uidx;
                 let _ = easyhandle.set_token(token);
                 handles.insert(token, easyhandle);
+                token_to_pkg.insert(token, cache.package.name().to_owned());
 
                 filepaths.insert(token, (tmp.clone(), path.clone()));
 
@@ -466,11 +481,16 @@ impl<'a> PackageSet<'a> {
                         .map(|v| v.1.clone())
                         .or_else(|| Some("unknown".to_owned()))
                         .unwrap_or_else(|| "unknown".to_owned());
+                    let pkg_name = token_to_pkg
+                        .get(&token)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_owned());
                     if first_error.is_none() {
                         first_error = Some(crate::Error::Custom(format!(
                             "download failed for '{url}': {e}"
                         )));
                     }
+                    self.failed_packages.insert(pkg_name);
                     failed_tokens.insert(token);
                 }
             });

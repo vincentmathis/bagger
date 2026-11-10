@@ -753,6 +753,11 @@ pub fn install(session: &Session, queries: &[&str], options: &[SyncOption]) -> F
                 deferred = Some(e);
             }
         }
+        // Mark packages whose download failed so integrity/commit phases
+        // skip them instead of failing on missing cache files.
+        for name in one.failed_packages() {
+            failed.insert(name.clone());
+        }
 
         if let Some(tx) = session.emitter() {
             let _ = tx.send(Event::PackageDownloadDone);
